@@ -31,7 +31,7 @@ from tokenspeed_kernel.numerics.torch.attention.dsa import (
     torch_dsa_sparse_attention,
     torch_dsa_workspace_index_topk,
 )
-from utils import is_cdna4, is_cdna5
+from utils import assert_no_triton_compile, is_cdna4, is_cdna5
 
 if not (is_cdna4() or is_cdna5()):
     pytest.skip(
@@ -1831,27 +1831,33 @@ def test_dsa_decode_glm53_flash_graph_tracks_live_lengths(
 
     # Revisit a long row after short/empty rows to exercise shared-buffer reuse
     # and online-softmax state under the same captured launch.
-    for visible in (0, 1, 13, 63, 64, 65, 449, 526, 1961, 2048, 2051, 0, 65, 2051):
-        topk_slots.fill_(-1)
-        topk_lens.fill_(visible)
-        selected = torch.arange(visible, device=device, dtype=torch.int32)
-        for row in range(tokens):
-            topk_slots[row, :visible] = torch.roll(selected, row)
-        graph.replay()
-        torch.cuda.synchronize()
-        replayed = graph_out.clone()
-        invoke(eager_out)
-        torch.cuda.synchronize()
-        torch.testing.assert_close(replayed, eager_out, rtol=0.0, atol=0.0)
-        ref = torch_dsa_sparse_attention(
-            q,
-            kv_cache,
-            torch.empty((num_slots, 0), dtype=kv_cache.dtype, device=device),
-            topk_slots,
-            topk_lens,
-            softmax_scale,
-        )
-        torch.testing.assert_close(replayed.float(), ref.float(), rtol=8e-2, atol=8e-2)
+    with assert_no_triton_compile(
+        gfx950_dsa_backend._dsa_dense_mfma_kv_kernel,
+        gfx950_dsa_backend._dsa_dense_mfma_reduce_kernel,
+    ):
+        for visible in (0, 1, 13, 63, 64, 65, 449, 526, 1961, 2048, 2051, 0, 65, 2051):
+            topk_slots.fill_(-1)
+            topk_lens.fill_(visible)
+            selected = torch.arange(visible, device=device, dtype=torch.int32)
+            for row in range(tokens):
+                topk_slots[row, :visible] = torch.roll(selected, row)
+            graph.replay()
+            torch.cuda.synchronize()
+            replayed = graph_out.clone()
+            invoke(eager_out)
+            torch.cuda.synchronize()
+            torch.testing.assert_close(replayed, eager_out, rtol=0.0, atol=0.0)
+            ref = torch_dsa_sparse_attention(
+                q,
+                kv_cache,
+                torch.empty((num_slots, 0), dtype=kv_cache.dtype, device=device),
+                topk_slots,
+                topk_lens,
+                softmax_scale,
+            )
+            torch.testing.assert_close(
+                replayed.float(), ref.float(), rtol=8e-2, atol=8e-2
+            )
 
 
 @pytest.mark.skipif(
