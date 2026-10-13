@@ -1831,10 +1831,15 @@ def test_dsa_decode_glm53_flash_graph_tracks_live_lengths(
 
     # Revisit a long row after short/empty rows to exercise shared-buffer reuse
     # and online-softmax state under the same captured launch.
-    with assert_no_triton_compile(
-        gfx950_dsa_backend._dsa_dense_mfma_kv_kernel,
-        gfx950_dsa_backend._dsa_dense_mfma_reduce_kernel,
-    ):
+    compile_kernels = (
+        (
+            gfx950_dsa_backend._dsa_dense_mfma_kv_kernel,
+            gfx950_dsa_backend._dsa_dense_mfma_reduce_kernel,
+        )
+        if is_cdna4()
+        else ()
+    )
+    with assert_no_triton_compile(*compile_kernels):
         for visible in (0, 1, 13, 63, 64, 65, 449, 526, 1961, 2048, 2051, 0, 65, 2051):
             topk_slots.fill_(-1)
             topk_lens.fill_(visible)
