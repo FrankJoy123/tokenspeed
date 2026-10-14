@@ -219,6 +219,36 @@ Launches that leave most CUs idle with a long K walk (medium `M` with small
 picks the count and splits only within one wave of workgroups. The count is a
 runtime argument.
 
+#### FP32 block scales
+
+The shared matrix pipeline also supports canonical FP32 block-scaled E4M3
+through `gluon_mm_fp8_blockscale_gfx950`. Automatic selection uses this entry
+for BF16 output, K-contiguous values, N divisible by 16, and K greater than
+256 and divisible by 32. Other shapes and output types retain the existing
+Triton fallback. Native E8M0 registration and routing remain separate.
+
+Activation scales are `[M, ceil(K/128)]`; weight scales are
+`[ceil(N/128), ceil(K/128)]`, with explicit block size `[128, 128]`.
+Arbitrary scale strides are supported, and no persistent weight copy or
+scale rounding is needed. Each unscaled K128 matrix partial is multiplied
+by its row scale and then its weight-block scale before FP32 accumulation.
+The order matters when a product of scales would overflow or underflow.
+Partial K groups zero-fill invalid values; shifted output tiles store only
+their owned rows and columns. Scales are read again on graph replay.
+
+Small or narrow projections use compact masked tiles. Aligned small-row
+projections use a 64-square/four-wave value pipeline when every split has
+at least four K128 steps; underfilled medium grids use 128-square tiles,
+and filled aligned grids use 256-square tiles. The shape-derived split
+policy balances output work distribution against FP32 scratch and reduction
+cost. Split partials are always summed in split order. Small aligned
+projections use a 4×64/one-wave reducer; other shapes retain 16×256/four
+waves. The online operation uses the existing public Triton activation
+quantizer followed by this same GEMM path. Performance coverage is reported
+for the tracked GLM projections, not every shape in the supported envelope.
+Online quantization retains its existing requirement that K be divisible by
+128; prequantized inputs also cover partial final scale groups.
+
 ### gfx950 MXFP8 decode projection
 
 The gfx950 package provides the weight-bandwidth-bound MXFP8 projection used

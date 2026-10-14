@@ -649,6 +649,63 @@ if platform.is_amd:
     @register_kernel(
         "gemm",
         "mm",
+        name="gluon_mm_fp8_blockscale_gfx950",
+        solution="gluon",
+        capability=_GFX950_CAPABILITY,
+        signatures=frozenset(
+            {
+                format_signature(
+                    a=tensor_format("mxfp8", _FP8_DTYPE, scale=_FP8_BLOCK_SCALE),
+                    b=tensor_format("mxfp8", _FP8_DTYPE, scale=_FP8_BLOCK_SCALE),
+                )
+            }
+        ),
+        priority=Priority.SPECIALIZED,
+        traits={
+            "mnk_problem_filter": frozenset({_supports_mxfp8_gemm_shape}),
+            "a_inner_stride_one": frozenset({True}),
+            "b_inner_stride_one": frozenset({True}),
+            "block_scale_layout": frozenset({"canonical"}),
+            "out_dtype": frozenset({torch.bfloat16}),
+            "out_inner_stride_one": frozenset({True}),
+        },
+    )
+    def gluon_mm_fp8_blockscale_gfx950(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        A_scales: torch.Tensor | None,
+        B_scales: torch.Tensor | None,
+        out_dtype: torch.dtype,
+        *,
+        alpha: torch.Tensor | None,
+        block_size: list[int] | None,
+        out: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Multiply canonical E4M3 matrices with exact FP32 K128 block scales.
+
+        Activation scales have shape ``[M, ceil(K/128)]`` and weight scales
+        ``[ceil(N/128), ceil(K/128)]``. Scale strides are unrestricted; values
+        and the optional BF16 output require unit inner stride. The shared
+        AMD launcher also serves the separate native E8M0 registration.
+        """
+        if A_scales is None or B_scales is None or block_size != [128, 128]:
+            raise ValueError(
+                "gfx950 FP32 block-scale GEMM requires both scales and block_size=[128, 128]"
+            )
+        return _mm_mxfp8_impl(
+            A,
+            B,
+            A_scales,
+            B_scales,
+            out_dtype,
+            alpha=alpha,
+            block_size=block_size,
+            out=out,
+        )
+
+    @register_kernel(
+        "gemm",
+        "mm",
         name="gluon_mm_mxfp8_decode_gfx950",
         solution="gluon",
         capability=_GFX950_CAPABILITY,
@@ -1356,6 +1413,7 @@ __all__ = [
     "prepare_mxfp4_linear_mfma_weight",
     "gluon_mm_a16w16_prefill_gfx950",
     "gluon_mm_mxfp8_gfx950",
+    "gluon_mm_fp8_blockscale_gfx950",
     "gluon_mm_mxfp8_decode_gfx950",
     "gluon_mm_fp8_blockscale_gfx1250",
     "gluon_mm_mxfp8_ue8m0_gfx1250",
