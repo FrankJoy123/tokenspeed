@@ -1497,9 +1497,7 @@ def test_all_capture_stages_warm_the_execution_stream():
             for value in (3, 7):
                 x.fill_(value)
                 cap.replay()
-                torch.testing.assert_close(
-                    output, torch.full_like(x, value * 2)
-                )
+                torch.testing.assert_close(output, torch.full_like(x, value * 2))
 
 
 if __name__ == "__main__":
