@@ -92,7 +92,7 @@ class TestAutoBackendTopology:
         backend._trtllm_ar.supports_all_reduce_mhc_norm.assert_not_called()
         backend._nccl.all_reduce.assert_not_called()
         backend._rsag.all_reduce.assert_not_called()
-        backend._triton_ar.all_reduce.assert_not_called()
+        backend._iris.all_reduce.assert_not_called()
 
     def test_group_spans_nodes(self, backend):
         assert not backend._group_spans_nodes((0, 1, 2, 3))
