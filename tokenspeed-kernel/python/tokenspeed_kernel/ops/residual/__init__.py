@@ -1013,13 +1013,13 @@ __all__ = [
     "mhc_apply_pre",
     "mhc_fused_hc",
     "mhc_mixes",
-    "try_mhc_shifted_post_pre_norm",
     "mhc_post",
     "mhc_pre",
     "pad_gated_residual_projection_weight",
     "post_norm_residual_pre_norm",
     "post_norm_residual_pre_norm_bf16",
     "residual_gate_coefficients",
+    "try_mhc_shifted_post_pre_norm",
 ]
 
 
