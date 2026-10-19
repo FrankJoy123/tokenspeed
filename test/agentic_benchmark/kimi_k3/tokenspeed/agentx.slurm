@@ -193,7 +193,7 @@ wait_for_ready() {
     curl --fail --silent --max-time 10 "$BASE_URL/v1/models" > "$RUN_ROOT/models.json"
     if [[ "$SERVER_METRICS" = true ]]; then
         export AIPERF_SERVER_METRICS_URLS="http://${HEAD}:${METRICS_PORT}/metrics"
-        "$CLIENT_PYTHON" "$SCRIPT_DIR/agentx_protocol.py" metrics-endpoint
+        curl --fail --silent --show-error --max-time 10 "$AIPERF_SERVER_METRICS_URLS" > "$RUN_ROOT/server-metrics-readiness.txt"
     fi
 }
 

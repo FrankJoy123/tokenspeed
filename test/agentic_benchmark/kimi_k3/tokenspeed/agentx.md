@@ -35,10 +35,11 @@ Keep client sources, resolved dependencies, model checkpoints and the trace
 cache unchanged across comparisons. The protocol selects either the public
 `semianalysisai/cc-traces-weka-062126` corpus or its `-256k` variant.
 Credentials may be needed. Prepare a dedicated HF cache and pin its `main` ref
-before running: the native public loader resolves `main`, so merely downloading
-a revision does not pin subsequent replay. The launcher verifies the ref and
-snapshot, then runs offline. Pre-download the tokenizer and all native loader
-assets into this same cache as well.
+in the external experiment setup: the native public loader resolves `main`, so
+merely downloading a revision does not pin subsequent replay. The launcher does
+not verify dataset revisions or force offline mode. For a frozen offline run,
+pre-download the tokenizer and all native loader assets into this same cache,
+then export `HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1` from the experiment driver.
 
 ```bash
 export HF_HUB_CACHE="$CLIENT_ROOT/hf-cache"
@@ -135,14 +136,13 @@ records the two physical nodes separately. Native metric values and JSON are
 not rewritten. These are local reproductions, not official InferenceX results.
 Power collection is disabled. Server counters are explicitly selected with
 `SERVER_METRICS=true|false`; unavailable values are not zero. With metrics enabled,
-the launcher enables the engine endpoint and checks the required Prometheus
-counters after readiness. Replay must export a parseable
-`aiperf_artifacts/server_metrics_export.json` with token activity from that endpoint.
-A missing, malformed, empty or wrong-endpoint export fails the run. Synthetic runs
-also require measured `1 + accepted_draft_tokens / draft_steps` within 0.1 of the
-AL target. The metric window may include warmup; this is a configuration check,
-not a new performance metric. Raw native metrics remain unchanged. Optional
-upstream backend adapters determine which counters also appear in native summaries.
+the launcher enables the engine endpoint and checks HTTP reachability after
+readiness, retaining the response in `server-metrics-readiness.txt`. Replay must
+produce a nonempty `aiperf_artifacts/server_metrics_export.json`; a missing or empty
+file fails the run. Native replay validation remains in place. The launcher does
+not add counter-content checks, measured-AL thresholds or a custom acceptance
+policy. Those belong to the external experiment auditor. Optional upstream
+backend adapters determine which counters appear in native summaries.
 
 Full experiment auditing, version/hash verification, grace-timeout diagnosis,
 cross-run acceptance policy and spreadsheet updates belong to the external experiment
@@ -170,20 +170,19 @@ python -m unittest discover -s test/agentic_benchmark/tests \
 | `SPEC_DECODING`, `SPEC_STEPS` | `eagle3` or `dspark`, and explicit positive draft steps |
 | `SERVER_METRICS` | `true` requires a separate `METRICS_PORT`; `false` disables scraping explicitly |
 | `INFERENCEX_WORKSPACE` | Directory containing `benchmarks/benchmark_lib.sh`; old checkouts used `inferencex-e2e/` |
-| `TRACE_REVISION`, `HF_HUB_CACHE` | Prepared offline dataset snapshot; the local `refs/main` must match |
 
 Synthetic acceptance adds `--sampling-backend greedy` and
 `--synthetic-acceptance-length`. Natural acceptance does not force a sampling
 backend. Fixed-AL measurements describe controlled execution efficiency, not
-natural speculative acceptance performance. With metrics disabled, the target is
-recorded but measured AL is unavailable; do not call it verified.
+natural speculative acceptance performance. The launcher checks only that the
+target is numeric and between 1 and `SPEC_STEPS + 1`. Even when metrics are
+enabled, an external auditor must verify measured AL before calling it verified.
 
-Each point saves `protocol.json` with the effective protocol, trace revision/hash,
-client Git commits and dirty flags, precision, speculation, AL target and replay
-settings. `server-command.txt` retains explicit model/draft paths and overrides.
-These records expose configuration differences; they do not prove checkpoint
-identity or validate generation quality. Prepare frozen checkpoints and tokenizer
-snapshots externally. Reusing an existing output root is rejected.
+`server-command.txt` retains the model/draft paths and effective server
+arguments. Trace hashes, revision checks, version manifests and measured-AL
+acceptance checks belong to the external experiment tooling, not this launcher.
+Freeze checkpoints, tokenizer, trace and client versions there before comparing
+runs. Reusing an existing output root is rejected.
 
 Interpret native **output** throughput separately from total (input + output)
 throughput. For eight GPUs, output tok/min/GPU = system output tok/s × 60 / 8.
