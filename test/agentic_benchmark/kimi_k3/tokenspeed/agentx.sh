@@ -39,7 +39,25 @@ validate_agentx_config() {
         DURATION BENCHMARK_GRACE_SECONDS REQUEST_TIMEOUT_SECONDS CLIENT_SEED \
         AIPERF_WARMUP_REQUESTS_PER_LANE AGENTIC_WARMUP_GRACE_PERIOD \
         AIPERF_TRACE_IDLE_GAP_CAP_SECONDS AIPERF_FAILED_REQUEST_THRESHOLD \
-        AIPERF_EXTRA_INPUTS AIPERF_UNSAFE_OVERRIDE || return "$?"
+        AIPERF_EXTRA_INPUTS AIPERF_UNSAFE_OVERRIDE AGENTX_PROTOCOL ACCEPTANCE_MODE \
+        SPEC_DECODING SPEC_STEPS PRECISION MAX_MODEL_LEN MAX_NUM_SEQS SERVER_METRICS \
+        INFERENCEX_WORKSPACE HF_HUB_CACHE TRACE_REVISION || return "$?"
+    case "$AGENTX_PROTOCOL" in
+        weka-062126-256k) export WEKA_LOADER_OVERRIDE=semianalysis_cc_traces_weka_062126_256k ;;
+        weka-062126-full) export WEKA_LOADER_OVERRIDE=semianalysis_cc_traces_weka_062126 ;;
+        *) echo "Unknown AGENTX_PROTOCOL: $AGENTX_PROTOCOL" >&2; return 2 ;;
+    esac
+    case "$SERVER_METRICS" in
+        true) validate_agentx_values METRICS_PORT || return "$?" ;;
+        false) ;;
+        *) echo "SERVER_METRICS must be true or false" >&2; return 2 ;;
+    esac
+    case "$ACCEPTANCE_MODE" in
+        natural) [[ -z "${AL_TARGET:-}" ]] || { echo "AL_TARGET must be empty for natural acceptance" >&2; return 2; } ;;
+        synthetic) validate_agentx_values AL_TARGET || return "$?" ;;
+        *) echo "ACCEPTANCE_MODE must be natural or synthetic" >&2; return 2 ;;
+    esac
+    "$CLIENT_PYTHON" "$(dirname "${BASH_SOURCE[0]}")/agentx_protocol.py" validate || return 2
     case "$AIPERF_UNSAFE_OVERRIDE" in
         true|false) ;;
         *) echo "AIPERF_UNSAFE_OVERRIDE must be true or false; got '$AIPERF_UNSAFE_OVERRIDE'" >&2; return 2 ;;
@@ -51,30 +69,40 @@ if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then return 0; fi
 validate_agentx_config
 validate_agentx_values RESULT_DIR EP_SIZE AIPERF_SERVER_URL
 mkdir "$RESULT_DIR"
-export INFMAX_CONTAINER_WORKSPACE="$CLIENT_ROOT/inferencex/inferencex-e2e"
+export INFMAX_CONTAINER_WORKSPACE="$INFERENCEX_WORKSPACE"
 export AIPERF_RUNTIME_DIR="$CLIENT_ROOT"
 export PYTHONPATH="$INFMAX_CONTAINER_WORKSPACE"
 export MODEL="$MODEL_NAME" SERVED_MODEL_NAME="$MODEL_NAME" MODEL_PREFIX=kimik3
 export PORT="$API_PORT" CONC="$CONCURRENCY"
-export FRAMEWORK=tokenspeed RUNNER_TYPE=gb300 PRECISION=nvfp4 SPEC_DECODING=eagle3
+export FRAMEWORK=tokenspeed RUNNER_TYPE=gb300 PRECISION SPEC_DECODING
 export TP=8 PP_SIZE=1 PCP_SIZE=1 DCP_SIZE=1 IS_MULTINODE=true DISAGG=false KV_OFFLOADING=none
 export AIPERF_PYTHON_VERSION=3.11 AIPERF_EXPERIMENTAL_FAST=0
 export AIPERF_USE_DYNAMO_CONV_AWARE_ROUTING=0
 export AIPERF_HTTP_X_DYNAMO_SESSION_ID_FROM_CORRELATION_ID=false
 export AIPERF_DYNAMO_SESSION_TIMEOUT_SECONDS=3600
 export AIPERF_LIVE_FAILED_REQUEST_THRESHOLD="$AIPERF_FAILED_REQUEST_THRESHOLD"
-export AIPERF_SERVER_METRICS_URLS= AIPERF_REQUIRED_SERVER_METRIC_PREFIX=
+if [[ "$SERVER_METRICS" = true ]]; then
+    validate_agentx_values AIPERF_SERVER_METRICS_URLS
+    export AIPERF_REQUIRED_SERVER_METRIC_PREFIX=tokenspeed:
+else
+    export AIPERF_SERVER_METRICS_URLS= AIPERF_REQUIRED_SERVER_METRIC_PREFIX=
+fi
 export ENABLE_AGENTX_POWER=0 REQUIRE_POWER=0 EVAL_ONLY=false
-export WEKA_LOADER_OVERRIDE=semianalysis_cc_traces_weka_062126_256k
+export HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1
 export AGENTIC_OUTPUT_DIR="$RESULT_DIR" RESULT_FILENAME=inferencex_result
 export AIPERF_DATASET_WEKA_PARALLEL_WORKERS=2 TOKENIZERS_PARALLELISM=false
 export OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4
+export AGENTX_CONTEXT_LENGTH="$MAX_MODEL_LEN"
 source "$INFMAX_CONTAINER_WORKSPACE/benchmarks/benchmark_lib.sh"
 AIPERF_DEPS_READY=1
 resolve_trace_source
+# The native library clears inherited context; restore the explicit protocol cap.
+export MAX_MODEL_LEN
+MAX_MODEL_LEN="$AGENTX_CONTEXT_LENGTH"
 MODEL="$TOKENIZER_PATH" build_replay_cmd "$RESULT_DIR"
 REPLAY_CMD+=" --benchmark-grace-period $BENCHMARK_GRACE_SECONDS --request-timeout-seconds $REQUEST_TIMEOUT_SECONDS --random-seed $CLIENT_SEED"
-REPLAY_CMD+=" --no-server-metrics"
+if [[ "$SERVER_METRICS" = false ]]; then REPLAY_CMD+=" --no-server-metrics"; fi
+"$CLIENT_PYTHON" "$(dirname "${BASH_SOURCE[0]}")/agentx_protocol.py" manifest
 
 write_agentic_result_json() {
     # Upstream's multi-node report shape describes PD disaggregation. These two
@@ -82,6 +110,9 @@ write_agentic_result_json() {
     # Keep physical topology separately without rewriting native metrics or JSON.
     printf '%s\n' '{"physical_nodes":2,"gpus_per_node":4,"num_gpus":8,"deployment":"aggregate","official_inferencex_result":false}' \
         > "$RESULT_DIR/deployment.json"
+    if [[ "$SERVER_METRICS" = true ]]; then
+        "$CLIENT_PYTHON" "$(dirname "${BASH_SOURCE[0]}")/agentx_protocol.py" metrics-export
+    fi
     IS_MULTINODE=false "$AIPERF_PYTHON" -m infx.results.agentic.process_agentic_result
 }
 run_agentic_replay_and_write_outputs "$RESULT_DIR"

@@ -48,6 +48,7 @@ validate_config() {
     : "${MODEL_NAME:?served model name}"
     : "${TOKENIZER_PATH:?pinned tokenizer path or ID}"
     : "${CLIENT_ROOT:?prepared InferenceX checkout and venv directory}"
+    : "${INFERENCEX_WORKSPACE:?directory containing benchmarks/benchmark_lib.sh}"
     : "${CPUS_PER_TASK:?CPU allocation per node}"
     : "${CONCURRENCY:?root session concurrency}"
     : "${API_PORT:?server API port}"
@@ -63,7 +64,7 @@ validate_config() {
     done
     SCRIPT_DIR="$SOURCE_ROOT/test/agentic_benchmark/kimi_k3/tokenspeed"
     [[ -x "$CLIENT_PYTHON" ]] || { echo "Client Python is not executable: $CLIENT_PYTHON" >&2; exit 2; }
-    [[ -f "$CLIENT_ROOT/inferencex/inferencex-e2e/benchmarks/benchmark_lib.sh" ]] || { echo "Missing InferenceX benchmark_lib.sh under $CLIENT_ROOT" >&2; exit 2; }
+    [[ -f "$INFERENCEX_WORKSPACE/benchmarks/benchmark_lib.sh" ]] || { echo "Missing InferenceX benchmark_lib.sh under $INFERENCEX_WORKSPACE" >&2; exit 2; }
     [[ -f "$SCRIPT_DIR/agentx.sh" ]] || { echo "Missing client script: $SCRIPT_DIR/agentx.sh" >&2; exit 2; }
     source "$SCRIPT_DIR/agentx.sh"
     validate_agentx_config
@@ -190,6 +191,10 @@ wait_for_ready() {
     done
     printf '%s\n' "$BASE_URL" > "$RUN_ROOT/endpoint.txt"
     curl --fail --silent --max-time 10 "$BASE_URL/v1/models" > "$RUN_ROOT/models.json"
+    if [[ "$SERVER_METRICS" = true ]]; then
+        export AIPERF_SERVER_METRICS_URLS="http://${HEAD}:${METRICS_PORT}/metrics"
+        "$CLIENT_PYTHON" "$SCRIPT_DIR/agentx_protocol.py" metrics-endpoint
+    fi
 }
 
 run_benchmark() {
@@ -211,6 +216,22 @@ run_benchmark() {
 
 # Keep the configuration sweep beside the launch lifecycle, like agentic_bench.slurm.
 validate_config
+# These settings have a single owner: the explicit protocol, not trailing CLI flags.
+for argument in "$@"; do
+    case "${argument%%=*}" in
+        --max-model-len|--max-num-seqs|--speculative-algorithm|--speculative-num-steps|--speculative-num-draft-tokens|--synthetic-acceptance-length|--sampling-backend|--enable-metrics|--metrics-host|--metrics-port)
+            echo "Set protocol variables instead of overriding $argument" >&2; exit 2 ;;
+    esac
+done
+PROTOCOL_ARGS=(--max-model-len "$MAX_MODEL_LEN" --max-num-seqs "$MAX_NUM_SEQS"
+    --speculative-algorithm "${SPEC_DECODING^^}" --speculative-num-steps "$SPEC_STEPS"
+    --speculative-num-draft-tokens "$((SPEC_STEPS + 1))")
+if [[ "$ACCEPTANCE_MODE" = synthetic ]]; then
+    PROTOCOL_ARGS+=(--sampling-backend greedy --synthetic-acceptance-length "$AL_TARGET")
+fi
+if [[ "$SERVER_METRICS" = true ]]; then
+    PROTOCOL_ARGS+=(--enable-metrics --metrics-host 0.0.0.0 --metrics-port "$METRICS_PORT")
+fi
 SWEEP_ROOT=$RUN_ROOT
 mkdir "$SWEEP_ROOT"
 for CONFIG in "${CONFIGS[@]}"; do
@@ -220,10 +241,10 @@ for CONFIG in "${CONFIGS[@]}"; do
     trap finish EXIT
     trap 'CLIENT_SIGNAL=INT; exit 130' INT
     trap 'CLIENT_SIGNAL=TERM; exit 143' TERM
-    prepare_run "$@" --port "$API_PORT"
+    prepare_run "$@" "${PROTOCOL_ARGS[@]}" --port "$API_PORT"
     setup_slurm
     check_resources
-    launch_server "$@" --port "$API_PORT"
+    launch_server "$@" "${PROTOCOL_ARGS[@]}" --port "$API_PORT"
     wait_for_ready
     run_benchmark
     stop_server

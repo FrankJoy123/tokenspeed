@@ -22,8 +22,10 @@
 
 """CPU coverage for the K3 Slurm lifecycle and native AgentX protocol."""
 
+import io
 import json
 import os
+import runpy
 import shutil
 import signal
 import subprocess
@@ -31,6 +33,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "kimi_k3/tokenspeed"
 
@@ -80,6 +83,10 @@ elif name=='curl':
     if str(urlparse(args[-1]).port)!=(root/'ready').read_text():sys.exit(7)
     if args[-1].endswith('/v1/models'):print(json.dumps({'data':[{'id':'kimi-k3'}]}))
 elif name=='python':
+    if args and args[0].endswith('agentx_protocol.py'):
+        if args[-1]=='metrics-endpoint':
+            sys.exit(2 if os.environ.get('FAKE_BAD_ENDPOINT') else 0)
+        os.execv(sys.executable,[sys.executable,*args])
     assert args == ['-m', 'infx.results.agentic.process_agentic_result']
     assert os.environ['IS_MULTINODE']=='false'
     assert os.environ['TP']=='8'
@@ -111,8 +118,21 @@ from pathlib import Path
 keys = ['EP_SIZE', 'DURATION', 'CONCURRENCY', 'AIPERF_WARMUP_REQUESTS_PER_LANE', 'AIPERF_EXTRA_INPUTS']
 result = {key: os.environ[key] for key in keys}
 result['command'] = os.environ['REPLAY_CMD']
+result['loader'] = os.environ['WEKA_LOADER_OVERRIDE']
+result['context'] = os.environ['MAX_MODEL_LEN']
 (Path(os.environ['RESULT_DIR'])/'captured.json').write_text(json.dumps(result))
 PYTHON
+    if [[ "$SERVER_METRICS" = true && "${FAKE_MISSING_METRICS:-}" != 1 ]]; then
+        python3 - <<'METRICS'
+import json, os
+from pathlib import Path
+metrics = {}
+for name, total in [('prompt_tokens',10000),('generation_tokens',370),('spec_decode_num_drafts',100),('spec_decode_num_accepted_tokens',270)]:
+    metrics['tokenspeed:'+name]={'series':[{'endpoint_url':os.environ['AIPERF_SERVER_METRICS_URLS'],'stats':{'total':total}}]}
+p=Path(os.environ['RESULT_DIR'])/'aiperf_artifacts';p.mkdir()
+(p/'server_metrics_export.json').write_text(json.dumps({'metrics':metrics}))
+METRICS
+    fi
     write_agentic_result_json "$RESULT_DIR"
 }
 """
@@ -151,12 +171,52 @@ class SlurmTests(unittest.TestCase):
         )
         library.parent.mkdir(parents=True)
         library.write_text(NATIVE_STUB)
+        revision = "a" * 40
+        cache = self.root / "hf-cache"
+        for suffix in ("", "-256k"):
+            repo = cache / ("datasets--semianalysisai--cc-traces-weka-062126" + suffix)
+            (repo / "refs").mkdir(parents=True)
+            (repo / "refs/main").write_text(revision)
+            snapshot = repo / "snapshots" / revision
+            snapshot.mkdir(parents=True)
+            (snapshot / "traces.jsonl").write_text('{"trace":1}\n')
+        for repo in (self.root / "native/inferencex", self.root / "native/aiperf"):
+            repo.mkdir(exist_ok=True)
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repo),
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "--allow-empty",
+                    "-qm",
+                    "fixture",
+                ],
+                check=True,
+            )
         self.env = {
             **os.environ,
             "PATH": f'{tools}:{os.environ["PATH"]}',
             "FAKE_ROOT": str(self.root),
             "SOURCE_ROOT": str(source),
             "CLIENT_ROOT": str(self.root / "native"),
+            "INFERENCEX_WORKSPACE": str(library.parent.parent),
+            "AGENTX_PROTOCOL": "weka-062126-256k",
+            "HF_HUB_CACHE": str(cache),
+            "TRACE_REVISION": revision,
+            "ACCEPTANCE_MODE": "natural",
+            "AL_TARGET": "",
+            "SPEC_DECODING": "eagle3",
+            "SPEC_STEPS": "3",
+            "PRECISION": "nvfp4",
+            "MAX_MODEL_LEN": "262144",
+            "MAX_NUM_SEQS": "16",
+            "SERVER_METRICS": "false",
             "CLIENT_PYTHON": str(python),
             "SLURM_JOB_ID": "123",
             "CONFIG_NAMES": "attn_tp8_moe_tp8 attn_tp8_moe_ep8",
@@ -237,15 +297,9 @@ class SlurmTests(unittest.TestCase):
         ]
         self.assertEqual(len(commands), 2)
         for args in commands:
-            self.assertEqual(
-                args[-4:],
-                [
-                    "--model",
-                    "/weights/model with spaces",
-                    "--port",
-                    self.env["API_PORT"],
-                ],
-            )
+            model_index = max(i for i, arg in enumerate(args) if arg == "--model")
+            self.assertEqual(args[model_index + 1], "/weights/model with spaces")
+            self.assertEqual(args[-2:], ["--port", self.env["API_PORT"]])
         self.assertFalse((self.root / "cancelled").exists())
 
     def test_client_inputs_fail_before_startup(self):
@@ -323,9 +377,13 @@ class SlurmTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         args = json.loads((self.root / "server-args.jsonl").read_text())
-        self.assertEqual(args[-4:], ["--port", "9000", "--port", "18048"])
+        self.assertIn(
+            "9000", [args[i + 1] for i, arg in enumerate(args) if arg == "--port"]
+        )
+        self.assertEqual(args[-2:], ["--port", "18048"])
         command = (self.root / "runs/attn_tp8_moe_tp8/server-command.txt").read_text()
-        self.assertTrue(command.rstrip().endswith("--port 9000 --port 18048"))
+        self.assertIn("--port 9000", command)
+        self.assertTrue(command.rstrip().endswith("--port 18048"))
 
     def test_preflight_failure_stops_before_server_and_next_config(self):
         self.env["FAKE_FAIL"] = "preflight"
@@ -391,6 +449,72 @@ class SlurmTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 2, result.stderr)
                 self.assertFalse((self.root / "result").exists())
 
+    def test_full_protocol_synthetic_metrics_and_manifest(self):
+        self.env.update(
+            CONFIG_NAMES="attn_tp8_moe_tp8",
+            AGENTX_PROTOCOL="weka-062126-full",
+            MAX_MODEL_LEN="1048576",
+            MAX_NUM_SEQS="2",
+            ACCEPTANCE_MODE="synthetic",
+            AL_TARGET="3.7",
+            SERVER_METRICS="true",
+            METRICS_PORT="18090",
+            PRECISION="fp4",
+        )
+        process = self.launch()
+        stdout, stderr = process.communicate(timeout=25)
+        self.assertEqual(process.returncode, 0, stdout + stderr)
+        root = self.root / "runs/attn_tp8_moe_tp8/client"
+        manifest = json.loads((root / "protocol.json").read_text())
+        self.assertEqual(manifest["al_target"], 3.7)
+        self.assertEqual(manifest["MAX_NUM_SEQS"], "2")
+        self.assertEqual(
+            manifest["WEKA_LOADER_OVERRIDE"], "semianalysis_cc_traces_weka_062126"
+        )
+        self.assertEqual(manifest["PRECISION"], "fp4")
+        validation = json.loads((root / "server-metrics-validation.json").read_text())
+        self.assertEqual(validation["measured_acceptance_length"], 3.7)
+        args = json.loads((self.root / "server-args.jsonl").read_text().splitlines()[0])
+        self.assertEqual(args[args.index("--synthetic-acceptance-length") + 1], "3.7")
+        self.assertIn("--enable-metrics", args)
+        captured = json.loads((root / "captured.json").read_text())
+        self.assertEqual(captured["context"], "1048576")
+        self.assertNotIn("--no-server-metrics", captured["command"])
+
+    def test_required_metrics_failure_stops_run(self):
+        for missing, bad_endpoint in (("1", ""), ("", "1")):
+            with self.subTest(missing=missing, bad_endpoint=bad_endpoint):
+                self.env.update(
+                    CONFIG_NAMES="attn_tp8_moe_tp8",
+                    SERVER_METRICS="true",
+                    METRICS_PORT="18090",
+                    FAKE_MISSING_METRICS=missing,
+                    FAKE_BAD_ENDPOINT=bad_endpoint,
+                    RUN_ROOT=str(self.root / ("missing" if missing else "endpoint")),
+                )
+                process = self.launch()
+                stdout, stderr = process.communicate(timeout=25)
+                self.assertNotEqual(process.returncode, 0, stdout + stderr)
+                self.assertFalse((self.root / "ready").exists())
+
+    def test_protocol_mismatch_fails_before_gpu_startup(self):
+        for override in (
+            {"AL_TARGET": "nan", "ACCEPTANCE_MODE": "synthetic"},
+            {"AGENTX_PROTOCOL": "weka-062126-full"},
+            {"TRACE_REVISION": "b" * 40},
+            {"METRICS_PORT": "8000", "SERVER_METRICS": "true"},
+        ):
+            with self.subTest(override=override):
+                result = subprocess.run(
+                    ["bash", str(self.launcher)],
+                    env={**self.env, **override},
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertFalse((self.root / "stage").exists())
+
     def test_interrupt_before_preflight_step_registration(self):
         self.env["FAKE_BLOCK"] = "preflight"
         process = self.launch()
@@ -426,6 +550,69 @@ class SlurmTests(unittest.TestCase):
             if process.poll() is None:
                 process.kill()
                 process.communicate()
+
+
+class MetricsValidationTests(unittest.TestCase):
+    def test_endpoint_requires_declared_metrics(self):
+        helper = runpy.run_path(str(SCRIPTS / "agentx_protocol.py"))
+        env = {
+            "ACCEPTANCE_MODE": "natural",
+            "AIPERF_SERVER_METRICS_URLS": "http://server:8010/metrics",
+        }
+        for body, valid in (
+            (b"<html>ready</html>", False),
+            (
+                b"# TYPE tokenspeed:prompt_tokens counter\n# TYPE tokenspeed:generation_tokens counter\n",
+                True,
+            ),
+        ):
+            with patch("urllib.request.urlopen", return_value=io.BytesIO(body)):
+                if valid:
+                    helper["check_endpoint"](env)
+                else:
+                    with self.assertRaises(ValueError):
+                        helper["check_endpoint"](env)
+
+    def test_export_rejects_wrong_endpoint_and_acceptance_length(self):
+        helper = runpy.run_path(str(SCRIPTS / "agentx_protocol.py"))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "aiperf_artifacts").mkdir()
+            env = {
+                "ACCEPTANCE_MODE": "synthetic",
+                "AL_TARGET": "3.7",
+                "AIPERF_SERVER_METRICS_URLS": "http://server:8010/metrics",
+                "RESULT_DIR": directory,
+            }
+            for endpoint, accepted, valid in (
+                ("http://wrong:8010/metrics", 270, False),
+                (env["AIPERF_SERVER_METRICS_URLS"], 100, False),
+                (env["AIPERF_SERVER_METRICS_URLS"], 270, True),
+            ):
+                metrics = {
+                    name: {
+                        "series": [
+                            {"endpoint_url": endpoint, "stats": {"total": total}}
+                        ]
+                    }
+                    for name, total in zip(
+                        helper["required_metrics"](env),
+                        (10000, 370, 100, accepted),
+                        strict=True,
+                    )
+                }
+                (root / "aiperf_artifacts/server_metrics_export.json").write_text(
+                    json.dumps({"metrics": metrics})
+                )
+                if valid:
+                    helper["check_export"](env)
+                    report = json.loads(
+                        (root / "server-metrics-validation.json").read_text()
+                    )
+                    self.assertAlmostEqual(report["measured_acceptance_length"], 3.7)
+                else:
+                    with self.assertRaises(ValueError):
+                        helper["check_export"](env)
 
 
 if __name__ == "__main__":
