@@ -533,22 +533,30 @@ from 17 rows, above the decode projection's range.
 #### Contract
 
 - The operation computes `A @ B.T` from row-major E4M3 matrices shaped `[M, K]`
-  and `[N, K]` with raw UE8M0 scales shaped `[M, ceil(K/32)]` and
-  `[N, ceil(K/32)]` and an explicit `[1, 32]` scale block. All inner strides
-  must be one.
-- Output is BF16; `alpha` is not supported. Automatic selection requires
-  `M >= 17`, `N` divisible by 16, and `K` divisible by 32.
+  and `[N, K]` with raw UE8M0 scales shaped `[M, K/32]` and `[N, K/32]` and
+  an explicit `[1, 32]` scale block. All inner strides must be one.
+- `N` must be divisible by 16 and `K` by 32. Output is BF16; `alpha` is not
+  supported. Automatic selection requires `M >= 17`.
 
 #### Algorithm
 
-TDM stages A, B, and both scale planes into padded LDS slots that feed
-`16 x 16 x 128` scaled WMMA directly. Up to 128 rows, a 32-, 64-, or 128-row
-tile keeps 32 columns and three buffers below 16 K tiles; otherwise it uses 64
-columns and splits K by the first of 10, 8, 5, 4, or 2 that divides the K tiles
-and fits the CUs. Larger batches use `128 x 128` tiles, `128 x 256` tiles when
-those alone give at least 384 tiles, or `128 x 64` tiles split in two when
-there are fewer than 64 `128 x 128` tiles and at least 16 K tiles. Split
-partials are FP32 and use the dense BF16 GEMM's reduction.
+Every shape runs one of two clustered eight-wave warp-pipeline kernels adapted
+from the MXFP8 variants of Triton's CDNA5 warp-pipeline GEMM example. Each
+program is a cluster of CTAs that share A and B panels and their raw scale
+planes through TDM multicast, so one launch covers the call. Descriptors are
+bounded at the real M, N, and K. Ragged edges zero-fill on load and clip on
+store, and K advances shrink the bounds so tiles past K zero-fill.
+
+- `gluon_mm_mxfp8_ue8m0_largem_bk256_gfx1250` computes `256 x 256` tiles in
+  2 x 2 clusters and 256-wide K steps, rounding K up to an even count of at
+  least four steps. It takes batches from 512 rows when N is divisible by 256
+  and its tiles exceed half the CUs.
+- `gluon_mm_mxfp8_ue8m0_largem_bk512_gfx1250` takes the rest in 512-wide K
+  steps, at least two. It uses `64 x 64` tiles while those fit one wave of
+  CUs, then `128 x 128` tiles, in 2 x 2 clusters. The 128-row tiles run
+  unclustered up to 128 rows, where a cluster's second tile row would be
+  empty, and for two K steps. Up to 32 rows, the 64-row tiles also run
+  unclustered when they fill fewer than half the CUs.
 
 ## Attention
 

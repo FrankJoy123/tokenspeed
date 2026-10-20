@@ -31,13 +31,12 @@ if not is_cdna5():
     pytest.skip("AMD CDNA5 is required", allow_module_level=True)
 
 from tokenspeed_kernel.ops.gemm import mm  # noqa: E402
-from tokenspeed_kernel_amd.ops.gfx1250.gemm.fp16.mm import (  # noqa: E402
-    gluon_wmma_dense_reduce_gfx1250,
+from tokenspeed_kernel_amd.ops.gfx1250.gemm.mxfp8 import (  # noqa: E402
+    cluster_mm as cluster_mod,
 )
 from tokenspeed_kernel_amd.ops.gfx1250.gemm.mxfp8 import (  # noqa: E402
     launch_gluon_mm_mxfp8_ue8m0_largem_gfx1250,
 )
-from tokenspeed_kernel_amd.ops.gfx1250.gemm.mxfp8 import mm as largem_mod  # noqa: E402
 
 # Inputs dequantize exactly; leave a small margin above BF16's worst-case
 # relative rounding error (2**-8) when comparing against FP32 references.
@@ -72,7 +71,15 @@ def _run(a, b, a_scales, b_scales) -> torch.Tensor:
 @pytest.mark.parametrize("m", [17, 32, 33, 80, 96, 128, 129, 848, 2048, 8192])
 @pytest.mark.parametrize(
     "n,k",
-    [(1792, 5120), (4096, 1280), (8192, 1280), (5120, 2048), (1152, 5120), (5120, 576)],
+    [
+        (1792, 5120),
+        (4096, 1280),
+        (8192, 1280),
+        (5120, 2048),
+        (1152, 5120),
+        (5120, 576),
+        (25600, 6144),
+    ],
 )
 def test_mxfp8_largem_matches_dequantized_reference(m: int, n: int, k: int) -> None:
     operands = _operands(m, n, k, seed=m + n + k)
@@ -83,7 +90,45 @@ def test_mxfp8_largem_matches_dequantized_reference(m: int, n: int, k: int) -> N
     )
 
 
-@pytest.mark.parametrize("m", [24, 96])
+@pytest.mark.parametrize("m", [17, 32, 96, 128])
+@pytest.mark.parametrize("n,k", [(5120, 15360), (1536, 5120)])
+def test_mxfp8_largem_decode_shapes_match_dequantized_reference(
+    m: int, n: int, k: int
+) -> None:
+    operands = _operands(m, n, k, seed=m + n + k)
+    torch.testing.assert_close(
+        _run(*operands).float(),
+        _reference(*operands),
+        atol=_BF16_ATOL,
+        rtol=_BF16_RTOL,
+    )
+
+
+@pytest.mark.parametrize(
+    "tile,cluster", [(64, 1), (64, 2), (128, 1), (128, 2), (256, 2)]
+)
+@pytest.mark.parametrize("n,k", [(8192, 1280), (5120, 576), (1792, 5120), (1792, 512)])
+def test_mxfp8_cluster_kernels_match_dequantized_reference(
+    tile: int, cluster: int, n: int, k: int
+) -> None:
+    # 1000 rows leave a ragged last cluster; K 1280 and 576 end on a partial
+    # tile, both kernels walk K 512 past K, and the BK256 walk rounds K 1280
+    # up past K.
+    m = 1000
+    a, b, a_scales, b_scales = _operands(m, n, k, seed=tile + cluster + n + k)
+    out = torch.full((m, n), float("nan"), device="cuda", dtype=torch.bfloat16)
+    cluster_mod.launch_cluster_mm(
+        a, b, a_scales, b_scales, out, tile=tile, cluster=cluster
+    )
+    torch.testing.assert_close(
+        out.float(),
+        _reference(a, b, a_scales, b_scales),
+        atol=_BF16_ATOL,
+        rtol=_BF16_RTOL,
+    )
+
+
+@pytest.mark.parametrize("m", [24, 96, 4096])
 def test_mxfp8_largem_cuda_graph_replay(m: int) -> None:
     n, k = 1792, 5120
     a, b, a_scales, b_scales = _operands(m, n, k, seed=7)
@@ -111,10 +156,11 @@ def test_mxfp8_largem_varying_rows_reuse_compiled_kernels() -> None:
         a, _, a_scales, _ = _operands(m, 16, k, seed=m)
         _run(a, b, a_scales, b_scales)
 
-    for m in (17, 24, 32, 48, 64, 96, 128, 512, 1024, 2048, 4096):
+    for m in (17, 24, 32, 48, 64, 96, 128, 512, 1024, 2048, 4096, 6000):
         run(m)
     with assert_no_triton_compile(
-        largem_mod.gluon_mm_mxfp8_ue8m0_largem_gfx1250, gluon_wmma_dense_reduce_gfx1250
+        cluster_mod.gluon_mm_mxfp8_ue8m0_largem_bk512_gfx1250,
+        cluster_mod.gluon_mm_mxfp8_ue8m0_largem_bk256_gfx1250,
     ):
         for m in (18, 31, 40, 63, 72, 112, 200, 848, 1000, 3000, 8192):
             run(m)
