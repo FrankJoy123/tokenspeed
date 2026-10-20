@@ -83,7 +83,6 @@ export CONFIG_NAMES="attn_tp8_moe_tp8"
 export CONTAINER_IMAGE=/shared/server.sqsh CONTAINER_MOUNTS=/shared:/shared
 export SERVER_VENV=/opt/server-venv
 export TOKENSPEED_FLASHINFER_AUTOTUNE_CACHE_DIR=/shared/frozen-autotune-cache
-export TOKENSPEED_HEALTH_CHECK_TIMEOUT=90
 export MODEL_DIR=/shared/k3 DRAFT_DIR=/shared/eagle3
 export MODEL_NAME=moonshotai/Kimi-K3 TOKENIZER_PATH=/shared/pinned-k3-tokenizer
 export CLIENT_PYTHON="$CLIENT_ROOT/venv/bin/python"
@@ -111,7 +110,7 @@ SERVER_ARGS=(
   --language-model-only --stream-interval 10 --max-cudagraph-capture-size 1024
   --chunked-prefill-size 8192 --max-prefill-tokens 8192
   --mamba-ssm-dtype bfloat16 --prefix-granularity 128
-  --health-check-timeout-secs 120 --enable-log-request-stats
+  --enable-log-request-stats
   --engine-startup-timeout 7200 --disable-kvstore
 )
 export SLURM_JOB_ID=YOUR_HELD_JOB_ID
@@ -156,7 +155,15 @@ HTTP requests. Keep the selected shared config's TP8/EP8 topology. `PRECISION` m
 the actual checkpoint, and `DRAFT_DIR` must match `SPEC_DECODING`.
 Extra server arguments must not change the topology used for reporting.
 The launcher owns context, sequence capacity, speculative method/steps, AL,
-and metrics arguments; conflicting trailing flags fail before startup.
+and metrics arguments; conflicting trailing flags fail before startup, including
+`--speculative-config`, `--speculative-eagle-topk` and underscore aliases.
+Drain checks require valid, nonnegative running/waiting counters and handle
+spaces in labels; malformed or missing counters cannot count as idle.
+
+Health-check controls depend on the prepared server version and gateway. Do not
+assume an environment variable declaration changes an engine timeout, or that a
+gateway health-check timeout controls engine readiness. Verify the active health
+check implementation before adding version-specific flags.
 
 Grace is the maximum drain wait after sending stops, not a fixed sleep.
 `CLIENT_TIMEOUT` covers preparation, warmup and export for each point; it is a
@@ -181,8 +188,10 @@ records the two physical nodes separately. Native metric values and JSON are
 not rewritten. These are local reproductions, not official InferenceX results.
 Power collection is disabled. Server counters are explicitly selected with
 `SERVER_METRICS=true|false`; unavailable values are not zero. With metrics enabled,
-the launcher enables the engine endpoint and checks HTTP reachability after
-readiness, retaining the response in `server-metrics-readiness.txt`. Replay must
+preflight checks that API and metrics ports can be bound on the allocated nodes.
+This catches existing listeners, including non-HTTP services; it does not reserve
+the ports against races with other launches. The launcher enables the engine
+endpoint and checks HTTP reachability after readiness, retaining the response in `server-metrics-readiness.txt`. Replay must
 produce a nonempty `aiperf_artifacts/server_metrics_export.json`; a missing or empty
 file fails the run. Native replay validation remains in place. The launcher does
 not add counter-content checks, measured-AL thresholds or a custom acceptance

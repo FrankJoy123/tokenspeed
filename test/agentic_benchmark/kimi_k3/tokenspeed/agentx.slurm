@@ -167,9 +167,26 @@ check_resources() {
         echo 'API port already occupied; refusing to use or stop that service' >&2
         exit 1
     fi
+    local ports=("$API_PORT")
+    if [[ "$SERVER_METRICS" = true ]]; then
+        [[ "$METRICS_PORT" != "$API_PORT" ]] || { echo 'API and metrics ports must differ' >&2; exit 2; }
+        ports+=("$METRICS_PORT")
+    fi
     timeout --signal=TERM --kill-after=45 "$READINESS_TIMEOUT" \
         "${SRUN[@]}" --job-name="${STEP_NAME}_preflight" --kill-on-bad-exit=1 bash -c '
         set -euo pipefail
+        python3 - "$@" <<"PYTHON"
+import socket
+import sys
+
+for port in sys.argv[1:]:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind(("0.0.0.0", int(port)))
+        except OSError as exc:
+            sys.exit(f"Server port {port} unavailable: {exc}")
+PYTHON
         occupied=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader)
         if [[ -n "$occupied" ]]; then echo "GPUs already occupied: $occupied" >&2; exit 1; fi
         [[ "$(nvidia-smi --query-gpu=uuid --format=csv,noheader | wc -l)" = 4 ]]
@@ -178,7 +195,7 @@ check_resources() {
         while IFS= read -r gpu; do
             [[ "$gpu" = *GB300* ]] || { echo "This recipe reports GB300 results" >&2; exit 1; }
         done <<< "$gpus"
-    ' > "$RUN_ROOT/gpu-preflight.log" 2>&1 &
+    ' agentx-preflight "${ports[@]}" > "$RUN_ROOT/gpu-preflight.log" 2>&1 &
     PREFLIGHT_PID=$!
     PREFLIGHT_RESULT=0
     wait "$PREFLIGHT_PID" || PREFLIGHT_RESULT=$?
@@ -238,9 +255,18 @@ wait_for_drain() {
         kill -0 "$SERVER_PID" 2>/dev/null || { echo 'Server exited while draining' >&2; return 1; }
         if curl --fail --silent --max-time 5 "$AIPERF_SERVER_METRICS_URLS" > "$RUN_ROOT/c${CONCURRENCY}/drain-metrics.txt" &&
             awk '
-                /^tokenspeed:num_requests_running(\{|[[:space:]])/ { running=1; total+=$2 }
-                /^tokenspeed:num_requests_waiting(\{|[[:space:]])/ { waiting=1; total+=$2 }
-                END { exit !(running && waiting && total == 0) }
+                /^tokenspeed:num_requests_(running|waiting)(\{|[[:space:]])/ {
+                    if ($0 ~ /^tokenspeed:num_requests_running/) running=1
+                    else waiting=1
+                    sample=$0
+                    sub(/^tokenspeed:num_requests_(running|waiting)(\{.*\})?[[:space:]]+/, "", sample)
+                    count=split(sample, fields, /[[:space:]]+/)
+                    # Labels may contain spaces; optional timestamps follow the value.
+                    if (count > 2 || fields[1] !~ /^[+]?[0-9]+([.][0-9]*)?([eE][+-]?[0-9]+)?$/ ||
+                        (count == 2 && fields[2] !~ /^-?[0-9]+$/)) invalid=1
+                    else if (fields[1]+0 != 0) busy=1
+                }
+                END { exit !(running && waiting && !invalid && !busy) }
             ' "$RUN_ROOT/c${CONCURRENCY}/drain-metrics.txt"; then
             return 0
         fi
@@ -253,8 +279,9 @@ wait_for_drain() {
 validate_config
 # These settings have a single owner: the explicit protocol, not trailing CLI flags.
 for argument in "$@"; do
-    case "${argument%%=*}" in
-        --max-model-len|--max-num-seqs|--speculative-algorithm|--speculative-num-steps|--speculative-num-draft-tokens|--synthetic-acceptance-length|--sampling-backend|--enable-metrics|--metrics-host|--metrics-port)
+    flag="${argument%%=*}"
+    case "${flag//_/-}" in
+        --speculative-config|--speculative-eagle-topk|--max-model-len|--max-num-seqs|--speculative-algorithm|--speculative-num-steps|--speculative-num-draft-tokens|--synthetic-acceptance-length|--sampling-backend|--enable-metrics|--metrics-host|--metrics-port)
             echo "Set protocol variables instead of overriding $argument" >&2; exit 2 ;;
     esac
 done

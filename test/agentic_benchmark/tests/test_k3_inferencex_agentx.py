@@ -26,6 +26,7 @@ import json
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import tempfile
 import time
@@ -79,7 +80,7 @@ elif name=='curl':
     from urllib.parse import urlparse
     if args[-1].endswith('/metrics'):
         if not os.environ.get('FAKE_NO_DRAIN_COUNTERS'):
-            print('tokenspeed:num_requests_running{} '+os.environ.get('FAKE_ACTIVE_REQUESTS','0'))
+            print('tokenspeed:num_requests_running{model_name="kimi k3"} '+os.environ.get('FAKE_ACTIVE_REQUESTS','0')+os.environ.get('FAKE_TIMESTAMP',''))
             print('tokenspeed:num_requests_waiting{} 0')
         sys.exit(7 if os.environ.get('FAKE_BAD_ENDPOINT') else 0)
     if str(urlparse(args[-1]).port)!=(root/'ready').read_text():sys.exit(7)
@@ -495,6 +496,82 @@ class SlurmTests(unittest.TestCase):
         self.assertIn("Server drain timeout", stderr)
         self.assertFalse((self.root / "runs/attn_tp8_moe_tp8/c2").exists())
         self.assertFalse((self.root / "ready").exists())
+
+    def test_malformed_drain_values_stop_next_point(self):
+        for value in ("garbage", "NaN", "-1", "0 garbage"):
+            with self.subTest(value=value):
+                self.env.update(
+                    CONFIG_NAMES="attn_tp8_moe_tp8",
+                    CONCURRENCIES="1 2",
+                    SERVER_METRICS="true",
+                    METRICS_PORT="18090",
+                    FAKE_ACTIVE_REQUESTS=value,
+                    DRAIN_TIMEOUT="1",
+                    RUN_ROOT=str(self.root / f"invalid-{value.replace(' ', '-')}"),
+                )
+                process = self.launch()
+                stdout, stderr = process.communicate(timeout=15)
+                self.assertNotEqual(process.returncode, 0, stdout + stderr)
+                self.assertIn("Server drain timeout", stderr)
+                self.assertFalse(
+                    (Path(self.env["RUN_ROOT"]) / "attn_tp8_moe_tp8/c2").exists()
+                )
+
+    def test_timestamped_idle_metrics(self):
+        self.env.update(
+            CONFIG_NAMES="attn_tp8_moe_tp8",
+            SERVER_METRICS="true",
+            METRICS_PORT="18090",
+            FAKE_TIMESTAMP=" 123456789",
+        )
+        process = self.launch()
+        stdout, stderr = process.communicate(timeout=15)
+        self.assertEqual(process.returncode, 0, stdout + stderr)
+
+    def test_occupied_metrics_port_prevents_startup(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            listener.bind(("0.0.0.0", 0))
+            listener.listen()
+            self.env.update(
+                SERVER_METRICS="true", METRICS_PORT=str(listener.getsockname()[1])
+            )
+            process = self.launch()
+            stdout, stderr = process.communicate(timeout=15)
+        self.assertNotEqual(process.returncode, 0, stdout + stderr)
+        self.assertFalse((self.root / "server-args.jsonl").exists())
+        log = self.root / "runs/attn_tp8_moe_tp8/gpu-preflight.log"
+        self.assertIn("unavailable", log.read_text())
+
+    def test_protocol_override_flags_rejected_before_startup(self):
+        for flag in (
+            "--max-model-len",
+            "--max-num-seqs",
+            "--speculative-algorithm",
+            "--speculative-num-steps",
+            "--speculative-num-draft-tokens",
+            "--synthetic-acceptance-length",
+            "--sampling-backend",
+            "--enable-metrics",
+            "--metrics-host",
+            "--metrics-port",
+            "--speculative-config",
+            "--speculative-eagle-topk",
+            "--speculative_config",
+        ):
+            for arguments in ([flag, "5"], [flag + "=5"]):
+                with self.subTest(arguments=arguments):
+                    result = subprocess.run(
+                        ["bash", str(self.launcher), *arguments],
+                        env=self.env,
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                    self.assertEqual(
+                        result.returncode, 2, result.stdout + result.stderr
+                    )
+                    self.assertIn("Set protocol variables", result.stderr)
+                    self.assertFalse((self.root / "stage").exists())
 
     def test_missing_drain_counters_stop_next_point(self):
         self.env["FAKE_NO_DRAIN_COUNTERS"] = "1"
