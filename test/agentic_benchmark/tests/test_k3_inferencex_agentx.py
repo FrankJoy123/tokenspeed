@@ -50,7 +50,7 @@ if name=='squeue':
     if '-s' in args:
         print('123.999 unrelated_service')
         if os.environ.get('FAKE_REGISTERED') and (root/'registered').exists():print('123.1 '+(root/'registered').read_text())
-    elif args[-1]=='%u': print(os.environ['USER'])
+    elif args[-1]=='%u': import pwd; print(pwd.getpwuid(os.getuid()).pw_name)
     elif args[-1]=='%T': print('RUNNING')
     else: print('node[1-2]')
 elif name=='scontrol':
