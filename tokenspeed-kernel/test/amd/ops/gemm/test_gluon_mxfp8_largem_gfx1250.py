@@ -31,10 +31,10 @@ if not is_cdna5():
     pytest.skip("AMD CDNA5 is required", allow_module_level=True)
 
 from tokenspeed_kernel.ops.gemm import mm  # noqa: E402
-from tokenspeed_kernel_amd.ops.gfx1250.gemm.mxfp8 import mm as largem_mod  # noqa: E402
 from tokenspeed_kernel_amd.ops.gfx1250.gemm.mxfp8 import (  # noqa: E402
     launch_gluon_mm_mxfp8_ue8m0_largem_gfx1250,
 )
+from tokenspeed_kernel_amd.ops.gfx1250.gemm.mxfp8 import mm as largem_mod  # noqa: E402
 
 # Inputs dequantize exactly; leave a small margin above BF16's worst-case
 # relative rounding error (2**-8) when comparing against FP32 references.
