@@ -1318,13 +1318,20 @@ def _launch_cluster_mm(
     *,
     tile: int,
     cluster: int,
-    split_k: int = 1,
+    split_k: int,
 ) -> None:
     """Run the clustered kernel ``_cluster_mm_config`` chose into ``out``."""
     m, k = A.shape
     n = B.shape[0]
     if tile == _BK256_TILE and n % _BK256_TILE:
         raise ValueError(f"BK256 requires N divisible by {_BK256_TILE}, got N={n}")
+    if split_k > 1 and (
+        tile == _BK256_TILE or cluster > 1 or k % _BK512 or (k // _BK512) % split_k
+    ):
+        raise ValueError(
+            f"split-K {split_k} needs an unclustered BK512 tile and K divisible "
+            f"into 512-wide partitions, got tile={tile}, cluster={cluster}, K={k}"
+        )
     block = tile * cluster
     grid = (triton.cdiv(m, block) * triton.cdiv(n, block), split_k)
     if tile != _BK256_TILE:

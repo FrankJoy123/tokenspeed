@@ -116,7 +116,7 @@ def test_mxfp8_cluster_kernels_match_dequantized_reference(
     a, b, a_scales, b_scales = _operands(m, n, k, seed=tile + cluster + n + k)
     out = torch.full((m, n), float("nan"), device="cuda", dtype=torch.bfloat16)
     largem_mod._launch_cluster_mm(
-        a, b, a_scales, b_scales, out, tile=tile, cluster=cluster
+        a, b, a_scales, b_scales, out, tile=tile, cluster=cluster, split_k=1
     )
     torch.testing.assert_close(
         out.float(),
