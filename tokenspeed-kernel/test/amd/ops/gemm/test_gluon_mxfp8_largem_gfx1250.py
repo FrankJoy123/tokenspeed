@@ -128,6 +128,26 @@ def test_mxfp8_cluster_kernels_match_dequantized_reference(
     )
 
 
+@pytest.mark.parametrize("m", [17, 100])
+@pytest.mark.parametrize(
+    "n,k,split_k", [(1792, 5120, 5), (5120, 15360, 3), (1152, 5120, 2)]
+)
+def test_mxfp8_bk512_split_k_matches_dequantized_reference(
+    m: int, n: int, k: int, split_k: int
+) -> None:
+    a, b, a_scales, b_scales = _operands(m, n, k, seed=m + n + split_k)
+    out = torch.full((m, n), float("nan"), device="cuda", dtype=torch.bfloat16)
+    cluster_mod.launch_cluster_mm(
+        a, b, a_scales, b_scales, out, tile=64, cluster=1, split_k=split_k
+    )
+    torch.testing.assert_close(
+        out.float(),
+        _reference(a, b, a_scales, b_scales),
+        atol=_BF16_ATOL,
+        rtol=_BF16_RTOL,
+    )
+
+
 @pytest.mark.parametrize("m", [24, 96, 4096])
 def test_mxfp8_largem_cuda_graph_replay(m: int) -> None:
     n, k = 1792, 5120
@@ -161,6 +181,7 @@ def test_mxfp8_largem_varying_rows_reuse_compiled_kernels() -> None:
     with assert_no_triton_compile(
         cluster_mod.gluon_mm_mxfp8_ue8m0_largem_bk512_gfx1250,
         cluster_mod.gluon_mm_mxfp8_ue8m0_largem_bk256_gfx1250,
+        cluster_mod._mxfp8_split_reduce_gfx1250,
     ):
         for m in (18, 31, 40, 63, 72, 112, 200, 848, 1000, 3000, 8192):
             run(m)

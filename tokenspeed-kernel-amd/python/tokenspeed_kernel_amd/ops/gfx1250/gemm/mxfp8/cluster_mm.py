@@ -36,6 +36,10 @@ from tokenspeed_kernel_amd.ops.gfx1250.gemm.fp16.mm import (
     _NUM_CUS,
     _largem_warp_pipeline_xcd_tile,
 )
+from tokenspeed_kernel_amd.ops.gfx1250.gemm.mxfp8.decode_mm import (
+    _REDUCE_BLOCK_N,
+    _mxfp8_split_reduce_gfx1250,
+)
 
 _NUM_XCDS = 8
 _GROUP_M = 4
@@ -268,7 +272,7 @@ def _bk512_repr(specialization):
     constants = specialization.constants
     return (
         f"gluon_mm_mxfp8_ue8m0_largem_bk512_gfx1250_t{constants.get('TILE')}_"
-        f"c{constants.get('CLUSTER')}"
+        f"c{constants.get('CLUSTER')}_sk{constants.get('SPLIT_K')}"
     )
 
 
@@ -483,26 +487,31 @@ def gluon_mm_mxfp8_ue8m0_largem_bk512_gfx1250(
     stride_bn,
     stride_asm,
     stride_bsn,
+    stride_ok,
     stride_om,
     M,
     N,
     K,
     TILE: gl.constexpr,
     CLUSTER: gl.constexpr,
+    SPLIT_K: gl.constexpr,
     GROUP_M: gl.constexpr,
     NUM_XCDS: gl.constexpr,
 ):
     """Clustered eight-wave ``[1,32]`` E4M3/UE8M0 GEMM over 512-wide K tiles.
 
     Each program is a ``CLUSTER x CLUSTER`` group of CTAs, one
-    ``TILE x TILE`` BF16 output tile each, that share A, B and their raw
+    ``TILE x TILE`` output tile each, that share A, B and their raw
     UE8M0 scale planes through TDM multicast into two LDS slots. The K walk
     covers at least two tiles, and a partial last tile and any tile past K
     zero-fill. CTAs wholly past the M or N edge still run the loop, so every
-    cluster barrier completes.
+    cluster barrier completes. With ``SPLIT_K`` above one, unclustered
+    programs on grid axis 1 each walk ``K / SPLIT_K`` and store FP32
+    partials ``stride_ok`` apart.
     """
     gl.static_assert(gl.num_warps() == 8, "the warp pipeline needs two waves per SIMD")
     gl.static_assert(gl.num_ctas() == CLUSTER * CLUSTER, "one CTA per cluster tile")
+    gl.static_assert(SPLIT_K == 1 or CLUSTER == 1, "split K runs unclustered")
     BLOCK: gl.constexpr = TILE * CLUSTER
     BLOCK_K: gl.constexpr = 512
     SCALE_COLS: gl.constexpr = BLOCK_K // 32
@@ -519,6 +528,8 @@ def gluon_mm_mxfp8_ue8m0_largem_bk512_gfx1250(
     )
     off_m = pid_m * BLOCK
     off_n = pid_n * BLOCK
+    k_split = K // SPLIT_K
+    k_start = gl.program_id(1) * k_split
     dot_a: gl.constexpr = gl.DotOperandLayout(0, WMMA_LAYOUT, 16)
     dot_b: gl.constexpr = gl.DotOperandLayout(1, WMMA_LAYOUT, 16)
     scale_a: gl.constexpr = gl.amd.cdna5.get_wmma_scale_layout(dot_a, [BLOCK, 4])
@@ -536,29 +547,29 @@ def gluon_mm_mxfp8_ue8m0_largem_bk512_gfx1250(
         b_scale_ptr.dtype.element_ty, [2, BLOCK, SCALE_COLS], SHARED_B_SCALE
     )
     a_desc = gl.amd.cdna5.tdm.make_tensor_descriptor(
-        base=a_ptr + off_m * stride_am,
-        shape=(M - off_m, K),
+        base=a_ptr + off_m * stride_am + k_start,
+        shape=(M - off_m, k_split),
         strides=(stride_am, 1),
         block_shape=(BLOCK, BLOCK_K),
         layout=SHARED_A,
     )
     b_desc = gl.amd.cdna5.tdm.make_tensor_descriptor(
-        base=b_ptr + off_n * stride_bn,
-        shape=(N - off_n, K),
+        base=b_ptr + off_n * stride_bn + k_start,
+        shape=(N - off_n, k_split),
         strides=(stride_bn, 1),
         block_shape=(BLOCK, BLOCK_K),
         layout=SHARED_B,
     )
     a_scale_desc = gl.amd.cdna5.tdm.make_tensor_descriptor(
-        base=a_scale_ptr + off_m * stride_asm,
-        shape=(M - off_m, K // 32),
+        base=a_scale_ptr + off_m * stride_asm + k_start // 32,
+        shape=(M - off_m, k_split // 32),
         strides=(stride_asm, 1),
         block_shape=(BLOCK, SCALE_COLS),
         layout=SHARED_A_SCALE,
     )
     b_scale_desc = gl.amd.cdna5.tdm.make_tensor_descriptor(
-        base=b_scale_ptr + off_n * stride_bsn,
-        shape=(N - off_n, K // 32),
+        base=b_scale_ptr + off_n * stride_bsn + k_start // 32,
+        shape=(N - off_n, k_split // 32),
         strides=(stride_bsn, 1),
         block_shape=(BLOCK, SCALE_COLS),
         layout=SHARED_B_SCALE,
@@ -576,7 +587,7 @@ def gluon_mm_mxfp8_ue8m0_largem_bk512_gfx1250(
             slot,
             BLOCK_K,
         )
-    num_k_tiles = gl.maximum(gl.cdiv(K, BLOCK_K), 2)
+    num_k_tiles = gl.maximum(gl.cdiv(k_split, BLOCK_K), 2)
     gl.assume(num_k_tiles >= 2)
     acc = gl.zeros((BLOCK, BLOCK), dtype=gl.float32, layout=WMMA_LAYOUT)
     # Unrolling six tiles keeps the two-slot parity static in the body.
@@ -659,7 +670,7 @@ def gluon_mm_mxfp8_ue8m0_largem_bk512_gfx1250(
     )
     out_smem.store(acc.to(out_ptr.dtype.element_ty))
     out_desc = gl.amd.cdna5.tdm.make_tensor_descriptor(
-        base=out_ptr + off_m * stride_om + off_n,
+        base=out_ptr + gl.program_id(1) * stride_ok + off_m * stride_om + off_n,
         shape=(M - off_m, N - off_n),
         strides=(stride_om, 1),
         block_shape=(BLOCK, BLOCK),
@@ -1257,8 +1268,23 @@ def gluon_mm_mxfp8_ue8m0_largem_bk256_gfx1250(
     gl.amd.cdna5.tdm.async_wait(0)
 
 
-def cluster_mm_config(m: int, n: int, k: int) -> tuple[int, int]:
-    """Return the clustered kernel's ``(tile, cluster)`` for a shape.
+def _bk512_split_k(m: int, n: int, k: int) -> int:
+    k_tiles = k // _BK512
+    if m > 64 or k % _BK512 or k_tiles < 8:
+        return 1
+    ctas = triton.cdiv(n, 64)
+    return next(
+        (
+            s
+            for s in range(k_tiles // 2, 1, -1)
+            if k_tiles % s == 0 and ctas * s <= _NUM_CUS
+        ),
+        1,
+    )
+
+
+def cluster_mm_config(m: int, n: int, k: int) -> tuple[int, int, int]:
+    """Return the clustered kernel's ``(tile, cluster, split_k)`` for a shape.
 
     A 256 tile is the BK256 kernel, which needs N divisible by 256; it takes
     batches from 512 rows whose 256 x 256 tiles exceed half the CUs. The
@@ -1266,17 +1292,21 @@ def cluster_mm_config(m: int, n: int, k: int) -> tuple[int, int]:
     wave of CUs, then 128-row tiles. Both run unclustered up to 128 rows,
     where the cluster barriers cost more than the shared loads save. 128-row
     tiles also run unclustered for two K tiles, too few to hide the
-    cluster's first multicast.
+    cluster's first multicast. A single row of 64-row tiles over at least
+    eight K tiles splits K into the most partitions of two or more tiles
+    that still fit one wave of CUs, and an FP32 reduction writes the output.
     """
     if (
         m >= _BK256_MIN_M
         and n % _BK256_TILE == 0
         and triton.cdiv(m, 512) * triton.cdiv(n, 512) * 4 > _NUM_CUS // 2
     ):
-        return _BK256_TILE, 2
+        return _BK256_TILE, 2, 1
     if triton.cdiv(m, 128) * triton.cdiv(n, 128) * 4 <= _NUM_CUS:
-        return 64, 1 if m <= 128 else 2
-    return 128, 1 if m <= 128 or k <= 2 * _BK512 else 2
+        if m > 128:
+            return 64, 2, 1
+        return 64, 1, _bk512_split_k(m, n, k)
+    return 128, 1 if m <= 128 or k <= 2 * _BK512 else 2, 1
 
 
 def launch_cluster_mm(
@@ -1288,35 +1318,59 @@ def launch_cluster_mm(
     *,
     tile: int,
     cluster: int,
+    split_k: int = 1,
 ) -> None:
     """Run the clustered kernel ``cluster_mm_config`` chose into ``out``."""
     m, k = A.shape
     n = B.shape[0]
     block = tile * cluster
-    grid = (triton.cdiv(m, block) * triton.cdiv(n, block),)
+    grid = (triton.cdiv(m, block) * triton.cdiv(n, block), split_k)
     if tile != _BK256_TILE:
+        partials = out
+        if split_k > 1:
+            partials = torch.empty(
+                (split_k, m, n), dtype=torch.float32, device=A.device
+            )
         gluon_mm_mxfp8_ue8m0_largem_bk512_gfx1250[grid](
             A,
             B,
             A_scales,
             B_scales,
-            out,
+            partials,
             A.stride(0),
             B.stride(0),
             A_scales.stride(0),
             B_scales.stride(0),
-            out.stride(0),
+            partials.stride(0) if split_k > 1 else 0,
+            partials.stride(-2),
             m,
             n,
             k,
             TILE=tile,
             CLUSTER=cluster,
+            SPLIT_K=split_k,
             GROUP_M=_GROUP_M,
             NUM_XCDS=_NUM_XCDS,
             num_warps=8,
             num_ctas=cluster * cluster,
             waves_per_eu=2,
         )
+        if split_k > 1:
+            _mxfp8_split_reduce_gfx1250[(m * triton.cdiv(n, _REDUCE_BLOCK_N),)](
+                partials,
+                out,
+                partials.stride(0),
+                partials.stride(1),
+                partials.stride(2),
+                out.stride(0),
+                out.stride(1),
+                M=m,
+                N=n,
+                SPLIT_K=split_k,
+                BLOCK_N=_REDUCE_BLOCK_N,
+                num_warps=1,
+                waves_per_eu=1,
+            )
         return
     gluon_mm_mxfp8_ue8m0_largem_bk256_gfx1250[grid](
         A,

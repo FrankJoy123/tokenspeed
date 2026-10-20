@@ -108,8 +108,10 @@ def launch_gluon_mm_mxfp8_ue8m0_largem_gfx1250(
             f"out must be row-major GPU {out_dtype} ({m}, {n}) colocated with A"
         )
 
-    tile, cluster = cluster_mm_config(m, n, k)
-    launch_cluster_mm(A, B, A_scales, B_scales, out, tile=tile, cluster=cluster)
+    tile, cluster, split_k = cluster_mm_config(m, n, k)
+    launch_cluster_mm(
+        A, B, A_scales, B_scales, out, tile=tile, cluster=cluster, split_k=split_k
+    )
     return out
 
 

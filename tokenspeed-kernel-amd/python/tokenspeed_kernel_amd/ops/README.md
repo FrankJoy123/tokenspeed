@@ -543,7 +543,7 @@ from 17 rows, above the decode projection's range.
 Every shape runs one of two clustered eight-wave warp-pipeline kernels adapted
 from the MXFP8 variants of Triton's CDNA5 warp-pipeline GEMM example. Each
 program is a cluster of CTAs that share A and B panels and their raw scale
-planes through TDM multicast, so one launch covers the call. Descriptors are
+planes through TDM multicast, so no scale repacking precedes it. Descriptors are
 bounded at the real M, N, and K. Ragged edges zero-fill on load and clip on
 store, and K advances shrink the bounds so tiles past K zero-fill.
 
@@ -555,6 +555,10 @@ store, and K advances shrink the bounds so tiles past K zero-fill.
   steps, at least two. It uses `64 x 64` tiles while those fit one wave of
   CUs, then `128 x 128` tiles, in 2 x 2 clusters. Both run unclustered up
   to 128 rows, and the 128-row tiles also for two K steps.
+- Up to 64 rows, a call with at least eight K steps splits K into the most
+  partitions of two or more steps that still fit one wave of CUs. Each
+  partition stores FP32, and `_mxfp8_split_reduce_gfx1250` sums them into
+  the BF16 output in a second launch.
 
 ## Attention
 
