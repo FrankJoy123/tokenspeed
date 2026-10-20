@@ -69,7 +69,15 @@ def _run(a, b, a_scales, b_scales) -> torch.Tensor:
 @pytest.mark.parametrize("m", [17, 32, 33, 80, 96, 128, 129, 848, 2048, 8192])
 @pytest.mark.parametrize(
     "n,k",
-    [(1792, 5120), (4096, 1280), (8192, 1280), (5120, 2048), (1152, 5120), (5120, 576)],
+    [
+        (1792, 5120),
+        (4096, 1280),
+        (8192, 1280),
+        (5120, 2048),
+        (1152, 5120),
+        (5120, 576),
+        (25600, 6144),
+    ],
 )
 def test_mxfp8_largem_matches_dequantized_reference(m: int, n: int, k: int) -> None:
     operands = _operands(m, n, k, seed=m + n + k)
