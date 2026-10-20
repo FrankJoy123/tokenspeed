@@ -31,9 +31,7 @@ if not is_cdna5():
     pytest.skip("AMD CDNA5 is required", allow_module_level=True)
 
 from tokenspeed_kernel.ops.gemm import mm  # noqa: E402
-from tokenspeed_kernel_amd.ops.gfx1250.gemm.mxfp8 import (  # noqa: E402
-    cluster_mm as cluster_mod,
-)
+from tokenspeed_kernel_amd.ops.gfx1250.gemm.mxfp8 import mm as largem_mod  # noqa: E402
 from tokenspeed_kernel_amd.ops.gfx1250.gemm.mxfp8 import (  # noqa: E402
     launch_gluon_mm_mxfp8_ue8m0_largem_gfx1250,
 )
@@ -117,7 +115,7 @@ def test_mxfp8_cluster_kernels_match_dequantized_reference(
     m = 1000
     a, b, a_scales, b_scales = _operands(m, n, k, seed=tile + cluster + n + k)
     out = torch.full((m, n), float("nan"), device="cuda", dtype=torch.bfloat16)
-    cluster_mod.launch_cluster_mm(
+    largem_mod._launch_cluster_mm(
         a, b, a_scales, b_scales, out, tile=tile, cluster=cluster
     )
     torch.testing.assert_close(
@@ -137,7 +135,7 @@ def test_mxfp8_bk512_split_k_matches_dequantized_reference(
 ) -> None:
     a, b, a_scales, b_scales = _operands(m, n, k, seed=m + n + split_k)
     out = torch.full((m, n), float("nan"), device="cuda", dtype=torch.bfloat16)
-    cluster_mod.launch_cluster_mm(
+    largem_mod._launch_cluster_mm(
         a, b, a_scales, b_scales, out, tile=64, cluster=1, split_k=split_k
     )
     torch.testing.assert_close(
@@ -179,9 +177,9 @@ def test_mxfp8_largem_varying_rows_reuse_compiled_kernels() -> None:
     for m in (17, 24, 32, 48, 64, 96, 128, 512, 1024, 2048, 4096, 6000):
         run(m)
     with assert_no_triton_compile(
-        cluster_mod.gluon_mm_mxfp8_ue8m0_largem_bk512_gfx1250,
-        cluster_mod.gluon_mm_mxfp8_ue8m0_largem_bk256_gfx1250,
-        cluster_mod._mxfp8_split_reduce_gfx1250,
+        largem_mod.gluon_mm_mxfp8_ue8m0_largem_bk512_gfx1250,
+        largem_mod.gluon_mm_mxfp8_ue8m0_largem_bk256_gfx1250,
+        largem_mod._mxfp8_split_reduce_gfx1250,
     ):
         for m in (18, 31, 40, 63, 72, 112, 200, 848, 1000, 3000, 8192):
             run(m)
