@@ -1263,10 +1263,10 @@ def cluster_mm_config(m: int, n: int, k: int) -> tuple[int, int]:
     A 256 tile is the BK256 kernel, which needs N divisible by 256; it takes
     batches from 512 rows whose 256 x 256 tiles exceed half the CUs. The
     BK512 kernel takes the rest. It uses 64-row tiles while those fit one
-    wave of CUs, then 128-row tiles. Those run unclustered up to 128 rows,
-    where a cluster's second tile row would be empty, and for two K tiles,
-    too few to hide the cluster's first multicast. Up to 32 rows, 64-row
-    tiles also run unclustered when they fill fewer than half the CUs.
+    wave of CUs, then 128-row tiles. Both run unclustered up to 128 rows,
+    where the cluster barriers cost more than the shared loads save. 128-row
+    tiles also run unclustered for two K tiles, too few to hide the
+    cluster's first multicast.
     """
     if (
         m >= _BK256_MIN_M
@@ -1274,11 +1274,8 @@ def cluster_mm_config(m: int, n: int, k: int) -> tuple[int, int]:
         and triton.cdiv(m, 512) * triton.cdiv(n, 512) * 4 > _NUM_CUS // 2
     ):
         return _BK256_TILE, 2
-    ctas64 = triton.cdiv(m, 128) * triton.cdiv(n, 128) * 4
-    if m <= 32 and ctas64 < _NUM_CUS // 2:
-        return 64, 1
-    if ctas64 <= _NUM_CUS:
-        return 64, 2
+    if triton.cdiv(m, 128) * triton.cdiv(n, 128) * 4 <= _NUM_CUS:
+        return 64, 1 if m <= 128 else 2
     return 128, 1 if m <= 128 or k <= 2 * _BK512 else 2
 
 

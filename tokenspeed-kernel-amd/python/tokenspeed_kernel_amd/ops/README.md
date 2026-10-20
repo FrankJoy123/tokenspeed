@@ -553,10 +553,8 @@ store, and K advances shrink the bounds so tiles past K zero-fill.
   and its tiles exceed half the CUs.
 - `gluon_mm_mxfp8_ue8m0_largem_bk512_gfx1250` takes the rest in 512-wide K
   steps, at least two. It uses `64 x 64` tiles while those fit one wave of
-  CUs, then `128 x 128` tiles, in 2 x 2 clusters. The 128-row tiles run
-  unclustered up to 128 rows, where a cluster's second tile row would be
-  empty, and for two K steps. Up to 32 rows, the 64-row tiles also run
-  unclustered when they fill fewer than half the CUs.
+  CUs, then `128 x 128` tiles, in 2 x 2 clusters. Both run unclustered up
+  to 128 rows, and the 128-row tiles also for two K steps.
 
 ## Attention
 
