@@ -57,14 +57,11 @@ validate_agentx_config() {
         synthetic) validate_agentx_values AL_TARGET || return "$?" ;;
         *) echo "ACCEPTANCE_MODE must be natural or synthetic" >&2; return 2 ;;
     esac
-    local variable context
+    local variable
     for variable in MAX_MODEL_LEN MAX_NUM_SEQS SPEC_STEPS API_PORT; do
         [[ "${!variable}" =~ ^[1-9][0-9]{0,8}$ ]] || { echo "$variable must be a positive integer" >&2; return 2; }
     done
     [[ "$API_PORT" -le 65535 ]] || { echo "Invalid API_PORT" >&2; return 2; }
-    context=262144
-    if [[ "$AGENTX_PROTOCOL" = weka-062126-full ]]; then context=1048576; fi
-    [[ "$MAX_MODEL_LEN" = "$context" ]] || { echo "MAX_MODEL_LEN must be $context for $AGENTX_PROTOCOL" >&2; return 2; }
     case "$SPEC_DECODING" in
         eagle3|dspark) ;;
         *) echo "SPEC_DECODING must be eagle3 or dspark" >&2; return 2 ;;
@@ -96,6 +93,8 @@ export PYTHONPATH="$INFMAX_CONTAINER_WORKSPACE"
 export MODEL="$MODEL_NAME" SERVED_MODEL_NAME="$MODEL_NAME" MODEL_PREFIX=kimik3
 export PORT="$API_PORT" CONC="$CONCURRENCY"
 export FRAMEWORK=tokenspeed RUNNER_TYPE=gb300 PRECISION SPEC_DECODING
+export IS_AGENTIC=1
+export KV_OFFLOAD_BACKEND= KV_OFFLOAD_BACKEND_METADATA= TOTAL_CPU_DRAM_GB=0
 export TP=8 PP_SIZE=1 PCP_SIZE=1 DCP_SIZE=1 IS_MULTINODE=true DISAGG=false KV_OFFLOADING=none
 export AIPERF_PYTHON_VERSION=3.11 AIPERF_EXPERIMENTAL_FAST=0
 export AIPERF_USE_DYNAMO_CONV_AWARE_ROUTING=0
@@ -112,13 +111,11 @@ export ENABLE_AGENTX_POWER=0 REQUIRE_POWER=0 EVAL_ONLY=false
 export AGENTIC_OUTPUT_DIR="$RESULT_DIR" RESULT_FILENAME=inferencex_result
 export AIPERF_DATASET_WEKA_PARALLEL_WORKERS=2 TOKENIZERS_PARALLELISM=false
 export OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4
-export AGENTX_CONTEXT_LENGTH="$MAX_MODEL_LEN"
 source "$INFMAX_CONTAINER_WORKSPACE/benchmarks/benchmark_lib.sh"
 AIPERF_DEPS_READY=1
 resolve_trace_source
-# The native library clears inherited context; restore the explicit protocol cap.
-export MAX_MODEL_LEN
-MAX_MODEL_LEN="$AGENTX_CONTEXT_LENGTH"
+# The native loader selects the workload; do not impose a client context cap.
+unset MAX_MODEL_LEN
 MODEL="$TOKENIZER_PATH" build_replay_cmd "$RESULT_DIR"
 REPLAY_CMD+=" --benchmark-grace-period $BENCHMARK_GRACE_SECONDS --request-timeout-seconds $REQUEST_TIMEOUT_SECONDS --random-seed $CLIENT_SEED"
 if [[ "$SERVER_METRICS" = false ]]; then REPLAY_CMD+=" --no-server-metrics"; fi

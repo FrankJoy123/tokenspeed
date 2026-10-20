@@ -78,6 +78,9 @@ elif name=='curl':
     if not (root/'ready').exists():sys.exit(7)
     from urllib.parse import urlparse
     if args[-1].endswith('/metrics'):
+        if not os.environ.get('FAKE_NO_DRAIN_COUNTERS'):
+            print('tokenspeed:num_requests_running{} '+os.environ.get('FAKE_ACTIVE_REQUESTS','0'))
+            print('tokenspeed:num_requests_waiting{} 0')
         sys.exit(7 if os.environ.get('FAKE_BAD_ENDPOINT') else 0)
     if str(urlparse(args[-1]).port)!=(root/'ready').read_text():sys.exit(7)
     if args[-1].endswith('/v1/models'):print(json.dumps({'data':[{'id':'kimi-k3'}]}))
@@ -114,7 +117,8 @@ keys = ['EP_SIZE', 'DURATION', 'CONCURRENCY', 'AIPERF_WARMUP_REQUESTS_PER_LANE',
 result = {key: os.environ[key] for key in keys}
 result['command'] = os.environ['REPLAY_CMD']
 result['loader'] = os.environ['WEKA_LOADER_OVERRIDE']
-result['context'] = os.environ['MAX_MODEL_LEN']
+result['context'] = os.environ.get('MAX_MODEL_LEN')
+result['offload_backend'] = os.environ['KV_OFFLOAD_BACKEND']
 (Path(os.environ['RESULT_DIR'])/'captured.json').write_text(json.dumps(result))
 PYTHON
     if [[ "$SERVER_METRICS" = true && "${FAKE_MISSING_METRICS:-}" != 1 ]]; then
@@ -191,7 +195,9 @@ class SlurmTests(unittest.TestCase):
             "MODEL_NAME": "kimi-k3",
             "TOKENIZER_PATH": "/model",
             "CPUS_PER_TASK": "64",
+            "CONCURRENCIES": "1",
             "CONCURRENCY": "1",
+            "DRAIN_TIMEOUT": "2",
             "DURATION": "180",
             "BENCHMARK_GRACE_SECONDS": "30",
             "REQUEST_TIMEOUT_SECONDS": "21600",
@@ -234,7 +240,7 @@ class SlurmTests(unittest.TestCase):
         self.assertEqual(process.returncode, 0, stdout + stderr)
         for config, ep in (("attn_tp8_moe_tp8", "1"), ("attn_tp8_moe_ep8", "8")):
             run = self.root / "runs" / config
-            captured = json.loads((run / "client/captured.json").read_text())
+            captured = json.loads((run / "c1/client/captured.json").read_text())
             self.assertEqual(captured["EP_SIZE"], ep)
             for key in (
                 "DURATION",
@@ -247,15 +253,15 @@ class SlurmTests(unittest.TestCase):
             self.assertIn("--random-seed 42", captured["command"])
             self.assertIn("--no-server-metrics", captured["command"])
             self.assertFalse(
-                (run / "client/aiperf_artifacts/server_metrics_export.json").exists()
+                (run / "c1/client/aiperf_artifacts/server_metrics_export.json").exists()
             )
             self.assertEqual((run / "client-exit-code.txt").read_text(), "0\n")
             self.assertEqual(
-                json.loads((run / "client/inferencex_result.json").read_text()),
+                json.loads((run / "c1/client/inferencex_result.json").read_text()),
                 {"num_gpus": 8, "sentinel": 123},
             )
             self.assertEqual(
-                json.loads((run / "client/deployment.json").read_text())[
+                json.loads((run / "c1/client/deployment.json").read_text())[
                     "physical_nodes"
                 ],
                 2,
@@ -433,7 +439,7 @@ class SlurmTests(unittest.TestCase):
         process = self.launch()
         stdout, stderr = process.communicate(timeout=25)
         self.assertEqual(process.returncode, 0, stdout + stderr)
-        root = self.root / "runs/attn_tp8_moe_tp8/client"
+        root = self.root / "runs/attn_tp8_moe_tp8/c1/client"
         self.assertTrue(
             (root / "aiperf_artifacts/server_metrics_export.json").is_file()
         )
@@ -442,9 +448,57 @@ class SlurmTests(unittest.TestCase):
         self.assertEqual(args[args.index("--synthetic-acceptance-length") + 1], "3.7")
         self.assertIn("--enable-metrics", args)
         captured = json.loads((root / "captured.json").read_text())
-        self.assertEqual(captured["context"], "1048576")
+        self.assertIsNone(captured["context"])
         self.assertEqual(captured["loader"], "semianalysis_cc_traces_weka_062126")
         self.assertNotIn("--no-server-metrics", captured["command"])
+
+    def test_sweep_reuses_server_and_keeps_native_context(self):
+        self.env.update(
+            CONFIG_NAMES="attn_tp8_moe_tp8",
+            CONCURRENCIES="16 1",
+            MAX_MODEL_LEN="1048576",
+            SERVER_METRICS="true",
+            METRICS_PORT="18090",
+            KV_OFFLOAD_BACKEND="none",
+        )
+        process = self.launch()
+        stdout, stderr = process.communicate(timeout=25)
+        self.assertEqual(process.returncode, 0, stdout + stderr)
+        commands = (self.root / "server-args.jsonl").read_text().splitlines()
+        self.assertEqual(len(commands), 1)
+        args = json.loads(commands[0])
+        index = max(i for i, arg in enumerate(args) if arg == "--max-model-len")
+        self.assertEqual(args[index + 1], "1048576")
+        for cc in (16, 1):
+            run = self.root / f"runs/attn_tp8_moe_tp8/c{cc}"
+            captured = json.loads((run / "client/captured.json").read_text())
+            self.assertEqual(captured["CONCURRENCY"], str(cc))
+            self.assertIsNone(captured["context"])
+            self.assertEqual(captured["offload_backend"], "")
+            self.assertEqual(
+                captured["loader"], "semianalysis_cc_traces_weka_062126_256k"
+            )
+            self.assertTrue((run / "drain-metrics.txt").exists())
+
+    def test_failed_drain_stops_next_point(self):
+        self.env.update(
+            CONFIG_NAMES="attn_tp8_moe_tp8",
+            CONCURRENCIES="1 2",
+            SERVER_METRICS="true",
+            METRICS_PORT="18090",
+            FAKE_ACTIVE_REQUESTS="1",
+            DRAIN_TIMEOUT="1",
+        )
+        process = self.launch()
+        stdout, stderr = process.communicate(timeout=15)
+        self.assertNotEqual(process.returncode, 0, stdout + stderr)
+        self.assertIn("Server drain timeout", stderr)
+        self.assertFalse((self.root / "runs/attn_tp8_moe_tp8/c2").exists())
+        self.assertFalse((self.root / "ready").exists())
+
+    def test_missing_drain_counters_stop_next_point(self):
+        self.env["FAKE_NO_DRAIN_COUNTERS"] = "1"
+        self.test_failed_drain_stops_next_point()
 
     def test_required_metrics_failure_stops_run(self):
         for missing, bad_endpoint, empty in (
@@ -473,8 +527,11 @@ class SlurmTests(unittest.TestCase):
     def test_protocol_mismatch_fails_before_gpu_startup(self):
         for override in (
             {"AL_TARGET": "nan", "ACCEPTANCE_MODE": "synthetic"},
-            {"AGENTX_PROTOCOL": "weka-062126-full"},
+            {"MAX_MODEL_LEN": "0"},
             {"MAX_NUM_SEQS": "0"},
+            {"CONCURRENCIES": "1 1"},
+            {"CONCURRENCIES": "1 0"},
+            {"CONCURRENCIES": "1 2", "SERVER_METRICS": "false"},
             {"AL_TARGET": "4.1", "ACCEPTANCE_MODE": "synthetic"},
             {"SPEC_DECODING": "unknown"},
             {"METRICS_PORT": "8000", "SERVER_METRICS": "true"},

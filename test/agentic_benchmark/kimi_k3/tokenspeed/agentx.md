@@ -20,7 +20,13 @@ mkdir "$CLIENT_ROOT"
 git clone https://github.com/SemiAnalysisAI/InferenceX.git "$CLIENT_ROOT/inferencex"
 git -C "$CLIENT_ROOT/inferencex" checkout ebedc2bbac4ff3e51ea9acb1f95093d017162809
 git clone https://github.com/SemiAnalysisAI/aiperf.git "$CLIENT_ROOT/aiperf"
-git -C "$CLIENT_ROOT/aiperf" checkout 89b21867872a5bbc4b0676bf5005c404da5e9f94
+git -C "$CLIENT_ROOT/aiperf" checkout 754356e9a39acc6cc6afb242d123bb57c3fb6f75
+# Prepare the validated backport of upstream AIPerf #1540 separately.
+# Do not substitute an unvalidated newer client during a comparison.
+export AIPERF_PATCH=/shared/aiperf-pr1540-backport.patch
+printf '%s  %s\n' a33f2da017a2321003b0d1722338124ea2b7f6ac1b5f69a78a6c234983617c04 "$AIPERF_PATCH" | sha256sum --check
+git -C "$CLIENT_ROOT/aiperf" apply --check "$AIPERF_PATCH"
+git -C "$CLIENT_ROOT/aiperf" apply "$AIPERF_PATCH"
 python3.11 -m venv "$CLIENT_ROOT/venv"
 source "$CLIENT_ROOT/venv/bin/activate"
 python -m pip install -e "$CLIENT_ROOT/aiperf" \
@@ -30,6 +36,14 @@ python -m pip install -e "$CLIENT_ROOT/aiperf" \
 python -m pip check
 python -m pip freeze --all > "$CLIENT_ROOT/requirements-resolved.txt"
 ```
+
+The validated client is the base above plus the backport of public
+[AIPerf #1540](https://github.com/ai-dynamo/aiperf/pull/1540), specifically commits
+`556293ec52a7fd57f0221255ecf2de2f6a9eb363` and
+`e84e5edd1ab6f660eb5d9eb7e3c5d24124f3b6a7`. Keep the checked patch in the external
+experiment bundle; this PR does not vendor AIPerf changes. The installation
+example resolves dependencies once; reuse its frozen environment for comparisons
+rather than treating the version ranges as a dependency lock.
 
 Keep client sources, resolved dependencies, model checkpoints and the trace
 cache unchanged across comparisons. The protocol selects either the public
@@ -65,22 +79,25 @@ provides `ts`. The client runs on the host invoking this script.
 
 ```bash
 export SOURCE_ROOT=/shared/tokenspeed
-export CONFIG_NAMES="attn_tp8_moe_tp8 attn_tp8_moe_ep8"
+export CONFIG_NAMES="attn_tp8_moe_tp8"
 export CONTAINER_IMAGE=/shared/server.sqsh CONTAINER_MOUNTS=/shared:/shared
 export SERVER_VENV=/opt/server-venv
+export TOKENSPEED_FLASHINFER_AUTOTUNE_CACHE_DIR=/shared/frozen-autotune-cache
+export TOKENSPEED_HEALTH_CHECK_TIMEOUT=90
 export MODEL_DIR=/shared/k3 DRAFT_DIR=/shared/eagle3
-export MODEL_NAME=kimi-k3 TOKENIZER_PATH="$MODEL_DIR"
+export MODEL_NAME=moonshotai/Kimi-K3 TOKENIZER_PATH=/shared/pinned-k3-tokenizer
 export CLIENT_PYTHON="$CLIENT_ROOT/venv/bin/python"
 export INFERENCEX_WORKSPACE="$CLIENT_ROOT/inferencex"
-export AGENTX_PROTOCOL=weka-062126-full MAX_MODEL_LEN=1048576 MAX_NUM_SEQS=2
+export AGENTX_PROTOCOL=weka-062126-256k MAX_MODEL_LEN=1048576 MAX_NUM_SEQS=16
 export SPEC_DECODING=eagle3 SPEC_STEPS=3 PRECISION=fp4
 export ACCEPTANCE_MODE=synthetic AL_TARGET=3.7
 export SERVER_METRICS=true METRICS_PORT=8010
-export CONCURRENCY=1 API_PORT=8000 CPUS_PER_TASK=64
+export CONCURRENCIES="1" API_PORT=8000 CPUS_PER_TASK=64
+export DRAIN_TIMEOUT=1800
 export READINESS_PATH=/readiness READINESS_TIMEOUT=7500 CLIENT_TIMEOUT=8400
 export RUN_ROOT=/shared/new-agentx-output
 
-# Smoke. For formal runs: DURATION=3600, warmup requests=10, unsafe override=false.
+# Smoke uses one point. For formal runs, use the settings below with a new RUN_ROOT.
 export DURATION=180 AIPERF_WARMUP_REQUESTS_PER_LANE=1 AIPERF_UNSAFE_OVERRIDE=true
 export BENCHMARK_GRACE_SECONDS=30 AGENTIC_WARMUP_GRACE_PERIOD=1800
 export REQUEST_TIMEOUT_SECONDS=21600 CLIENT_SEED=42
@@ -90,24 +107,51 @@ export AIPERF_EXTRA_INPUTS='{"ignore_eos":true,"temperature":1.0,"top_p":0.95,"t
 SERVER_ARGS=(
   --model "$MODEL_DIR" --served-model-name "$MODEL_NAME"
   --speculative-draft-model-path "$DRAFT_DIR"
-  --gpu-memory-utilization 0.9 --seed 42
+  --gpu-memory-utilization 0.92 --seed 0
+  --language-model-only --stream-interval 10 --max-cudagraph-capture-size 1024
+  --chunked-prefill-size 8192 --max-prefill-tokens 8192
+  --mamba-ssm-dtype bfloat16 --prefix-granularity 128
+  --health-check-timeout-secs 120 --enable-log-request-stats
   --engine-startup-timeout 7200 --disable-kvstore
 )
 export SLURM_JOB_ID=YOUR_HELD_JOB_ID
 bash "$SOURCE_ROOT/test/agentic_benchmark/kimi_k3/tokenspeed/agentx.slurm" "${SERVER_ARGS[@]}"
 ```
 
+For the formal sweep, set these explicitly before invoking the same launcher:
+
+```bash
+export RUN_ROOT=/shared/new-agentx-formal-output
+export CONCURRENCIES="1 2 4 8 16"
+export DURATION=3600 AIPERF_WARMUP_REQUESTS_PER_LANE=10 AIPERF_UNSAFE_OVERRIDE=false
+```
+
+The server checkpoint in this recipe is K3 MXFP4; `fp4` is the native report
+category. Pin model, EAGLE3 draft and tokenizer snapshots separately. The fixed-AL
+recipe uses the greedy server backend even though the native scenario sends
+sampling parameters. Record effective sampling, not just the HTTP parameters.
+The runtime scheduler fix is a separate dependency, not part of this launcher;
+record the exact scheduler build used when reproducing fixed-server curves.
+
 Alternatively, submit with a client environment available on the allocated node:
 
 ```bash
 sbatch --nodes=2 --ntasks-per-node=1 --gpus-per-node=4 --cpus-per-task=64 \
-  --exclusive --partition=YOUR_PARTITION --time=12:00:00 --no-requeue --export=ALL \
+  --exclusive --partition=YOUR_PARTITION --time=16:00:00 --no-requeue --export=ALL \
   "$SOURCE_ROOT/test/agentic_benchmark/kimi_k3/tokenspeed/agentx.slurm" "${SERVER_ARGS[@]}"
 ```
 
 `RUN_ROOT` must be new and its parent must exist. Each config starts a fresh
-server; a failed point stops the sweep. Use a new output root for each concurrency
-or retry. C1/C2/C4 mean 1/2/4 root replay lanes; child agents can add concurrent
+server and executes `CONCURRENCIES` in the supplied order. A failed point or
+failed drain stops the sweep. Each point gets `c<concurrency>/client/` under its
+config directory; use a new output root for a retry. Duplicate CC values are
+rejected; run repetitions under another output root.
+Multiple points require `SERVER_METRICS=true`. Between points the launcher waits
+until both running and waiting server request counters are present and zero;
+`DRAIN_TIMEOUT` is separate from client grace. The client uses native per-replay
+prefix isolation, not a physical KV-cache flush. The service, allocator and
+compiled/autotuned state remain alive across points. Keep point order and this
+initialization policy consistent across engine comparisons. C1/C2/C4 mean 1/2/4 root replay lanes; child agents can add concurrent
 HTTP requests. Keep the selected shared config's TP8/EP8 topology. `PRECISION` must describe
 the actual checkpoint, and `DRAFT_DIR` must match `SPEC_DECODING`.
 Extra server arguments must not change the topology used for reporting.
@@ -115,16 +159,17 @@ The launcher owns context, sequence capacity, speculative method/steps, AL,
 and metrics arguments; conflicting trailing flags fail before startup.
 
 Grace is the maximum drain wait after sending stops, not a fixed sleep.
-`CLIENT_TIMEOUT` also covers preparation, warmup and export; it is a separate
-outer limit. Allocation holding and multi-allocation scheduling remain external.
+`CLIENT_TIMEOUT` covers preparation, warmup and export for each point; it is a
+separate outer limit. Request an allocation long enough for the complete sweep. Allocation holding and multi-allocation scheduling remain external.
 Cleanup handles interrupted preflight/server launches even before their Slurm
 steps are registered. Only this invocation's steps are cancelled.
 
 ## Outputs and scope
 
-Each `RUN_ROOT/<config>/` contains server/client logs, the server command,
+Each `RUN_ROOT/<config>/` contains the server log, the server command,
 allocation and GPU information, endpoint details, and an exit-code file.
-Its `client/` contains the native request exports, phase logs, summary and
+Each `c<concurrency>/` contains a client log, exit code and drain metrics. Its
+`client/` contains the native request exports, phase logs, summary and
 `inferencex_result.json`. Native replay and validation failures propagate to the
 launcher; partial outputs are retained.
 
@@ -163,7 +208,9 @@ python -m unittest discover -s test/agentic_benchmark/tests \
 | Setting | Values and meaning |
 | --- | --- |
 | `AGENTX_PROTOCOL` | `weka-062126-256k` or `weka-062126-full`; selects the native public loader |
-| `MAX_MODEL_LEN` | Exactly 262144 or 1048576 respectively; applied to both server and replay |
+| `MAX_MODEL_LEN` | Positive server context limit; the verified full and 256k recipes both use 1048576. No client context cap is injected |
+| `CONCURRENCIES` | Ordered, unique positive root-lane counts, e.g. `1 2 4 8 16` |
+| `DRAIN_TIMEOUT` | Maximum server-drain seconds after each point; missing counters cannot count as drained |
 | `MAX_NUM_SEQS` | Explicit service admission capacity, independent of root-lane `CONCURRENCY` |
 | `ACCEPTANCE_MODE` | `natural` (empty/unset `AL_TARGET`) or `synthetic` (finite target required) |
 | `AL_TARGET` | Synthetic accepted length including the verification token; between 1 and `SPEC_STEPS + 1` |

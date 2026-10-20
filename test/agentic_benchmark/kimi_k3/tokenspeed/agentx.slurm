@@ -50,7 +50,18 @@ validate_config() {
     : "${CLIENT_ROOT:?prepared InferenceX checkout and venv directory}"
     : "${INFERENCEX_WORKSPACE:?directory containing benchmarks/benchmark_lib.sh}"
     : "${CPUS_PER_TASK:?CPU allocation per node}"
-    : "${CONCURRENCY:?root session concurrency}"
+    : "${CONCURRENCIES:?space-separated root session concurrency values}"
+    read -r -a CONCURRENCY_VALUES <<< "$CONCURRENCIES"
+    (( ${#CONCURRENCY_VALUES[@]} > 0 )) || { echo "Empty CONCURRENCIES" >&2; exit 2; }
+    local concurrency
+    declare -A seen_concurrencies=()
+    for concurrency in "${CONCURRENCY_VALUES[@]}"; do
+        [[ "$concurrency" =~ ^[1-9][0-9]{0,8}$ && ! -v "seen_concurrencies[$concurrency]" ]] ||
+            { echo "Invalid or duplicate concurrency: $concurrency" >&2; exit 2; }
+        seen_concurrencies[$concurrency]=1
+    done
+    export CONCURRENCY="${CONCURRENCY_VALUES[0]}"
+    : "${DRAIN_TIMEOUT:?maximum wait for server requests to finish between points}"
     : "${API_PORT:?server API port}"
     : "${READINESS_PATH:?readiness endpoint, including leading slash}"
     : "${READINESS_TIMEOUT:?maximum server startup seconds}"
@@ -59,7 +70,7 @@ validate_config() {
     for variable in SOURCE_ROOT CLIENT_PYTHON CLIENT_ROOT RUN_ROOT; do
         [[ "${!variable}" = /* ]] || { echo "$variable must be absolute" >&2; exit 2; }
     done
-    for variable in CONCURRENCY API_PORT READINESS_TIMEOUT CLIENT_TIMEOUT CPUS_PER_TASK; do
+    for variable in CONCURRENCY API_PORT READINESS_TIMEOUT CLIENT_TIMEOUT CPUS_PER_TASK DRAIN_TIMEOUT; do
         [[ "${!variable}" =~ ^[1-9][0-9]*$ ]] || { echo "$variable must be a positive integer" >&2; exit 2; }
     done
     SCRIPT_DIR="$SOURCE_ROOT/test/agentic_benchmark/kimi_k3/tokenspeed"
@@ -68,6 +79,10 @@ validate_config() {
     [[ -f "$SCRIPT_DIR/agentx.sh" ]] || { echo "Missing client script: $SCRIPT_DIR/agentx.sh" >&2; exit 2; }
     source "$SCRIPT_DIR/agentx.sh"
     validate_agentx_config
+    if (( ${#CONCURRENCY_VALUES[@]} > 1 )) && [[ "$SERVER_METRICS" != true ]]; then
+        echo 'Concurrency sweeps require SERVER_METRICS=true for server draining' >&2
+        exit 2
+    fi
     validate_agentx_values RUN_ROOT
     [[ "$CLIENT_PYTHON" = "$CLIENT_ROOT/venv/bin/python" ]] || { echo "CLIENT_PYTHON must use CLIENT_ROOT/venv" >&2; exit 2; }
     for config in "${CONFIGS[@]}"; do
@@ -172,7 +187,7 @@ check_resources() {
 }
 
 launch_server() {
-    timeout --signal=TERM --kill-after=45 "$((READINESS_TIMEOUT + CLIENT_TIMEOUT + 120))" \
+    timeout --signal=TERM --kill-after=45 "$((READINESS_TIMEOUT + (CLIENT_TIMEOUT + DRAIN_TIMEOUT) * ${#CONCURRENCY_VALUES[@]} + 120))" \
         "${SRUN[@]}" --job-name="$STEP_NAME" --mpi=pmix --kill-on-bad-exit=1 \
         bash -c '
             set -euo pipefail
@@ -199,19 +214,39 @@ wait_for_ready() {
 
 run_benchmark() {
     # Run the prepared native client on this host, outside the server container.
-    export AIPERF_SERVER_URL="$BASE_URL" RESULT_DIR="$RUN_ROOT/client"
+    export AIPERF_SERVER_URL="$BASE_URL" RESULT_DIR="$RUN_ROOT/c${CONCURRENCY}/client"
+    mkdir "$RUN_ROOT/c${CONCURRENCY}"
     case "$CONFIG" in
         attn_tp8_moe_tp8) export EP_SIZE=1 ;;
         attn_tp8_moe_ep8) export EP_SIZE=8 ;;
     esac
     timeout --signal=INT --kill-after=45 "$CLIENT_TIMEOUT" \
-        bash "$SCRIPT_DIR/agentx.sh" > "$RUN_ROOT/client.log" 2>&1 &
+        bash "$SCRIPT_DIR/agentx.sh" > "$RUN_ROOT/c${CONCURRENCY}/client.log" 2>&1 &
     CLIENT_PID=$!
     local result=0
     wait "$CLIENT_PID" || result=$?
     CLIENT_PID=
-    printf '%s\n' "$result" > "$RUN_ROOT/client-exit-code.txt"
+    printf '%s\n' "$result" > "$RUN_ROOT/c${CONCURRENCY}/client-exit-code.txt"
     return "$result"
+}
+
+# A completed client may leave server work after tail cancellation. Do not let
+# that work overlap the next point. Missing counters fail closed at the timeout.
+wait_for_drain() {
+    local start=$SECONDS
+    while true; do
+        kill -0 "$SERVER_PID" 2>/dev/null || { echo 'Server exited while draining' >&2; return 1; }
+        if curl --fail --silent --max-time 5 "$AIPERF_SERVER_METRICS_URLS" > "$RUN_ROOT/c${CONCURRENCY}/drain-metrics.txt" &&
+            awk '
+                /^tokenspeed:num_requests_running(\{|[[:space:]])/ { running=1; total+=$2 }
+                /^tokenspeed:num_requests_waiting(\{|[[:space:]])/ { waiting=1; total+=$2 }
+                END { exit !(running && waiting && total == 0) }
+            ' "$RUN_ROOT/c${CONCURRENCY}/drain-metrics.txt"; then
+            return 0
+        fi
+        (( SECONDS - start < DRAIN_TIMEOUT )) || { echo 'Server drain timeout' >&2; return 1; }
+        sleep 1
+    done
 }
 
 # Keep the configuration sweep beside the launch lifecycle, like agentic_bench.slurm.
@@ -246,7 +281,11 @@ for CONFIG in "${CONFIGS[@]}"; do
     check_resources
     launch_server "$@" "${PROTOCOL_ARGS[@]}" --port "$API_PORT"
     wait_for_ready
-    run_benchmark
+    for CONCURRENCY in "${CONCURRENCY_VALUES[@]}"; do
+        export CONCURRENCY
+        run_benchmark
+        if [[ "$SERVER_METRICS" = true ]]; then wait_for_drain; fi
+    done
     stop_server
     printf '0\n' > "$RUN_ROOT/client-exit-code.txt"
     trap - EXIT INT TERM
