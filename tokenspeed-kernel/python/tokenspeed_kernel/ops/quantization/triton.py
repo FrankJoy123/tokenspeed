@@ -345,33 +345,66 @@ def fp8_quantize_per_token(
     return codes, scales
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["groups"], do_not_specialize_on_alignment=["groups"])
 def _fp8_token_group_quantize_kernel(
     x_ptr,
     out_ptr,
     scale_ptr,
     group_size,
+    groups,
     eps,
     bit8_min,
     bit8_max,
     BLOCK: tl.constexpr,
+    GROUPS_PER_CTA: tl.constexpr,
 ):
-    group_id = tl.program_id(0)
-    cols = tl.arange(0, BLOCK)
-    mask = cols < group_size
-    offsets = group_id.to(tl.int64) * group_size + cols
+    if GROUPS_PER_CTA == 1:
+        group_id = tl.program_id(0)
+        cols = tl.arange(0, BLOCK)
+        mask = cols < group_size
+        offsets = group_id.to(tl.int64) * group_size + cols
 
-    x = tl.load(x_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
-    scale = tl.maximum(tl.max(tl.abs(x), axis=0), eps) / bit8_max
-    out = tl.clamp(x / scale, bit8_min, bit8_max).to(out_ptr.dtype.element_ty)
+        x = tl.load(x_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+        scale = tl.maximum(tl.max(tl.abs(x), axis=0), eps) / bit8_max
+        out = tl.clamp(x / scale, bit8_min, bit8_max).to(out_ptr.dtype.element_ty)
 
-    tl.store(out_ptr + offsets, out, mask=mask)
-    tl.store(scale_ptr + group_id, scale)
+        tl.store(out_ptr + offsets, out, mask=mask)
+        tl.store(scale_ptr + group_id, scale)
+    else:
+        group_ids = tl.program_id(0) * GROUPS_PER_CTA + tl.arange(0, GROUPS_PER_CTA)
+        cols = tl.arange(0, BLOCK)
+        mask = (group_ids[:, None] < groups) & (cols[None, :] < group_size)
+        offsets = group_ids[:, None].to(tl.int64) * group_size + cols[None, :]
+
+        x = tl.load(x_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+        scale = tl.maximum(tl.max(tl.abs(x), axis=1), eps) / bit8_max
+        inverse_scale = 1.0 / scale
+        out = tl.clamp(x * inverse_scale[:, None], bit8_min, bit8_max).to(
+            out_ptr.dtype.element_ty
+        )
+
+        tl.store(out_ptr + offsets, out, mask=mask)
+        tl.store(scale_ptr + group_ids, scale, mask=group_ids < groups)
+
+
+def _fp8_token_group_groups_per_cta(
+    x: torch.Tensor, group_size: int, groups: int
+) -> int:
+    # The grouped launch was measured on gfx950 with 256 compute units. Its
+    # crossover keeps at least two workgroups per compute unit on that device.
+    if group_size != 128 or x.device.type != "cuda" or torch.version.hip is None:
+        return 1
+    device_properties = torch.cuda.get_device_properties(x.device)
+    if (
+        not current_platform().is_cdna4
+        or device_properties.multi_processor_count != 256
+    ):
+        return 1
+    return 16 if groups >= 32 * device_properties.multi_processor_count else 1
 
 
 def _fp8_token_group_quantize(
-    x: torch.Tensor,
-    group_size: int,
+    x: torch.Tensor, group_size: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if x.shape[-1] % group_size != 0:
         raise ValueError(
@@ -390,20 +423,23 @@ def _fp8_token_group_quantize(
     )
 
     groups = x.numel() // group_size
+    groups_per_cta = _fp8_token_group_groups_per_cta(x, group_size, groups)
     block = triton.next_power_of_2(group_size)
     num_warps = min(max(block // 256, 1), 8)
     fp8_finfo = torch.finfo(out_dtype)
 
-    _fp8_token_group_quantize_kernel[(groups,)](
+    _fp8_token_group_quantize_kernel[(triton.cdiv(groups, groups_per_cta),)](
         x,
         out,
         scales,
         group_size,
+        groups,
         1e-10,
         bit8_min=fp8_finfo.min,
         bit8_max=fp8_finfo.max,
         BLOCK=block,
-        num_warps=num_warps,
+        GROUPS_PER_CTA=groups_per_cta,
+        num_warps=1 if groups_per_cta == 16 else num_warps,
         num_stages=1,
     )
     return out, scales
