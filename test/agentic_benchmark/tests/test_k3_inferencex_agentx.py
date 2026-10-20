@@ -171,6 +171,15 @@ class SlurmTests(unittest.TestCase):
         )
         library.parent.mkdir(parents=True)
         library.write_text(NATIVE_STUB)
+        # Keep both sockets bound until their distinct ephemeral ports are selected.
+        with (
+            socket.socket(socket.AF_INET, socket.SOCK_STREAM) as api,
+            socket.socket(socket.AF_INET, socket.SOCK_STREAM) as metrics,
+        ):
+            api.bind(("0.0.0.0", 0))
+            metrics.bind(("0.0.0.0", 0))
+            api_port = str(api.getsockname()[1])
+            metrics_port = str(metrics.getsockname()[1])
         self.env = {
             **os.environ,
             "PATH": f'{tools}:{os.environ["PATH"]}',
@@ -209,7 +218,8 @@ class SlurmTests(unittest.TestCase):
             "AIPERF_FAILED_REQUEST_THRESHOLD": "0.1",
             "AIPERF_EXTRA_INPUTS": '{"ignore_eos":true}',
             "AIPERF_UNSAFE_OVERRIDE": "true",
-            "API_PORT": "8000",
+            "API_PORT": api_port,
+            "METRICS_PORT": metrics_port,
             "READINESS_PATH": "/readiness",
             "READINESS_TIMEOUT": "30",
             "CLIENT_TIMEOUT": "120",
@@ -235,7 +245,6 @@ class SlurmTests(unittest.TestCase):
         self.fail(f"Did not reach {name}")
 
     def test_sweep_preserves_native_settings_and_server_arguments(self):
-        self.env["API_PORT"] = "18048"
         process = self.launch()
         stdout, stderr = process.communicate(timeout=20)
         self.assertEqual(process.returncode, 0, stdout + stderr)
@@ -336,12 +345,11 @@ class SlurmTests(unittest.TestCase):
 
     def test_unexported_server_venv_and_conflicting_port(self):
         self.env["CONFIG_NAMES"] = "attn_tp8_moe_tp8"
-        self.env["API_PORT"] = "18048"
         result = subprocess.run(
             [
                 "bash",
                 "-c",
-                'export -n SERVER_VENV; source "$1" --port 9000',
+                'export -n SERVER_VENV; source "$1" --port "$METRICS_PORT"',
                 "test-launcher",
                 str(self.launcher),
             ],
@@ -354,12 +362,13 @@ class SlurmTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         args = json.loads((self.root / "server-args.jsonl").read_text())
         self.assertIn(
-            "9000", [args[i + 1] for i, arg in enumerate(args) if arg == "--port"]
+            self.env["METRICS_PORT"],
+            [args[i + 1] for i, arg in enumerate(args) if arg == "--port"],
         )
-        self.assertEqual(args[-2:], ["--port", "18048"])
+        self.assertEqual(args[-2:], ["--port", self.env["API_PORT"]])
         command = (self.root / "runs/attn_tp8_moe_tp8/server-command.txt").read_text()
-        self.assertIn("--port 9000", command)
-        self.assertTrue(command.rstrip().endswith("--port 18048"))
+        self.assertIn(f"--port {self.env['METRICS_PORT']}", command)
+        self.assertTrue(command.rstrip().endswith(f"--port {self.env['API_PORT']}"))
 
     def test_preflight_failure_stops_before_server_and_next_config(self):
         self.env["FAKE_FAIL"] = "preflight"
@@ -415,7 +424,7 @@ class SlurmTests(unittest.TestCase):
                         **self.env,
                         "RESULT_DIR": str(self.root / "result"),
                         "EP_SIZE": "8",
-                        "AIPERF_SERVER_URL": "http://node1:8000",
+                        "AIPERF_SERVER_URL": f"http://node1:{self.env['API_PORT']}",
                         key: value,
                     },
                     capture_output=True,
@@ -434,7 +443,6 @@ class SlurmTests(unittest.TestCase):
             ACCEPTANCE_MODE="synthetic",
             AL_TARGET="3.7",
             SERVER_METRICS="true",
-            METRICS_PORT="18090",
             PRECISION="fp4",
         )
         process = self.launch()
@@ -459,7 +467,6 @@ class SlurmTests(unittest.TestCase):
             CONCURRENCIES="16 1",
             MAX_MODEL_LEN="1048576",
             SERVER_METRICS="true",
-            METRICS_PORT="18090",
             KV_OFFLOAD_BACKEND="none",
         )
         process = self.launch()
@@ -486,7 +493,6 @@ class SlurmTests(unittest.TestCase):
             CONFIG_NAMES="attn_tp8_moe_tp8",
             CONCURRENCIES="1 2",
             SERVER_METRICS="true",
-            METRICS_PORT="18090",
             FAKE_ACTIVE_REQUESTS="1",
             DRAIN_TIMEOUT="1",
         )
@@ -504,7 +510,6 @@ class SlurmTests(unittest.TestCase):
                     CONFIG_NAMES="attn_tp8_moe_tp8",
                     CONCURRENCIES="1 2",
                     SERVER_METRICS="true",
-                    METRICS_PORT="18090",
                     FAKE_ACTIVE_REQUESTS=value,
                     DRAIN_TIMEOUT="1",
                     RUN_ROOT=str(self.root / f"invalid-{value.replace(' ', '-')}"),
@@ -521,7 +526,6 @@ class SlurmTests(unittest.TestCase):
         self.env.update(
             CONFIG_NAMES="attn_tp8_moe_tp8",
             SERVER_METRICS="true",
-            METRICS_PORT="18090",
             FAKE_TIMESTAMP=" 123456789",
         )
         process = self.launch()
@@ -587,7 +591,6 @@ class SlurmTests(unittest.TestCase):
                 self.env.update(
                     CONFIG_NAMES="attn_tp8_moe_tp8",
                     SERVER_METRICS="true",
-                    METRICS_PORT="18090",
                     FAKE_MISSING_METRICS=missing,
                     FAKE_BAD_ENDPOINT=bad_endpoint,
                     FAKE_EMPTY_METRICS=empty,
@@ -611,7 +614,7 @@ class SlurmTests(unittest.TestCase):
             {"CONCURRENCIES": "1 2", "SERVER_METRICS": "false"},
             {"AL_TARGET": "4.1", "ACCEPTANCE_MODE": "synthetic"},
             {"SPEC_DECODING": "unknown"},
-            {"METRICS_PORT": "8000", "SERVER_METRICS": "true"},
+            {"METRICS_PORT": self.env["API_PORT"], "SERVER_METRICS": "true"},
         ):
             with self.subTest(override=override):
                 result = subprocess.run(

@@ -259,6 +259,7 @@ latency or label fixed-AL results as natural acceptance.
   [#2285](https://github.com/lightseekorg/tokenspeed/pull/2285) do not apply to this
   aggregate TP8/EP8 launcher.
 
-The new protocol/metrics paths have CPU regression tests. Run GPU smoke on the
+The protocol/metrics CPU tests select ephemeral API and metrics ports so they
+can run alongside local services; the occupied-port test retains a real listener. Run GPU smoke on the
 exact candidate commit before claiming end-to-end validation. Full experiment
 scheduling, GPU allocation retention and spreadsheet generation remain external.
