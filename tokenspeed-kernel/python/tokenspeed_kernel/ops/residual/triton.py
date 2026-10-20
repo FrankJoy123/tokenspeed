@@ -1822,7 +1822,8 @@ def _mhc_init_kernel(
     row = tl.program_id(0).to(tl.int64)
     tile = tl.program_id(1)
     d = tile * B + tl.arange(0, B)
-    value = tl.load(X + row * X0 + d * X1, d < H, 0)
+    # Strided views can span more than int32 elements within one row.
+    value = tl.load(X + row * X0 + d.to(tl.int64) * X1, d < H, 0)
     for stream in tl.static_range(HC):
         tl.store(Y + (row * HC + stream) * H + d, value, d < H)
         if tile == 0:

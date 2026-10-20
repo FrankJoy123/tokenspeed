@@ -89,6 +89,20 @@ def test_mhc_init_strided(layout):
     _check_mhc_init(hidden, mhc_init(hidden, 4), 4)
 
 
+def test_mhc_init_large_inner_stride():
+    stride = 1 << 30
+    elements = 4 * stride + 1
+    needed = elements * torch.bfloat16.itemsize
+    if torch.cuda.mem_get_info()[0] < needed + (256 << 20):
+        pytest.skip("requires 8 GiB of free device memory")
+    storage = torch.empty(elements, device="cuda", dtype=torch.bfloat16)
+    # Keep wrapped addresses inside the allocation so overflow fails by value.
+    storage[0] = -17
+    hidden = storage.as_strided((1, 3), (0, stride), storage_offset=2 * stride)
+    hidden.copy_(torch.tensor([[1, 2, 3]], device="cuda", dtype=hidden.dtype))
+    _check_mhc_init(hidden, mhc_init(hidden, 4), 4)
+
+
 def test_mhc_init_runtime_rows_and_strides_do_not_compile():
     # Warm once, then vary row count and both embedding strides.
     hidden = torch.randn(6, 5120, device="cuda", dtype=torch.bfloat16)
