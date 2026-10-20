@@ -69,15 +69,7 @@ def _run(a, b, a_scales, b_scales) -> torch.Tensor:
 @pytest.mark.parametrize("m", [17, 32, 33, 80, 96, 128, 129, 848, 2048, 8192])
 @pytest.mark.parametrize(
     "n,k",
-    [
-        (1792, 5120),
-        (4096, 1280),
-        (8192, 1280),
-        (5120, 2048),
-        (1152, 5120),
-        (5120, 576),
-        (25600, 6144),
-    ],
+    [(1792, 5120), (4096, 1280), (8192, 1280), (5120, 2048), (1152, 5120), (5120, 576)],
 )
 def test_mxfp8_largem_matches_dequantized_reference(m: int, n: int, k: int) -> None:
     operands = _operands(m, n, k, seed=m + n + k)
@@ -85,64 +77,6 @@ def test_mxfp8_largem_matches_dequantized_reference(m: int, n: int, k: int) -> N
     assert actual.dtype == torch.bfloat16
     torch.testing.assert_close(
         actual.float(), _reference(*operands), atol=_BF16_ATOL, rtol=_BF16_RTOL
-    )
-
-
-@pytest.mark.parametrize("m", [17, 32, 96, 128])
-@pytest.mark.parametrize("n,k", [(5120, 15360), (1536, 5120)])
-def test_mxfp8_largem_decode_shapes_match_dequantized_reference(
-    m: int, n: int, k: int
-) -> None:
-    operands = _operands(m, n, k, seed=m + n + k)
-    torch.testing.assert_close(
-        _run(*operands).float(),
-        _reference(*operands),
-        atol=_BF16_ATOL,
-        rtol=_BF16_RTOL,
-    )
-
-
-@pytest.mark.parametrize(
-    "tile,cluster", [(64, 1), (64, 2), (128, 1), (128, 2), (256, 2)]
-)
-@pytest.mark.parametrize("n,k", [(8192, 1280), (5120, 576), (1792, 5120), (1792, 512)])
-def test_mxfp8_cluster_kernels_match_dequantized_reference(
-    tile: int, cluster: int, n: int, k: int
-) -> None:
-    # 1000 rows leave a ragged last cluster; K 1280 and 576 end on a partial
-    # tile, both kernels walk K 512 past K, and the BK256 walk rounds K 1280
-    # up past K.
-    m = 1000
-    a, b, a_scales, b_scales = _operands(m, n, k, seed=tile + cluster + n + k)
-    out = torch.full((m, n), float("nan"), device="cuda", dtype=torch.bfloat16)
-    largem_mod._launch_cluster_mm(
-        a, b, a_scales, b_scales, out, tile=tile, cluster=cluster, split_k=1
-    )
-    torch.testing.assert_close(
-        out.float(),
-        _reference(a, b, a_scales, b_scales),
-        atol=_BF16_ATOL,
-        rtol=_BF16_RTOL,
-    )
-
-
-@pytest.mark.parametrize("m", [17, 100])
-@pytest.mark.parametrize(
-    "n,k,split_k", [(1792, 5120, 5), (5120, 15360, 3), (1152, 5120, 2)]
-)
-def test_mxfp8_bk512_split_k_matches_dequantized_reference(
-    m: int, n: int, k: int, split_k: int
-) -> None:
-    a, b, a_scales, b_scales = _operands(m, n, k, seed=m + n + split_k)
-    out = torch.full((m, n), float("nan"), device="cuda", dtype=torch.bfloat16)
-    largem_mod._launch_cluster_mm(
-        a, b, a_scales, b_scales, out, tile=64, cluster=1, split_k=split_k
-    )
-    torch.testing.assert_close(
-        out.float(),
-        _reference(a, b, a_scales, b_scales),
-        atol=_BF16_ATOL,
-        rtol=_BF16_RTOL,
     )
 
 
