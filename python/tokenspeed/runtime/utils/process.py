@@ -39,16 +39,6 @@ import psutil
 logger = logging.getLogger(__name__)
 
 
-def register_usr_signal():
-    parent_process = psutil.Process().parent()
-
-    def signal_handler(sig, frame):
-        logger.error("recv usr signal, kill usr signal to parent")
-        parent_process.send_signal(signal.SIGUSR1)
-
-    signal.signal(signal.SIGUSR1, signal_handler)
-
-
 def kill_process_tree(parent_pid, include_parent: bool = True, skip_pid: int = None):
     """Kill the target process and all of its child processes."""
     if threading.current_thread() is threading.main_thread():

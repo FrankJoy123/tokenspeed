@@ -276,14 +276,10 @@ def test_grammar_consumers_share_compact_token_offsets(hostfunc):
         assert completion.event.is_set()
     else:
         method = load_symbol(
-            RUNTIME + "engine/generation_output_processor.py",
-            "_host_advance_matcher",
-            owner="OutputProcesser",
+            RUNTIME + "grammar/capturable_grammar.py", "_host_advance_matcher"
         )
         method(
-            None,
-            completion,
-            SimpleNamespace(output_tokens=tokens, output_lengths=lengths),
+            completion, SimpleNamespace(output_tokens=tokens, output_lengths=lengths)
         )
     assert [g.tokens for g in grammars] == [[11], [], [21, 22]]
 

@@ -1480,8 +1480,9 @@ class HostCacheExecutor:
                 f"{len(transfers):d}",
             )
 
-        # EventLoop zeroes freshly allocated Device blocks on the prerequisite
-        # stream before submitting the load. Recording the start event there
+        # The device handle zeroes the plan's freshly allocated Device blocks
+        # (``pages_to_zero``) on the prerequisite stream before submitting
+        # the load. Recording the start event there
         # makes the H2D copy wait for that zeroing; per-layer ready flags
         # (Triton) or events (DMA) then keep model consumers from reading
         # partially restored cache state.
@@ -1652,9 +1653,9 @@ class HostCacheExecutor:
     def consume_backup_poll_failure(self) -> bool:
         """Return whether an L3 backup future failed since the last consume.
 
-        ``poll_results`` must not raise that failure: ``CacheOpHooks`` has
-        not entered its replica collectives yet, and a rank-local raise
-        hangs peers waiting in ``all_reduce`` / ``all_gather_object``.
+        ``poll_results`` must not raise that failure: the control plane has
+        not entered the poll's replica collective yet, and a rank-local
+        raise hangs peers waiting in it.
         """
 
         failed = self._backup_poll_failed

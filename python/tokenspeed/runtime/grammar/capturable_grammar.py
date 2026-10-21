@@ -345,7 +345,7 @@ class GrammarHostBuffers:
     it back can take a switch interval (5 ms). Releasing it once per matcher
     call, ``.item()`` or bulk fill made the fill finish only after the
     scheduler's Python, with sampling waiting on it. So the matcher methods
-    keep the GIL (``keep_gil_in_matcher_calls``), inputs are read with
+    keep the GIL (``HostGrammarEntries``), inputs are read with
     ``tolist()``, the masks along a draft chain come from one matcher call,
     and rows are reset by memoryview copies, not by a torch or numpy fill.
     """
@@ -772,3 +772,55 @@ def setup_grammar_step(
     else:
         eager_buffers.vocab_mask_buf[:bs].fill_(-1)
     return None
+
+
+def resolve_grammar_completion(model_execution_results) -> list[int] | None:
+    """Where the data plane advanced a forward's grammar matchers (the
+    capturable path), each row's index of the kept token that ended its
+    grammar, or -1; None when the commit advances them.
+
+    The next step's build hostfunc normally advances the matchers; this
+    waits briefly for it and otherwise advances them on the host (no next
+    step may come: the last live request finished). The completion's lock
+    lets exactly one path win.
+    """
+    completion = model_execution_results.grammar_completion
+    if completion is None:
+        return None
+    if not completion.event.wait(timeout=0.005):
+        with completion.lock:
+            if not completion.event.is_set():
+                _host_advance_matcher(completion, model_execution_results)
+                completion.event.set()
+    return completion.terminated_at
+
+
+def _host_advance_matcher(completion, model_execution_results) -> None:
+    """Host-side fallback for the grammar matcher advance, from the
+    already-synced CPU tensors."""
+    grammars = completion.grammars or []
+    bs = completion.bs
+    advance_mask = completion.advance_mask or [True] * bs
+    output_tokens = model_execution_results.output_tokens
+    accept_lengths = model_execution_results.output_lengths
+    terminated_at = [-1] * bs
+    for i, grammar in enumerate(grammars):
+        if (
+            grammar is None
+            or grammar.finished
+            or grammar.is_terminated()
+            or not advance_mask[i]
+        ):
+            continue
+        n_accepted = int(accept_lengths[i].item())
+        offset = completion.output_layout.token_offset(i)
+        for j in range(n_accepted):
+            tok = int(output_tokens[offset + j].item())
+            try:
+                grammar.accept_token(tok)
+            except Exception:
+                break
+            if grammar.is_terminated():
+                terminated_at[i] = j
+                break
+    completion.terminated_at = terminated_at

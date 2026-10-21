@@ -33,8 +33,6 @@ import pytest
 
 from tokenspeed.runtime.execution.device import DeviceHandle, DeviceRole
 from tokenspeed.runtime.execution.types import PlannedForward
-from tokenspeed.runtime.pd.decode_executor import DisaggDecodeExecutor
-from tokenspeed.runtime.pd.prefill_executor import DisaggPrefillExecutor
 
 
 class _ForwardThread:
@@ -57,9 +55,10 @@ class _ForwardThread:
         return fn()
 
 
-class _PrefillPeer(DisaggPrefillExecutor):
-    """A P-role transfer peer the handle will recognize; the real __init__
-    (sockets, KV manager) is bypassed on purpose."""
+class _PrefillPeer:
+    """A P-role transfer peer (``TransferPeer``)."""
+
+    mode = "prefill"
 
     def __init__(self, trace) -> None:
         self._trace = trace
@@ -71,8 +70,10 @@ class _PrefillPeer(DisaggPrefillExecutor):
         self._trace.append("prepare")
 
 
-class _DecodePeer(DisaggDecodeExecutor):
+class _DecodePeer:
     """A D-role transfer peer; see _PrefillPeer."""
+
+    mode = "decode"
 
     def __init__(self, trace) -> None:
         self._trace = trace
@@ -271,5 +272,5 @@ def test_the_attached_peer_fixes_the_role():
 def test_an_unrecognized_transfer_peer_is_refused():
     """The role is read off the peer at construction, so a peer of the wrong
     type fails at startup rather than at the first transfer."""
-    with pytest.raises(TypeError, match="Disagg"):
+    with pytest.raises(TypeError, match="transfer peer"):
         _handle([], SimpleNamespace())
