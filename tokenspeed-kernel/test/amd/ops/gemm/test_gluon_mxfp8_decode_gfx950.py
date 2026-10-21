@@ -209,6 +209,14 @@ def _run_fp32(a, b, sa, sb, out, counters):
     )
 
 
+def _unaligned_copy(value):
+    k = value.shape[1]
+    backing = torch.empty((value.shape[0], k + 3), device="cuda", dtype=value.dtype)
+    view = backing[:, 1 : k + 1]
+    view.copy_(value)
+    return view
+
+
 @pytest.mark.parametrize(
     "m,n,k,unaligned",
     [
@@ -227,15 +235,7 @@ def test_fp32_block_scales_decode_boundaries_and_canaries(m, n, k, unaligned):
     if unaligned:
         # Unit inner stride remains supported when both the pointer and the
         # row stride prevent 16-byte value loads, alongside strided scales/out.
-        def unaligned_copy(value):
-            backing = torch.empty(
-                (value.shape[0], k + 3), device="cuda", dtype=value.dtype
-            )
-            view = backing[:, 1 : k + 1]
-            view.copy_(value)
-            return view
-
-        a, b = unaligned_copy(a), unaligned_copy(b)
+        a, b = _unaligned_copy(a), _unaligned_copy(b)
     # Quarter-integer values and power-of-two scales make the independent
     # dense dequantization oracle exact, including partial K128/N128 groups.
     expected = _fp32_reference(a, b, sa, sb)
@@ -259,8 +259,11 @@ def test_fp32_block_scales_decode_boundaries_and_canaries(m, n, k, unaligned):
 
 def test_fp32_split_graph_replay_rereads_scales_and_resets_counters():
     torch.manual_seed(7)
-    m, n, k = 17, 130, 4096
+    # Eight K tiles per split exceed the six-slot ring, exercising ordinary
+    # shared stores through a refill as well as split arrivals and replay.
+    m, n, k = 17, 130, 8192
     a, b, sa, sb = _fp32_operands(m, n, k)
+    a, b = _unaligned_copy(a), _unaligned_copy(b)
     counters = torch.zeros(
         gluon_mm_mxfp8_decode_num_counters_gfx950(m, n, k),
         device="cuda",

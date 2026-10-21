@@ -629,6 +629,10 @@ def _launch(A, B, A_scales, B_scales, C, config, counters):
     # Four-group scale words need 4-byte aligned rows and whole words per tile.
     # A K tail would read the next row's scale bytes into the padded groups.
     fp32_scales = A_scales.dtype == torch.float32
+    # K128 FP8 operands need more per-wave state than the native BF16 K32
+    # arithmetic; distribute a full 64-square tile over four waves.
+    if fp32_scales and block_m == 64 and block_n == 64 and warps_m * warps_n < 4:
+        warps_m, warps_n = 2, 2
     packed = (
         not fp32_scales and K % block_k == 0 and block_k % (4 * MXFP8_SCALE_GROUP) == 0
     ) and all(
