@@ -26,7 +26,7 @@
 # Shared configs own the fixed server recipe; this script owns deployment and replay.
 set -euo pipefail
 : "${SLURM_JOB_ID:?use sbatch or an existing allocation}"
-: "${RUN_MODE:?smoke or formal}" \
+: "${HF_HUB_CACHE:?shared mounted HF Hub cache}" "${RUN_MODE:?smoke or formal}" \
   "${CLIENT_ROOT:?prepared client venv root}" "${INFERENCEX_WORKSPACE:?InferenceX checkout}"
 case "$RUN_MODE" in
     smoke|formal) ;;
@@ -114,7 +114,7 @@ launch_server() {
     timeout --signal=TERM --kill-after=45 "$((7500 + (8400 + DRAIN_TIMEOUT) * ${#CONCURRENCY_VALUES[@]} + 120))" \
         srun --jobid="$SLURM_JOB_ID" --overlap --nodes="${#NODES[@]}" --ntasks-per-node=1 \
         --cpus-per-task=64 --gpus-per-node=4 \
-        --container-env=NVIDIA_VISIBLE_DEVICES,NVIDIA_DRIVER_CAPABILITIES \
+        --container-env=NVIDIA_VISIBLE_DEVICES,NVIDIA_DRIVER_CAPABILITIES,HF_HUB_CACHE \
         --container-image="$CONTAINER_IMAGE" --container-name="agentx_${SLURM_JOB_ID}_$$" \
         --container-mounts="$CONTAINER_MOUNTS" --container-workdir="$SOURCE_ROOT" \
         --container-remap-root --no-container-mount-home --container-writable \

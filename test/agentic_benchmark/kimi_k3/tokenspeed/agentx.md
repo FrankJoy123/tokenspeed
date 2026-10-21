@@ -73,6 +73,25 @@ across comparisons. The native loader reads
 Use whitespace-free client and output paths: the native command
 builder splits arguments on whitespace.
 
+Prepare the model and trace cache in a shared directory visible on both GPU nodes.
+`HF_HUB_CACHE` points directly to the directory containing `models--*` and
+`datasets--*`, not their parent. For example, an existing cache can be
+`/data/cache/huggingface/hub`; `$BENCH_ROOT/hf-cache/hub` below is only an example.
+Use the same directory for preparation and execution:
+
+```bash
+HF_HUB_CACHE="$BENCH_ROOT/hf-cache/hub"
+hf download nvidia/Kimi-K3-NVFP4 --cache-dir "$HF_HUB_CACHE"
+hf download lightseekorg/kimi-k3-eagle3-mla --cache-dir "$HF_HUB_CACHE"
+hf download --repo-type dataset semianalysisai/cc-traces-weka-062126 --cache-dir "$HF_HUB_CACHE"
+```
+
+The launcher forwards this cache location to the server containers and the host
+client. Because home directories are not mounted into the containers, the cache
+must be included in `CONTAINER_MOUNTS` at the same absolute path. The run example
+mounts it explicitly so a cache outside `BENCH_ROOT` works too. A cache path does
+not pin a revision; record the resolved revisions and keep them fixed across runs.
+
 ## Run
 
 Use a dedicated allocation, a compatible frozen server image, and mounted paths.
@@ -83,12 +102,14 @@ speculative strategy and synthetic acceptance length.
 
 ```bash
 : "${BENCH_ROOT:?set a shared benchmark directory}"
+: "${HF_HUB_CACHE:?set the prepared shared HF Hub cache}"
 SOURCE_ROOT="$BENCH_ROOT/tokenspeed"
 CLIENT_ROOT="$BENCH_ROOT/agentx-client"
 
-SOURCE_ROOT="$SOURCE_ROOT" CLIENT_ROOT="$CLIENT_ROOT" \
+SOURCE_ROOT="$SOURCE_ROOT" CLIENT_ROOT="$CLIENT_ROOT" HF_HUB_CACHE="$HF_HUB_CACHE" \
 INFERENCEX_WORKSPACE="$CLIENT_ROOT/inferencex" \
-CONTAINER_IMAGE="$BENCH_ROOT/server.sqsh" CONTAINER_MOUNTS="$BENCH_ROOT:$BENCH_ROOT" \
+CONTAINER_IMAGE="$BENCH_ROOT/server.sqsh" \
+CONTAINER_MOUNTS="$BENCH_ROOT:$BENCH_ROOT,$HF_HUB_CACHE:$HF_HUB_CACHE" \
 SERVER_VENV="" \
 TOKENSPEED_FLASHINFER_AUTOTUNE_CACHE_DIR="$BENCH_ROOT/autotune-cache" \
 CONFIG_NAMES=attn_tp8_moe_tp8 \
@@ -110,8 +131,7 @@ EAGLE3 is fixed at three draft steps and four draft tokens. The server commands
 use `nvidia/Kimi-K3-NVFP4` and `lightseekorg/kimi-k3-eagle3-mla` directly;
 the client loads its tokenizer from `nvidia/Kimi-K3-NVFP4` too.
 There are no model-path inputs or external strategy selector.
-Prepare these repositories in the Hugging Face cache before running, and record
-the resolved revisions with each comparison; a model ID alone does not pin a revision.
+Use the shared cache prepared above; a model ID alone does not pin a revision.
 The full-trace loader is fixed in `agentx.slurm`.
 The model checkpoint must be K3 FP4 and the tokenizer must match it. AL is a
 synthetic control, not a measured natural acceptance rate.
