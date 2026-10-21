@@ -221,33 +221,22 @@ runtime argument.
 
 #### FP32 block scales
 
-Canonical FP32 block-scaled E4M3 GEMM has one public Gluon entry that selects
-streaming decode or the general matrix path internally. Both require BF16
-output and K-contiguous values. The general path covers N divisible by 16
-and K greater than 256 and divisible by 32; the streaming path additionally
-covers smaller reductions and partial output-column tiles within its small-row
-domain below. Unsupported contracts retain the existing fallback. Native E8M0
-registration and routing remain separate.
+Canonical block-scaled E4M3 GEMM computes `A @ B.T` from values shaped
+`[M, K]` and `[N, K]`. With explicit block size `[128, 128]`, FP32 activation
+scales have shape `[M, ceil(K/128)]`: one scale per activation row and
+128-element reduction block. FP32 weight scales have shape
+`[ceil(N/128), ceil(K/128)]`: one scale shared by each 128-by-128 weight block.
+The values retain their canonical matrix layout; the scales are separate
+FP32 tensors and need not be powers of two.
 
-Activation scales are `[M, ceil(K/128)]`; weight scales are
-`[ceil(N/128), ceil(K/128)]`, with explicit block size `[128, 128]`.
-Arbitrary scale strides are supported, and no persistent weight copy or
-scale rounding is needed. Each unscaled K128 matrix partial is multiplied
-by its row scale and then its weight-block scale before FP32 accumulation.
-The order matters when a product of scales would overflow or underflow.
-Partial K groups zero-fill invalid values; shifted output tiles store only
-their owned rows and columns. Scales are read again on graph replay.
-
-The general GEMM uses a shared-memory value pipeline. Aligned values copy
-directly into shared memory; other unit-inner-stride layouts use ordinary
-loads into the same shared buffers. The shape-derived tile and split policy balances
-output work distribution against FP32 scratch and reduction cost. Split
-partials are always summed in split order. The online operation uses the
-existing public Triton activation
-quantizer followed by this same GEMM path. Performance coverage is reported
-for the tracked GLM projections, not every shape in the supported envelope.
-Online quantization retains its existing requirement that K be divisible by
-128; prequantized inputs also cover partial final scale groups.
+gfx950's scaled matrix instructions (MFMA) accept E8M0 scale operands, not
+arbitrary FP32 scales. FP32 block scales therefore require separate scaling
+of the unscaled block products; this is distinct from FP32 accumulation,
+which MFMA supports. Rounding the scales to E8M0 would change the numerical
+contract. Each block product receives its activation scale and then its
+weight scale before accumulation. This order avoids requiring a product of
+scales that could overflow or underflow even when the scaled block result
+is representable.
 
 ### gfx950 MXFP8 decode projection
 
