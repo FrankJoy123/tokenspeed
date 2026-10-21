@@ -108,9 +108,12 @@ def run(a, b, sa, sb, out):
 
 
 @pytest.mark.parametrize(
-    "shape,online", [(s, False) for s in SHAPES] + [(s, True) for s in ONLINE]
+    "shape,online,unaligned",
+    [(s, False, False) for s in SHAPES]
+    + [(s, True, False) for s in ONLINE]
+    + [((300, 384, 4096), False, True), ((65, 1024, 4096), False, True)],
 )
-def test_public_fp32_scales_arbitrary_strides_and_canaries(shape, online):
+def test_public_fp32_scales_arbitrary_strides_and_canaries(shape, online, unaligned):
     m, n, k = shape
     a, b, sa, sb = values(m, n, k)
     if online:
@@ -126,6 +129,17 @@ def test_public_fp32_scales_arbitrary_strides_and_canaries(shape, online):
         qa, actual_sa = a.to(torch.float8_e4m3fn), sa
         supplied_sa = sa
         a = qa
+    if unaligned:
+        operands = []
+        for value in (a, b):
+            backing = torch.empty(
+                value.shape[0] * (k + 3) + 1, device=value.device, dtype=value.dtype
+            )
+            view = backing[1:].as_strided(value.shape, (k + 3, 1))
+            view.copy_(value)
+            operands.append(view)
+        a, b = operands
+        qa = a
     expected = reference(qa, b, actual_sa, sb, torch.bfloat16)
     backing = torch.full((m + 2, n + 32), -7, device="cuda", dtype=torch.bfloat16)
     out = backing[1 : m + 1, 16 : n + 16]

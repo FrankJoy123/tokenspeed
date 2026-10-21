@@ -2270,6 +2270,16 @@ def launch_gluon_mm_mxfp8_gfx950(
             )
 
     config = _fp32_launch_config(m, n, k) if fp32_scales else None
+    if (
+        fp32_scales
+        and config.pipeline
+        and any(
+            value.data_ptr() % 16 != 0 or value.stride(0) % 16 != 0 for value in (A, B)
+        )
+    ):
+        # Direct-to-LDS copies require aligned values. Ordinary loads preserve
+        # the unit-inner-stride contract without copying or repacking inputs.
+        config = _FP32LaunchConfig(False, 32, 32, 4, config.splits)
     block_m = config.block_m if fp32_scales else MXFP8_BLOCK_M
     block_n = config.block_n if fp32_scales else MXFP8_BLOCK_N
     grid_mn = triton.cdiv(m, block_m) * triton.cdiv(n, block_n)

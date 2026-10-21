@@ -238,14 +238,12 @@ The order matters when a product of scales would overflow or underflow.
 Partial K groups zero-fill invalid values; shifted output tiles store only
 their owned rows and columns. Scales are read again on graph replay.
 
-Small or narrow projections use compact masked tiles. Aligned small-row
-projections use a 64-square/four-wave value pipeline when every split has
-at least four K128 steps; underfilled medium grids use 128-square tiles,
-and filled aligned grids use 256-square tiles. The shape-derived split
-policy balances output work distribution against FP32 scratch and reduction
-cost. Split partials are always summed in split order. Small aligned
-projections use a 4×64/one-wave reducer; other shapes retain 16×256/four
-waves. The online operation uses the existing public Triton activation
+Compact masked tiles handle small or narrow projections and value layouts
+unsuitable for direct shared-memory copies. Other projections can use a
+shared-memory value pipeline. The shape-derived tile and split policy balances
+output work distribution against FP32 scratch and reduction cost. Split
+partials are always summed in split order. The online operation uses the
+existing public Triton activation
 quantizer followed by this same GEMM path. Performance coverage is reported
 for the tracked GLM projections, not every shape in the supported envelope.
 Online quantization retains its existing requirement that K be divisible by
