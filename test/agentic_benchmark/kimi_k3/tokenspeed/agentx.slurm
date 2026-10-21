@@ -162,11 +162,7 @@ setup_slurm() {
 }
 
 check_resources() {
-    # Any HTTP response on this port means another service owns it.
-    if curl --silent --max-time 3 --output /dev/null "$BASE_URL/v1/models"; then
-        echo 'API port already occupied; refusing to use or stop that service' >&2
-        exit 1
-    fi
+    # Check once per server launch, before readiness polling or the CC sweep.
     local ports=("$API_PORT")
     if [[ "$SERVER_METRICS" = true ]]; then
         [[ "$METRICS_PORT" != "$API_PORT" ]] || { echo 'API and metrics ports must differ' >&2; exit 2; }
@@ -285,6 +281,15 @@ for argument in "$@"; do
             echo "Set protocol variables instead of overriding $argument" >&2; exit 2 ;;
     esac
 done
+# AgentX engine tuning lives with the server command, not in the submission example.
+# The shared configs still own TP8/EP8 topology and kernel backend selection.
+SERVER_ARGS=(
+    --gpu-memory-utilization 0.92 --seed 0
+    --language-model-only --stream-interval 10 --max-cudagraph-capture-size 1024
+    --chunked-prefill-size 8192 --max-prefill-tokens 8192
+    --mamba-ssm-dtype bfloat16 --prefix-granularity 128
+    --enable-log-request-stats --engine-startup-timeout 7200
+)
 PROTOCOL_ARGS=(--max-model-len "$MAX_MODEL_LEN" --max-num-seqs "$MAX_NUM_SEQS"
     --speculative-algorithm "${SPEC_DECODING^^}" --speculative-num-steps "$SPEC_STEPS"
     --speculative-num-draft-tokens "$((SPEC_STEPS + 1))")
@@ -303,10 +308,10 @@ for CONFIG in "${CONFIGS[@]}"; do
     trap finish EXIT
     trap 'CLIENT_SIGNAL=INT; exit 130' INT
     trap 'CLIENT_SIGNAL=TERM; exit 143' TERM
-    prepare_run "$@" "${PROTOCOL_ARGS[@]}" --port "$API_PORT"
+    prepare_run "${SERVER_ARGS[@]}" "$@" "${PROTOCOL_ARGS[@]}" --port "$API_PORT"
     setup_slurm
     check_resources
-    launch_server "$@" "${PROTOCOL_ARGS[@]}" --port "$API_PORT"
+    launch_server "${SERVER_ARGS[@]}" "$@" "${PROTOCOL_ARGS[@]}" --port "$API_PORT"
     wait_for_ready
     for CONCURRENCY in "${CONCURRENCY_VALUES[@]}"; do
         export CONCURRENCY

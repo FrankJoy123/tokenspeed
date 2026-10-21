@@ -3,10 +3,20 @@
 `agentx.slurm` loops over the existing TP8/EP8 configs, starts a K3 server,
 waits for readiness, runs native InferenceX AgentX replay, saves its outputs,
 and stops the server. It uses two four-GPU GB300 nodes as one aggregate TP8
-instance. Arguments after the script are appended to the existing server config.
+instance. The shared server configs own topology and kernel backends; `SERVER_ARGS` in
+`agentx.slurm` holds AgentX engine tuning. Arguments after the script override
+that tuning (for example, checkpoint paths).
 The launcher appends `--port "$API_PORT"` last so serving and readiness use the
 same port; any caller-supplied port is overridden. Client settings are validated
 before server startup.
+
+
+The client stack is `agentx.sh → InferenceX → AIPerf → HTTP inference server`.
+InferenceX defines the experiment protocol and aggregates results; AIPerf loads
+and replays traces, schedules requests and records measurements. The official
+[command builder](https://github.com/SemiAnalysisAI/InferenceX/blob/ebedc2bbac4ff3e51ea9acb1f95093d017162809/benchmarks/benchmark_lib.sh#L3073-L3077)
+invokes `aiperf profile --scenario inferencex-agentx-mvp` with streaming enabled.
+This launcher uses that same path, without EvalScope.
 
 ## Prepare once
 
@@ -21,12 +31,13 @@ git clone https://github.com/SemiAnalysisAI/InferenceX.git "$CLIENT_ROOT/inferen
 git -C "$CLIENT_ROOT/inferencex" checkout ebedc2bbac4ff3e51ea9acb1f95093d017162809
 git clone https://github.com/SemiAnalysisAI/aiperf.git "$CLIENT_ROOT/aiperf"
 git -C "$CLIENT_ROOT/aiperf" checkout 754356e9a39acc6cc6afb242d123bb57c3fb6f75
-# Prepare the validated backport of upstream AIPerf #1540 separately.
-# Do not substitute an unvalidated newer client during a comparison.
-export AIPERF_PATCH=/shared/aiperf-pr1540-backport.patch
-printf '%s  %s\n' a33f2da017a2321003b0d1722338124ea2b7f6ac1b5f69a78a6c234983617c04 "$AIPERF_PATCH" | sha256sum --check
-git -C "$CLIENT_ROOT/aiperf" apply --check "$AIPERF_PATCH"
-git -C "$CLIENT_ROOT/aiperf" apply "$AIPERF_PATCH"
+# Apply the two public commits from AIPerf #1540 to this pinned client.
+for commit in 556293ec52a7fd57f0221255ecf2de2f6a9eb363 e84e5edd1ab6f660eb5d9eb7e3c5d24124f3b6a7; do
+  curl --fail --location "https://github.com/ai-dynamo/aiperf/commit/$commit.patch" \
+    --output "$CLIENT_ROOT/$commit.patch"
+  git -C "$CLIENT_ROOT/aiperf" apply --check "$CLIENT_ROOT/$commit.patch"
+  git -C "$CLIENT_ROOT/aiperf" apply "$CLIENT_ROOT/$commit.patch"
+done
 python3.11 -m venv "$CLIENT_ROOT/venv"
 source "$CLIENT_ROOT/venv/bin/activate"
 python -m pip install -e "$CLIENT_ROOT/aiperf" \
@@ -37,13 +48,13 @@ python -m pip check
 python -m pip freeze --all > "$CLIENT_ROOT/requirements-resolved.txt"
 ```
 
-The validated client is the base above plus the backport of public
-[AIPerf #1540](https://github.com/ai-dynamo/aiperf/pull/1540), specifically commits
-`556293ec52a7fd57f0221255ecf2de2f6a9eb363` and
-`e84e5edd1ab6f660eb5d9eb7e3c5d24124f3b6a7`. Keep the checked patch in the external
-experiment bundle; this PR does not vendor AIPerf changes. The installation
-example resolves dependencies once; reuse its frozen environment for comparisons
-rather than treating the version ranges as a dependency lock.
+[AIPerf #1540](https://github.com/ai-dynamo/aiperf/pull/1540) fixes child-branch
+cleanup when sending stops: unfinished join bookkeeping could otherwise keep
+replay waiting until grace expires after HTTP requests have completed. The
+commands above apply the two public commits to the pinned client; no separately
+prepared local patch is required. This launcher does not vendor AIPerf changes.
+Reuse the resolved client environment across comparisons. The installation
+example resolves dependencies once; version ranges are not a dependency lock.
 
 Keep client sources, resolved dependencies, model checkpoints and the trace
 cache unchanged across comparisons. The protocol selects either the public
@@ -106,12 +117,7 @@ export AIPERF_EXTRA_INPUTS='{"ignore_eos":true,"temperature":1.0,"top_p":0.95,"t
 SERVER_ARGS=(
   --model "$MODEL_DIR" --served-model-name "$MODEL_NAME"
   --speculative-draft-model-path "$DRAFT_DIR"
-  --gpu-memory-utilization 0.92 --seed 0
-  --language-model-only --stream-interval 10 --max-cudagraph-capture-size 1024
-  --chunked-prefill-size 8192 --max-prefill-tokens 8192
-  --mamba-ssm-dtype bfloat16 --prefix-granularity 128
-  --enable-log-request-stats
-  --engine-startup-timeout 7200 --disable-kvstore
+  --disable-kvstore
 )
 export SLURM_JOB_ID=YOUR_HELD_JOB_ID
 bash "$SOURCE_ROOT/test/agentic_benchmark/kimi_k3/tokenspeed/agentx.slurm" "${SERVER_ARGS[@]}"
@@ -129,8 +135,6 @@ The server checkpoint in this recipe is K3 MXFP4; `fp4` is the native report
 category. Pin model, EAGLE3 draft and tokenizer snapshots separately. The fixed-AL
 recipe uses the greedy server backend even though the native scenario sends
 sampling parameters. Record effective sampling, not just the HTTP parameters.
-The runtime scheduler fix is a separate dependency, not part of this launcher;
-record the exact scheduler build used when reproducing fixed-server curves.
 
 Alternatively, submit with a client environment available on the allocated node:
 
@@ -160,11 +164,6 @@ and metrics arguments; conflicting trailing flags fail before startup, including
 Drain checks require valid, nonnegative running/waiting counters and handle
 spaces in labels; malformed or missing counters cannot count as idle.
 
-Health-check controls depend on the prepared server version and gateway. Do not
-assume an environment variable declaration changes an engine timeout, or that a
-gateway health-check timeout controls engine readiness. Verify the active health
-check implementation before adding version-specific flags.
-
 Grace is the maximum drain wait after sending stops, not a fixed sleep.
 `CLIENT_TIMEOUT` covers preparation, warmup and export for each point; it is a
 separate outer limit. Request an allocation long enough for the complete sweep. Allocation holding and multi-allocation scheduling remain external.
@@ -188,7 +187,8 @@ records the two physical nodes separately. Native metric values and JSON are
 not rewritten. These are local reproductions, not official InferenceX results.
 Power collection is disabled. Server counters are explicitly selected with
 `SERVER_METRICS=true|false`; unavailable values are not zero. With metrics enabled,
-preflight checks that API and metrics ports can be bound on the allocated nodes.
+preflight checks once per server startup that API and metrics ports can be bound
+on the allocated nodes, before the concurrency loop.
 This catches existing listeners, including non-HTTP services; it does not reserve
 the ports against races with other launches. The launcher enables the engine
 endpoint and checks HTTP reachability after readiness, retaining the response in `server-metrics-readiness.txt`. Replay must
@@ -205,19 +205,12 @@ an additional comparison audit. Smoke is not a formal performance measurement.
 
 Run a GPU smoke for each selected layout before starting a formal benchmark.
 
-CPU lifecycle and input-validation checks run in the Lint workflow without GPUs:
-
-```bash
-python -m unittest discover -s test/agentic_benchmark/tests \
-  -p test_k3_inferencex_agentx.py -v
-```
-
 ## Explicit protocol settings
 
 | Setting | Values and meaning |
 | --- | --- |
 | `AGENTX_PROTOCOL` | `weka-062126-256k` or `weka-062126-full`; selects the native public loader |
-| `MAX_MODEL_LEN` | Positive server context limit; the verified full and 256k recipes both use 1048576. No client context cap is injected |
+| `MAX_MODEL_LEN` | Positive server context limit; the example uses 1048576. No client context cap is injected |
 | `CONCURRENCIES` | Ordered, unique positive root-lane counts, e.g. `1 2 4 8 16` |
 | `DRAIN_TIMEOUT` | Maximum server-drain seconds after each point; missing counters cannot count as drained |
 | `MAX_NUM_SEQS` | Explicit service admission capacity, independent of root-lane `CONCURRENCY` |
@@ -225,7 +218,7 @@ python -m unittest discover -s test/agentic_benchmark/tests \
 | `AL_TARGET` | Synthetic accepted length including the verification token; between 1 and `SPEC_STEPS + 1` |
 | `SPEC_DECODING`, `SPEC_STEPS` | `eagle3` or `dspark`, and explicit positive draft steps |
 | `SERVER_METRICS` | `true` requires a separate `METRICS_PORT`; `false` disables scraping explicitly |
-| `INFERENCEX_WORKSPACE` | Directory containing `benchmarks/benchmark_lib.sh`; old checkouts used `inferencex-e2e/` |
+| `INFERENCEX_WORKSPACE` | Directory containing `benchmarks/benchmark_lib.sh` |
 
 Synthetic acceptance adds `--sampling-backend greedy` and
 `--synthetic-acceptance-length`. Natural acceptance does not force a sampling
@@ -241,25 +234,12 @@ Freeze checkpoints, tokenizer, trace and client versions there before comparing
 runs. Reusing an existing output root is rejected.
 
 Interpret native **output** throughput separately from total (input + output)
-throughput. For eight GPUs, output tok/min/GPU = system output tok/s × 60 / 8.
+throughput. For eight GPUs, output tok/s/GPU = system output tok/s / 8.
 Interactivity is a streaming speed metric; do not substitute end-to-end request
 latency or label fixed-AL results as natural acceptance.
 
-## Changes adopted from the shared benchmark suite
-
-- [#2284](https://github.com/lightseekorg/tokenspeed/pull/2284): synchronize the
-  shared TP8/EP8 config capacity to 64. AgentX still passes `MAX_NUM_SEQS`
-  explicitly, so adopting the shared default does not silently change a protocol.
-  Its replicated SWE-smith data, 4K initial prompts, 500-token outputs and EvalScope
-  summary keys are specific to that workload and are not substituted for AgentX.
-- [#2265](https://github.com/lightseekorg/tokenspeed/pull/2265): keep output
-  throughput units explicit. Its Qwen performance gates and four-GPU divisor do
-  not apply to this eight-GPU K3 launcher.
-- P/D-specific changes from #2284 and MegaMoE EP16 changes from
-  [#2285](https://github.com/lightseekorg/tokenspeed/pull/2285) do not apply to this
-  aggregate TP8/EP8 launcher.
-
-The protocol/metrics CPU tests select ephemeral API and metrics ports so they
-can run alongside local services; the occupied-port test retains a real listener. Run GPU smoke on the
-exact candidate commit before claiming end-to-end validation. Full experiment
-scheduling, GPU allocation retention and spreadsheet generation remain external.
+Engine tuning values are written directly in `agentx.slurm`'s `SERVER_ARGS`.
+Context capacity, sequence capacity, speculative decoding and acceptance settings
+remain explicit inputs so the same launcher supports the comparison recipes
+above; metrics remain opt-in. These protocol-owned values take precedence over
+server tuning and cannot be overridden through trailing flags.
