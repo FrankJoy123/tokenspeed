@@ -473,8 +473,9 @@ the selection budget and the finite launch configurations stay static. Startup
 autotuning warms those configurations and the streaming top-k capacity buckets;
 gated residual mixing also warms full/tail tiles and scheduling rounds. This
 uses the ordinary operator entry points, without extra model-forward paths.
-See the [QSA kernel contract](../../tokenspeed-kernel/python/tokenspeed_kernel/ops/attention/qsa/README.md)
-and [gated residual warmup](../../tokenspeed-kernel/python/tokenspeed_kernel/ops/residual/README.md).
+Warmup preserves the caller's scratch budget, including zero, and filters
+configurations against it. Disabling startup autotuning skips this extra
+coverage; capture-stream occupancy still needs its ordinary warmup.
 
 QSA logits scoring uses the same paged kernel for every query layout. A batch
 whose request lengths are all available on the host may shorten its compressed
