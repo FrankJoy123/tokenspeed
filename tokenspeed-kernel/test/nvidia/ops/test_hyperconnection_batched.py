@@ -542,6 +542,7 @@ def test_dynamic_rows_reuse_plan_in_eager_and_capture(row_counts, dtype, monkeyp
 
 
 def test_startup_warms_full_tail_tiles_and_rounds(monkeypatch):
+    pytest.importorskip("flashinfer.autotuner")
     from tokenspeed_kernel.ops.tuning import autotune
 
     _reset_caches(monkeypatch)

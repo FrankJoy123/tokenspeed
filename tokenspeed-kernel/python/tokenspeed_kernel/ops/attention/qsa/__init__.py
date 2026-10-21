@@ -26,7 +26,7 @@ import torch
 from tokenspeed_kernel.ops.attention.qsa.metadata import QSASparseMetadata, QSAWorkspace
 from tokenspeed_kernel.ops.tuning import get_autotune_max_num_tokens, is_autotuning
 from tokenspeed_kernel.registry import KernelRegistry
-from tokenspeed_kernel.selection import select_kernel
+from tokenspeed_kernel.selection import resolve_kernel_override, select_kernel
 from tokenspeed_kernel.signature import (
     MXFP8_BLOCK_SCALE,
     dense_tensor_format,
@@ -226,7 +226,8 @@ def qsa_sparse_attention(
     if (
         is_autotuning()
         and solution in (None, "cute_dsl")
-        and override in (None, "cute_dsl", "cute_dsl_blackwell_qsa_sparse_attention")
+        and resolve_kernel_override("attention", "qsa_sparse_attention", override)
+        in (None, "cute_dsl", "cute_dsl_blackwell_qsa_sparse_attention")
     ):
         from tokenspeed_kernel.ops.attention.qsa.cute_dsl import (
             _warmup_qsa_sparse_attention,
@@ -433,7 +434,8 @@ def qsa_block_topk_stream(
     if (
         is_autotuning()
         and solution in (None, "cute_dsl")
-        and override in (None, "cute_dsl", "cute_dsl_qwen4_exp_qsa_block_topk")
+        and resolve_kernel_override("attention", "qsa_block_topk_stream", override)
+        in (None, "cute_dsl", "cute_dsl_qwen4_exp_qsa_block_topk")
     ):
         from tokenspeed_kernel.ops.attention.qsa.cute_dsl import _warmup_qsa_stream_topk
 
@@ -587,7 +589,8 @@ def qwen4_exp_qsa_block_topk(
             path == "logits"
             and is_autotuning()
             and solution in (None, "cute_dsl")
-            and override in (None, "cute_dsl", "cute_dsl_qwen4_exp_qsa_block_topk")
+            and resolve_kernel_override("attention", "qsa_block_topk_stream", override)
+            in (None, "cute_dsl", "cute_dsl_qwen4_exp_qsa_block_topk")
         ):
             from tokenspeed_kernel.ops.attention.qsa.cute_dsl import (
                 _warmup_qsa_stream_topk,

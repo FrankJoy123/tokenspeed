@@ -476,8 +476,12 @@ uses the ordinary operator entry points, without extra model-forward paths.
 Stream calls share one warmup entry; an auto-selected logits call also warms
 stream configurations for later larger batches.
 Warmup preserves the caller's scratch budget, including zero, and filters
-configurations against it. Disabling startup autotuning skips this extra
-coverage; capture-stream occupancy still needs its ordinary warmup.
+configurations against it. Effective kernel overrides, including environment
+and context overrides, exclude unselected CuTe implementations from warmup.
+This extra coverage requires the FlashInfer autotuner to be installed and the
+startup autotuning traversal to run. Without that tuner, or with startup
+autotuning disabled, these CuTe variants compile on demand. Capture-stream
+occupancy still needs its ordinary warmup.
 
 QSA logits scoring uses the same paged kernel for every query layout. A batch
 whose request lengths are all available on the host may shorten its compressed

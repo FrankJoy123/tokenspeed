@@ -233,7 +233,7 @@ class MixedInputFusedMultiHeadAttentionDecode:
         if cutlass.const_expr(self.leader_first):
             # Flags are immutable after the existing PDL wait. This sample
             # chooses a permutation, while each group's own flag owns reuse.
-            if prefix_shared.shape[0] > 0:
+            if cutlass.const_expr(not self.prefix_in_cta):
                 if prefix_shared[0] != 0:
                     group_count = cute.arch.grid_dim()[2] // (
                         self.query_group * kv_heads

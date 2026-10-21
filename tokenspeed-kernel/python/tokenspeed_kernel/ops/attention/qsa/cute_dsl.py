@@ -151,14 +151,25 @@ def _warmup_qsa_stream_topk(
 def _warmup_qsa_sparse_attention(q, k, v, selected, *, max_rows):
     if (
         not _IS_NVIDIA_BLACKWELL
+        or q.ndim != 3
+        or k.ndim != 3
+        or v.ndim != 3
+        or selected.ndim != 2
+        or not q.is_cuda
+        or any(tensor.device != q.device for tensor in (k, v, selected))
         or q.shape[1] not in (6, 12, 24)
         or k.shape[1] not in (1, 2, 4)
+        or k.shape[0] < 2
         or q.shape[1] <= k.shape[1]
         or q.shape[1] % k.shape[1]
         or q.shape[2] != _HEAD_DIM
-        or selected.shape[1] != _SELECTED_WIDTH
+        or k.shape[2] != _HEAD_DIM
+        or v.shape != k.shape
+        or selected.shape != (q.shape[0], _SELECTED_WIDTH)
         or q.dtype is not torch.bfloat16
         or k.dtype not in (torch.bfloat16, torch.float8_e4m3fn)
+        or v.dtype is not k.dtype
+        or selected.dtype is not torch.int32
     ):
         return
     _warmup_sparse(q, k, v, max_rows=max_rows, enable_pdl=pdl_enabled())

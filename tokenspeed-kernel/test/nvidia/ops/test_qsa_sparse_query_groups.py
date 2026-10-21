@@ -22,6 +22,8 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 import pytest
 import torch
 from tokenspeed_kernel.platform import ArchVersion, current_platform
@@ -117,7 +119,7 @@ def test_qsa_dynamic_rows_reuse_compilation(
     for selected in selections:
         selected[:, :8] = torch.arange(1, 9, device=device)
         # Exercise both exact prefix reuse and independent-query fallback.
-        selected[1::2, 7] = 9
+        selected[tokens :: 2 * tokens, 7] = 9
         selected[:, -3:] = torch.arange(10, 13, device=device)
 
     def forward(index):
@@ -143,7 +145,7 @@ def test_qsa_dynamic_rows_reuse_compilation(
             query.mul_(factor)
         graph.replay()
         for index, output in zip((1, 2), captured):
-            row_ids = [0, 1, row_counts[index] - 1]
+            row_ids = sorted({0, 1, tokens, tokens + 1, row_counts[index] - 1})
             expected = _reference_rows(
                 queries[index], keys, values, selections[index], row_ids
             )
@@ -155,21 +157,31 @@ def test_qsa_dynamic_rows_reuse_compilation(
     assert qsa_sparse._COMPILED_KERNELS == compiled
 
 
-@pytest.mark.parametrize("cache_dtype", [torch.bfloat16, torch.float8_e4m3fn])
-def test_qsa_startup_warms_launch_configurations(device, monkeypatch, cache_dtype):
+@pytest.mark.parametrize(
+    ("q_heads", "kv_heads", "cache_dtype"),
+    [
+        (24, 2, torch.bfloat16),
+        (6, 1, torch.bfloat16),
+        (24, 2, torch.float8_e4m3fn),
+    ],
+)
+def test_qsa_startup_warms_launch_configurations(
+    device, monkeypatch, q_heads, kv_heads, cache_dtype
+):
     _require_blackwell()
+    pytest.importorskip("flashinfer.autotuner")
     from tokenspeed_kernel.ops.attention.qsa import qsa_sparse_attention
-    from tokenspeed_kernel.ops.tuning import autotune
+    from tokenspeed_kernel.ops.tuning import autotune, get_autotune_max_num_tokens
     from tokenspeed_kernel.thirdparty.cute_dsl import qsa_sparse
 
     monkeypatch.setattr(qsa_sparse, "_COMPILED_KERNELS", {})
     monkeypatch.setattr(qsa_sparse, "_WARMED", set())
     torch.manual_seed(113)
-    keys = (torch.randn(256, 2, 256, device=device) * 0.25).to(cache_dtype)
+    keys = (torch.randn(256, kv_heads, 256, device=device) * 0.25).to(cache_dtype)
     values = (torch.randn_like(keys, dtype=torch.float32) * 0.25).to(cache_dtype)
 
     def inputs(rows):
-        query = torch.randn(rows, 24, 256, device=device, dtype=torch.bfloat16)
+        query = torch.randn(rows, q_heads, 256, device=device, dtype=torch.bfloat16)
         selected = torch.full((rows, 2051), -1, device=device, dtype=torch.int32)
         selected[:, :8] = torch.arange(1, 9, device=device)
         return query, selected
@@ -195,8 +207,23 @@ def test_qsa_startup_warms_launch_configurations(device, monkeypatch, cache_dtyp
         forward(*first, 1)
     compiled = dict(qsa_sparse._COMPILED_KERNELS)
     assert compiled
-    # Cross launch-policy thresholds and query-group widths after startup.
-    for rows, width in ((3, 1), (37, 1), (86, 2), (260, 4), (582, 6), (520, 8)):
+    # Scan every legal request width, independently of warmup's representatives.
+    # A new grouping rule must remain covered by the startup traversal.
+    configurations = {}
+    max_rows = get_autotune_max_num_tokens()
+    for width in range(1, max_rows + 1):
+        for rows in range(width, max_rows + 1, width):
+            config = qsa_sparse._configuration(
+                rows,
+                q_heads,
+                kv_heads,
+                width,
+                cache_dtype is torch.bfloat16,
+                qsa_sparse._sm_count(keys.device.index),
+                keys.device.index,
+            )
+            configurations.setdefault(config, (rows, width))
+    for rows, width in configurations.values():
         query, selected = inputs(rows)
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
@@ -208,6 +235,108 @@ def test_qsa_startup_warms_launch_configurations(device, monkeypatch, cache_dtyp
             output[row_ids].double(), expected, rtol=0.01, atol=0.003
         )
     assert qsa_sparse._COMPILED_KERNELS == compiled
+
+
+@pytest.mark.parametrize(
+    "unsupported",
+    [
+        "query_rank",
+        "selected_rank",
+        "key_head_dim",
+        "value_shape",
+        "value_dtype",
+        "selected_dtype",
+        "selected_rows",
+        "query_device",
+        "key_device",
+        "value_device",
+        "selected_device",
+    ],
+)
+def test_qsa_warmup_skips_unsupported_tensors(device, monkeypatch, unsupported):
+    _require_blackwell()
+    from tokenspeed_kernel.ops.attention.qsa.cute_dsl import (
+        _warmup_qsa_sparse_attention,
+    )
+    from tokenspeed_kernel.thirdparty.cute_dsl import qsa_sparse
+
+    monkeypatch.setattr(qsa_sparse, "_COMPILED_KERNELS", {})
+    monkeypatch.setattr(qsa_sparse, "_WARMED", set())
+    query = torch.empty(1, 24, 256, device=device, dtype=torch.bfloat16)
+    keys = torch.empty(16, 2, 256, device=device, dtype=torch.bfloat16)
+    values = torch.empty_like(keys)
+    selected = torch.empty(1, 2051, device=device, dtype=torch.int32)
+    match unsupported:
+        case "query_rank":
+            query = query[0]
+        case "selected_rank":
+            selected = selected[0]
+        case "key_head_dim":
+            keys, values = keys[:, :, :128], values[:, :, :128]
+        case "value_shape":
+            values = values[:, :, :128]
+        case "value_dtype":
+            values = values.float()
+        case "selected_dtype":
+            selected = selected.long()
+        case "selected_rows":
+            selected = selected[:0]
+        case "query_device":
+            query = query.cpu()
+        case "key_device":
+            keys = keys.cpu()
+        case "value_device":
+            values = values.cpu()
+        case "selected_device":
+            selected = selected.cpu()
+    _warmup_qsa_sparse_attention(query, keys, values, selected, max_rows=1)
+    assert not qsa_sparse._COMPILED_KERNELS
+    assert not qsa_sparse._WARMED
+
+
+@pytest.mark.parametrize("override_source", ["context", "environment"])
+def test_qsa_startup_respects_kernel_override(device, monkeypatch, override_source):
+    _require_blackwell()
+    pytest.importorskip("flashinfer.autotuner")
+    from tokenspeed_kernel.ops.attention.qsa import qsa_sparse_attention
+    from tokenspeed_kernel.ops.tuning import autotune
+    from tokenspeed_kernel.selection import kernel_override
+    from tokenspeed_kernel.thirdparty.cute_dsl import qsa_sparse
+
+    monkeypatch.setattr(qsa_sparse, "_COMPILED_KERNELS", {})
+    monkeypatch.setattr(qsa_sparse, "_WARMED", set())
+    torch.manual_seed(179)
+    query = torch.randn(2, 24, 256, device=device, dtype=torch.bfloat16)
+    keys = torch.randn(16, 2, 256, device=device, dtype=torch.bfloat16) * 0.25
+    values = torch.randn_like(keys) * 0.25
+    selected = torch.full((2, 2051), -1, device=device, dtype=torch.int32)
+    selected[:, :8] = torch.arange(1, 9, device=device)
+    if override_source == "environment":
+        monkeypatch.setenv(
+            "TOKENSPEED_KERNEL_OVERRIDE_ATTENTION_QSA_SPARSE_ATTENTION", "triton"
+        )
+        context = nullcontext()
+    else:
+        context = kernel_override("attention", "qsa_sparse_attention", "triton")
+    with context, autotune(tune_mode=True, tuning_buckets=None, round_up=None):
+        output = qsa_sparse_attention(
+            query,
+            keys,
+            values,
+            selected,
+            scale=1 / 16,
+            max_seqlen_q=1,
+            metadata_capacity_rows=None,
+            k_scale=None,
+            v_scale=None,
+            override="cute_dsl",
+            solution=None,
+            sparse_metadata=None,
+        )
+    expected = _reference_rows(query, keys, values, selected, (0, 1))
+    torch.testing.assert_close(output.double(), expected, rtol=0.01, atol=0.003)
+    assert not qsa_sparse._COMPILED_KERNELS
+    assert not qsa_sparse._WARMED
 
 
 @pytest.mark.parametrize(

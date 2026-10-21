@@ -150,6 +150,9 @@ def warmup(query, key_cache, value_cache, *, max_rows, enable_pdl):
     bf16_kv = key_cache.dtype is torch.bfloat16
     sm_count = _sm_count(query.device.index)
     configurations = {}
+    # These are the divisibility cases in _query_group_size: width 1 disables
+    # grouping, 2/4 select pairs/quads, 6 covers groups of three/six, and 8
+    # reaches the widest group. Row counts independently select launch policy.
     for rows in range(1, max_rows + 1):
         for width in (1, 2, 4, 6, 8):
             if rows % width == 0:
