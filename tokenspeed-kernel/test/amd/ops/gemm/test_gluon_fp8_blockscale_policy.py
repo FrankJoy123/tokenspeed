@@ -29,6 +29,30 @@ from tokenspeed_kernel.ops.gemm import _gemm_format_signature
 from tokenspeed_kernel.selection import select_kernel
 
 mm = importlib.import_module("tokenspeed_kernel_amd.ops.gfx950.gemm.mxfp8.mm")
+gluon = importlib.import_module("tokenspeed_kernel.ops.gemm.gluon")
+
+
+@pytest.mark.parametrize(
+    "m,n,k,padded,scaled,expected",
+    [
+        (1, 4096, 512, False, False, True),
+        (2, 4096, 512, False, False, False),
+        (1, 1024, 512, False, False, False),
+        (1, 6144, 512, False, False, False),
+        (1, 4096, 544, False, False, False),
+        (1, 4096, 480, False, False, False),
+        (1, 4096, 512, True, False, False),
+        (1, 4096, 512, False, True, False),
+        (1, 1024, 4096, False, False, False),
+    ],
+)
+def test_single_row_tuning_preserves_neighbor_and_layout_choices(
+    m, n, k, padded, scaled, expected
+):
+    a = torch.empty((m, k), dtype=torch.float8_e4m3fn, device="meta")
+    b = torch.empty((n, k + 32 * padded), dtype=a.dtype, device="meta")[:, :k]
+    alpha = torch.empty((), device="meta") if scaled else None
+    assert gluon._prefers_tuned_single_row_fp32(a, b, alpha) is expected
 
 
 @pytest.mark.parametrize(

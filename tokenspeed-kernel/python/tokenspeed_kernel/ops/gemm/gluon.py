@@ -29,7 +29,11 @@ from tokenspeed_kernel.ops.gemm import (
     grouped_bf16_projection,
 )
 from tokenspeed_kernel.ops.gemm._gluon.gemv import gluon_simt_gemm_fp32
-from tokenspeed_kernel.ops.gemm.triton import MXFP4_LINEAR_SIGNATURES
+from tokenspeed_kernel.ops.gemm._triton.fp8 import get_w8a8_block_fp8_config
+from tokenspeed_kernel.ops.gemm.triton import (
+    MXFP4_LINEAR_SIGNATURES,
+    triton_mm_fp8_blockscale,
+)
 from tokenspeed_kernel.ops.quantization import quantize_fp8
 from tokenspeed_kernel.platform import (
     ArchVersion,
@@ -646,6 +650,20 @@ if platform.is_amd:
             out=out,
         )
 
+    def _prefers_tuned_single_row_fp32(
+        A: torch.Tensor, B: torch.Tensor, alpha: torch.Tensor | None
+    ) -> bool:
+        """Prefer existing short-K tuning without narrowing Gluon's layout contract."""
+        return (
+            A.shape[0] == 1
+            and A.shape[1] <= 512
+            and alpha is None
+            and A.is_contiguous()
+            and B.is_contiguous()
+            and get_w8a8_block_fp8_config(1, B.shape[0], A.shape[1], 128, 128)
+            is not None
+        )
+
     @register_kernel(
         "gemm",
         "mm",
@@ -687,10 +705,22 @@ if platform.is_amd:
         ``[ceil(N/128), ceil(K/128)]``. Scale strides are unrestricted; values
         and the optional BF16 output require unit inner stride. The shared
         AMD launcher also serves the separate native E8M0 registration.
+        Contiguous single-row short reductions can reuse existing Triton tuning.
         """
         if A_scales is None or B_scales is None or block_size != [128, 128]:
             raise ValueError(
                 "gfx950 FP32 block-scale GEMM requires both scales and block_size=[128, 128]"
+            )
+        if _prefers_tuned_single_row_fp32(A, B, alpha):
+            return triton_mm_fp8_blockscale(
+                A,
+                B,
+                A_scales,
+                B_scales,
+                out_dtype,
+                alpha=alpha,
+                block_size=block_size,
+                out=out,
             )
         return _mm_mxfp8_impl(
             A,

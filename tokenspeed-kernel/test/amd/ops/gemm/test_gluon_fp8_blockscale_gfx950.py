@@ -43,6 +43,8 @@ SHAPES = [
     (37, 208, 800),
     (300, 256, 1056),
     (1, 1024, 4096),
+    (1, 4096, 512),
+    (2, 4096, 512),
     (64, 4096, 512),
     (128, 1024, 4096),
     (65, 1024, 4096),
@@ -137,7 +139,38 @@ def test_public_fp32_scales_arbitrary_strides_and_canaries(shape, online):
     assert torch.equal(actual_sa, saved[0]) and torch.equal(sb, saved[1])
 
 
-@pytest.mark.parametrize("shape", [(37, 208, 800), (65, 1024, 4096), (896, 6144, 4096)])
+@pytest.mark.parametrize("scaled", [False, True])
+def test_contiguous_single_row_preserves_output_and_multiplier(scaled):
+    m, n, k = 1, 4096, 512
+    a, b, sa, sb = values(m, n, k)
+    a, b = a.to(torch.float8_e4m3fn), b.contiguous()
+    alpha = torch.tensor(2.0, device="cuda") if scaled else None
+    expected = reference(a, b, sa, sb, torch.bfloat16)
+    if scaled:
+        expected *= alpha
+    backing = torch.full((m + 2, n + 32), -7, device="cuda", dtype=torch.bfloat16)
+    out = backing[1 : m + 1, 16 : n + 16]
+    actual = kernel_mm(
+        a,
+        b,
+        A_scales=sa,
+        B_scales=sb,
+        out_dtype=torch.bfloat16,
+        alpha=alpha,
+        block_size=[128, 128],
+        quant="mxfp8",
+        out=out,
+    )
+    assert actual is out
+    torch.testing.assert_close(actual, expected, atol=0.02, rtol=0.01)
+    assert torch.all(backing[[0, -1], :] == -7)
+    assert torch.all(backing[1 : m + 1, :16] == -7)
+    assert torch.all(backing[1 : m + 1, n + 16 :] == -7)
+
+
+@pytest.mark.parametrize(
+    "shape", [(1, 4096, 512), (37, 208, 800), (65, 1024, 4096), (896, 6144, 4096)]
+)
 def test_fp32_scales_are_reread_during_graph_replay(shape):
     m, n, k = shape
     a = torch.full((m, k), 0.5, device="cuda", dtype=torch.float8_e4m3fn)
@@ -161,7 +194,14 @@ def test_fp32_scales_are_reread_during_graph_replay(shape):
 
 
 @pytest.mark.parametrize(
-    "shape", [(129, 256, 512), (65, 1024, 512), (1616, 1024, 4096), (3536, 4096, 512)]
+    "shape",
+    [
+        (1, 4096, 512),
+        (129, 256, 512),
+        (65, 1024, 512),
+        (1616, 1024, 4096),
+        (3536, 4096, 512),
+    ],
 )
 @pytest.mark.parametrize("kind", ["overflow_coefficient", "underflow_coefficient"])
 def test_fp32_scale_multiplications_keep_their_order(shape, kind):
@@ -199,7 +239,7 @@ def test_fp32_scale_multiplications_keep_their_order(shape, kind):
     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
-@pytest.mark.parametrize("m,n,k", [(1, 128, 4096), (65, 1024, 4096)])
+@pytest.mark.parametrize("m,n,k", [(1, 4096, 512), (1, 128, 4096), (65, 1024, 4096)])
 def test_unscaled_block_cancellation_remains_finite(m, n, k):
     a = torch.zeros((m, k), device="cuda")
     a[:, :64] = 128
