@@ -473,6 +473,8 @@ the selection budget and the finite launch configurations stay static. Startup
 autotuning warms those configurations and the streaming top-k capacity buckets;
 gated residual mixing also warms full/tail tiles and scheduling rounds. This
 uses the ordinary operator entry points, without extra model-forward paths.
+Stream calls share one warmup entry; an auto-selected logits call also warms
+stream configurations for later larger batches.
 Warmup preserves the caller's scratch budget, including zero, and filters
 configurations against it. Disabling startup autotuning skips this extra
 coverage; capture-stream occupancy still needs its ordinary warmup.

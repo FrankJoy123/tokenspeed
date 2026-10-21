@@ -575,31 +575,35 @@ def qwen4_exp_qsa_block_topk(
         queries_per_request=queries_per_request,
         max_partial_bytes=max_partial_bytes,
     )
-    if (
-        is_autotuning()
-        and path == "auto"
-        and solution in (None, "cute_dsl")
-        and override in (None, "cute_dsl", "cute_dsl_qwen4_exp_qsa_block_topk")
-    ):
-        from tokenspeed_kernel.ops.attention.qsa.cute_dsl import _warmup_qsa_stream_topk
-
-        _warmup_qsa_stream_topk(
-            query,
-            key_cache,
-            page_table,
-            request_indices,
-            complete_blocks,
-            page_size=page_size,
-            block_topk=block_topk,
-            max_partial_bytes=max_partial_bytes,
-            enable_pdl=enable_pdl,
-        )
     if path == "auto":
         # Keep shape routing independent of live device frontiers.
         min_stream_rows = 512 if num_blocks >= 16384 else 8192
         prefer_stream = supported_layout and rows >= min_stream_rows
         fits_logits = rows * num_blocks * 4 <= max_logits_bytes
         path = "stream" if prefer_stream or not fits_logits else "logits"
+        # A logits startup must still prepare later stream calls. Stream calls
+        # share the warmup in qsa_block_topk_stream below.
+        if (
+            path == "logits"
+            and is_autotuning()
+            and solution in (None, "cute_dsl")
+            and override in (None, "cute_dsl", "cute_dsl_qwen4_exp_qsa_block_topk")
+        ):
+            from tokenspeed_kernel.ops.attention.qsa.cute_dsl import (
+                _warmup_qsa_stream_topk,
+            )
+
+            _warmup_qsa_stream_topk(
+                query,
+                key_cache,
+                page_table,
+                request_indices,
+                complete_blocks,
+                page_size=page_size,
+                block_topk=block_topk,
+                max_partial_bytes=max_partial_bytes,
+                enable_pdl=enable_pdl,
+            )
 
     if path == "logits":
         scores = qsa_block_scores(

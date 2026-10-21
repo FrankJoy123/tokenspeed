@@ -881,12 +881,23 @@ def test_stream_topk_small_shapes_reuse_capacity_buckets(
 
 
 @pytest.mark.parametrize(
-    ("max_partial_bytes", "startup_rows"),
-    [(0, 1), (0, 8), (32 << 20, 1)],
+    ("max_partial_bytes", "startup_rows", "startup_path", "max_logits_bytes"),
+    [
+        pytest.param(0, 1, "auto", 256 << 20, id="auto-logits-zero-scratch"),
+        pytest.param(0, 8, "auto", 0, id="auto-stream-zero-scratch"),
+        pytest.param(0, 8, "stream", 256 << 20, id="stream-zero-scratch"),
+        pytest.param(32 << 20, 1, "stream", 256 << 20, id="stream-scratch"),
+    ],
 )
 @pytest.mark.parametrize("enable_pdl", [False, True])
 def test_stream_topk_startup_warms_algorithm_and_capacity_buckets(
-    device, monkeypatch, max_partial_bytes, startup_rows, enable_pdl
+    device,
+    monkeypatch,
+    max_partial_bytes,
+    startup_rows,
+    startup_path,
+    max_logits_bytes,
+    enable_pdl,
 ):
     from tokenspeed_kernel.ops.tuning import autotune
     from tokenspeed_kernel.selection import kernel_override
@@ -916,7 +927,7 @@ def test_stream_topk_startup_warms_algorithm_and_capacity_buckets(
             queries_per_request=width,
             max_partial_bytes=max_partial_bytes,
             path=path,
-            max_logits_bytes=256 << 20,
+            max_logits_bytes=max_logits_bytes,
             solution=solution,
             override=None,
             enable_pdl=enable_pdl,
@@ -924,7 +935,6 @@ def test_stream_topk_startup_warms_algorithm_and_capacity_buckets(
 
     # A tiny auto-path startup can use logits even though later grouped
     # prefill calls use stream kernels without any global scratch.
-    startup_path = "auto" if max_partial_bytes == 0 and startup_rows == 1 else "stream"
     # The logits startup uses its portable selector; this test targets CuTe warmup.
     with (
         autotune(tune_mode=True, tuning_buckets=None, round_up=None),
