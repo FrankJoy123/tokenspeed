@@ -23,10 +23,10 @@
 
 # Run via sbatch with a native client, or from the login host in a held job.
 # All paths must be absolute and visible where they are used. See agentx.md.
-# Shared configs supply the base recipe; this script supplies AgentX overrides and replay.
+# Shared configs own the fixed server recipe; this script owns deployment and replay.
 set -euo pipefail
 : "${SLURM_JOB_ID:?use sbatch or an existing allocation}"
-: "${MODEL_NAME:?served model name}" "${RUN_MODE:?smoke or formal}" \
+: "${RUN_MODE:?smoke or formal}" \
   "${CLIENT_ROOT:?prepared client venv root}" "${INFERENCEX_WORKSPACE:?InferenceX checkout}"
 case "$RUN_MODE" in
     smoke|formal) ;;
@@ -105,8 +105,8 @@ launch_server() {
     mapfile -t NODES < <(scontrol show hostnames "$(squeue -h -j "$SLURM_JOB_ID" -o '%N')")
     [[ "${#NODES[@]}" = 2 ]] || { echo "K3 TP8 requires two four-GPU nodes" >&2; exit 2; }
     HEAD="${NODES[0]}"
-    BASE_URL="http://${HEAD}:${API_PORT}"
-    AIPERF_SERVER_METRICS_URLS="http://${HEAD}:${METRICS_PORT}/metrics"
+    BASE_URL="http://${HEAD}:8000"
+    AIPERF_SERVER_METRICS_URLS="http://${HEAD}:8010/metrics"
 
     # Bound startup (7500 s), each client (8400 s), drains and cleanup.
     NVIDIA_VISIBLE_DEVICES=all NVIDIA_DRIVER_CAPABILITIES=compute,utility \
@@ -122,17 +122,8 @@ launch_server() {
         bash -c '
             set -euo pipefail
             if [[ -n "$SERVER_VENV" ]]; then source "$SERVER_VENV/bin/activate"; fi
-            exec bash -x "$@"
+            exec bash -x "$1"
         ' agentx-server "$SOURCE_ROOT/test/agentic_benchmark/kimi_k3/tokenspeed/configs/${CONFIG}.sh" \
-        --served-model-name "$MODEL_NAME" \
-        --max-model-len 1048576 --max-num-seqs 16 --gpu-memory-utilization 0.92 \
-        --seed 0 --max-cudagraph-capture-size 1024 \
-        --language-model-only --mm-encoder-tp-mode weights \
-        --mamba-ssm-dtype bfloat16 --prefix-granularity 128 \
-        --chunked-prefill-size 8192 --max-prefill-tokens 8192 \
-        --sampling-backend greedy --synthetic-acceptance-length "${AL_TARGET:?fixed acceptance length}" \
-        --stream-interval 10 --enable-log-request-stats --disable-kvstore \
-        --port "$API_PORT" --enable-metrics --metrics-host 0.0.0.0 --metrics-port "$METRICS_PORT" \
         > "$RUN_ROOT/server.log" 2>&1 &
     SERVER_PID=$!
 }
@@ -176,7 +167,7 @@ unset MAX_MODEL_LEN
 # AIPerf reads this in its worker processes too: always replay recorded turns.
 export AIPERF_DATASET_WEKA_LIVE_ASSISTANT_RESPONSES=0
 # InferenceX build_replay_cmd reads these shell variables and builds AIPerf CLI flags.
-MODEL=nvidia/Kimi-K3-NVFP4 SERVED_MODEL_NAME="$MODEL_NAME" CONC="$CONCURRENCY" \
+MODEL=nvidia/Kimi-K3-NVFP4 SERVED_MODEL_NAME=moonshotai/Kimi-K3 CONC="$CONCURRENCY" \
 FRAMEWORK=tokenspeed AIPERF_EXPERIMENTAL_FAST=0 AIPERF_UNSAFE_OVERRIDE=false \
 AGENTIC_WARMUP_GRACE_PERIOD=1800 \
 AIPERF_TRACE_IDLE_GAP_CAP_SECONDS=300 AIPERF_LIVE_FAILED_REQUEST_THRESHOLD=0.1 \
@@ -194,7 +185,7 @@ write_agentic_result_json() {
     [[ -s "$RESULT_DIR/aiperf_artifacts/server_metrics_export.json" ]] ||
         { echo "Missing or empty server_metrics_export.json" >&2; return 2; }
     # InferenceX process_agentic_result reads these environment fields for metadata/output.
-    MODEL="$MODEL_NAME" MODEL_PREFIX=kimik3 FRAMEWORK=tokenspeed RUNNER_TYPE=gb300 PRECISION=fp4 \
+    MODEL=moonshotai/Kimi-K3 MODEL_PREFIX=kimik3 FRAMEWORK=tokenspeed RUNNER_TYPE=gb300 PRECISION=fp4 \
     SPEC_DECODING=eagle3 CONC="$CONCURRENCY" TP=8 EP_SIZE="$EP_SIZE" \
     PP_SIZE=1 PCP_SIZE=1 DCP_SIZE=1 IS_MULTINODE=false DISAGG=false \
     KV_OFFLOAD_BACKEND= KV_OFFLOAD_BACKEND_METADATA= TOTAL_CPU_DRAM_GB=0 KV_OFFLOADING=none \

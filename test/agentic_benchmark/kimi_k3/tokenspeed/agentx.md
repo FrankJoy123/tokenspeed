@@ -14,13 +14,15 @@ native full trace (`weka-062126-full`). It does not launch PD workers or a separ
 - `run_benchmark` runs native InferenceX in a fresh client shell per concurrency point.
 - Readiness, drain and cleanup keep the server lifecycle around the sweep.
 
-The shared configs contain the HF model IDs, topology and EAGLE3 settings.
-They append `"$@"` to `ts serve`; `launch_server` passes the fixed AgentX overrides
-explicitly, including context length, sequence capacity, text-only execution,
-synthetic AL and metrics. Repeated scalar flags use the last supplied value.
-Calling the configs without extra arguments preserves the existing benchmark recipe.
-The launcher uses `bash -x` to record the expanded server command in `server.log`.
-There is no separate AgentX server script.
+The existing configs contain the fixed engine recipe directly, including HF model
+IDs, topology, EAGLE3 settings, context length and sequence capacity.
+The configs fix the served name to `moonshotai/Kimi-K3`, synthetic AL to 3.7,
+API port to 8000 and metrics port to 8010. The launcher uses the same endpoints
+and model name for replay and reporting; no external recipe variables or
+positional arguments are accepted by the configs. The launcher uses `bash -x`
+to record the expanded server command in `server.log`.
+There is no separate AgentX server script. These shared configs now use the same
+text-only serving recipe for AgentX and the existing benchmark.
 
 InferenceX defines the replay protocol and aggregates results. Its native
 `build_replay_cmd` invokes AIPerf (`aiperf profile --scenario inferencex-agentx-mvp`),
@@ -88,11 +90,10 @@ SOURCE_ROOT="$SOURCE_ROOT" CLIENT_ROOT="$CLIENT_ROOT" \
 INFERENCEX_WORKSPACE="$CLIENT_ROOT/inferencex" \
 CONTAINER_IMAGE="$BENCH_ROOT/server.sqsh" CONTAINER_MOUNTS="$BENCH_ROOT:$BENCH_ROOT" \
 SERVER_VENV="" \
-MODEL_NAME=moonshotai/Kimi-K3 \
 TOKENSPEED_FLASHINFER_AUTOTUNE_CACHE_DIR="$BENCH_ROOT/autotune-cache" \
-CONFIG_NAMES=attn_tp8_moe_tp8 AL_TARGET=3.7 \
+CONFIG_NAMES=attn_tp8_moe_tp8 \
 RUN_MODE=smoke CONCURRENCIES=1 \
-API_PORT=8000 METRICS_PORT=8010 DRAIN_TIMEOUT=1800 \
+DRAIN_TIMEOUT=1800 \
 RUN_ROOT="$BENCH_ROOT/new-agentx-smoke" SLURM_JOB_ID=YOUR_HELD_JOB_ID \
 bash "$SOURCE_ROOT/test/agentic_benchmark/kimi_k3/tokenspeed/agentx.slurm"
 ```
@@ -124,15 +125,20 @@ sbatch --nodes=2 --ntasks-per-node=1 --gpus-per-node=4 --cpus-per-task=64 \
   "$SOURCE_ROOT/test/agentic_benchmark/kimi_k3/tokenspeed/agentx.slurm"
 ```
 
-There is no external `SERVER_ARGS` and trailing flags are rejected. Change AgentX overrides in `launch_server` when deliberately defining a different recipe.
+There is no external `SERVER_ARGS` and trailing flags are rejected. Change fixed engine settings in the selected `configs/attn_*.sh` when deliberately defining a different recipe.
 PD receiver/routing options belong in the separate PD benchmark scripts, not here.
 
 ## Fixed settings
 
-The shared engine command plus the explicit `launch_server` overrides set: context 1048576,
-max sequences 16, memory utilization 0.92, FP8 KV, BF16 SSM, prefix granularity
-128, prefill limits 8192, graph capture limit 1024, stream interval 10, seed 0,
-greedy synthetic acceptance, metrics enabled and KV offloading disabled.
+The shared configs set context 1048576, max sequences 16, memory utilization 0.92,
+FP8 KV, graph capture limit 1024, stream interval 10, seed 0, greedy sampling,
+metrics enabled and KV offloading disabled. Synthetic AL is fixed at 3.7.
+The text-only recipe does not enable multimodal encoder data parallelism.
+
+K3's cache recipe fixes prefix granularity at 128, convolution state at BF16 and
+recurrent state at FP32; `--mamba-ssm-dtype` does not configure this recipe.
+The scripts omit these redundant flags and use the current prefill defaults of
+8192 tokens. They also omit per-request stats logging.
 
 The pinned InferenceX `build_replay_cmd` explicitly adds `--random-seed 42`.
 `run_benchmark` in `agentx.slurm` supplies tail grace
