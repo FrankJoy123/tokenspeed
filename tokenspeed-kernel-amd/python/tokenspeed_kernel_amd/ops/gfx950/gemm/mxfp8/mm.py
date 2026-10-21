@@ -2444,33 +2444,13 @@ def _launch_pipeline_fp32_or_native(
     )
 
 
-def _prefers_mxfp8_large_tiles(m: int, n: int, k: int) -> bool:
-    # Up to 256 rows the weight-streaming decode kernel wins, except on
-    # weights of 64 Mi elements or more (V4.1 25600x6144 and 5120x15360):
-    # there the two tie near 48-64 rows and the large-tile kernel is up to
-    # 1.6x faster from 96 rows on.
-    return m > 256 or (m >= 64 and n * k >= 1 << 26)
-
-
-def _is_mxfp8_prefill_problem(m: int, n: int, k: int) -> bool:
-    return supports_mxfp8_gemm_shape(m, n, k) and _prefers_mxfp8_large_tiles(m, n, k)
-
-
-def _is_mxfp8_decode_problem(m: int, n: int, k: int) -> bool:
-    return supports_gluon_mm_mxfp8_decode_gfx950(
-        m, n, k
-    ) and not _prefers_mxfp8_large_tiles(m, n, k)
-
-
 def _is_fp32_blockscale_decode_problem(m: int, n: int, k: int) -> bool:
     # Measured FP32 decode wins cover short/moderate reductions; longer
     # reductions retain existing GEMM selection, not a decoder limitation.
-    return k <= 3072 and _is_mxfp8_decode_problem(m, n, k)
-
-
-def _is_fp32_blockscale_problem(m: int, n: int, k: int) -> bool:
-    return supports_mxfp8_gemm_shape(m, n, k) or _is_fp32_blockscale_decode_problem(
-        m, n, k
+    return (
+        k <= 3072
+        and supports_gluon_mm_mxfp8_decode_gfx950(m, n, k)
+        and not (m >= 64 and n * k >= 1 << 26)
     )
 
 

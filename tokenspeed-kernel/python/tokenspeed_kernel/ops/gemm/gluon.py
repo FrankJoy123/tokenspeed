@@ -560,16 +560,20 @@ if platform.is_amd:
     from tokenspeed_kernel_amd.ops.gfx950.gemm.mxfp8.decode import (
         launch_gluon_mm_mxfp8_decode_gfx950 as _mm_mxfp8_decode_impl,
     )
+    from tokenspeed_kernel_amd.ops.gfx950.gemm.mxfp8.decode import (
+        supports_gluon_mm_mxfp8_decode_gfx950 as _supports_mxfp8_decode_problem,
+    )
     from tokenspeed_kernel_amd.ops.gfx950.gemm.mxfp8.mm import (
-        _is_fp32_blockscale_problem,
-        _is_mxfp8_decode_problem,
-        _is_mxfp8_prefill_problem,
+        _is_fp32_blockscale_decode_problem,
     )
     from tokenspeed_kernel_amd.ops.gfx950.gemm.mxfp8.mm import (
         launch_gluon_mm_fp8_blockscale_gfx950 as _mm_fp8_blockscale_impl,
     )
     from tokenspeed_kernel_amd.ops.gfx950.gemm.mxfp8.mm import (
         launch_gluon_mm_mxfp8_gfx950 as _mm_mxfp8_impl,
+    )
+    from tokenspeed_kernel_amd.ops.gfx950.gemm.mxfp8.mm import (
+        supports_mxfp8_gemm_shape as _supports_mxfp8_gemm_shape,
     )
 
     _MXFP8_SIGNATURES = frozenset(
@@ -588,6 +592,25 @@ if platform.is_amd:
             )
         }
     )
+
+    def _prefers_mxfp8_large_tiles(m: int, n: int, k: int) -> bool:
+        # Large weights favor the matrix path from 64 rows onward.
+        return m > 256 or (m >= 64 and n * k >= 1 << 26)
+
+    def _is_mxfp8_prefill_problem(m: int, n: int, k: int) -> bool:
+        return _supports_mxfp8_gemm_shape(m, n, k) and _prefers_mxfp8_large_tiles(
+            m, n, k
+        )
+
+    def _is_mxfp8_decode_problem(m: int, n: int, k: int) -> bool:
+        return _supports_mxfp8_decode_problem(
+            m, n, k
+        ) and not _prefers_mxfp8_large_tiles(m, n, k)
+
+    def _is_fp32_blockscale_problem(m: int, n: int, k: int) -> bool:
+        return _supports_mxfp8_gemm_shape(
+            m, n, k
+        ) or _is_fp32_blockscale_decode_problem(m, n, k)
 
     @register_kernel(
         "gemm",
