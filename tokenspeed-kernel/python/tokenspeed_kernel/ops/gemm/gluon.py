@@ -610,6 +610,11 @@ if platform.is_amd:
             m, n, k
         ) and not _prefers_mxfp8_large_tiles(m, n, k)
 
+    def _is_fp32_blockscale_decode_problem(m: int, n: int, k: int) -> bool:
+        # Measured FP32 decode wins cover short/moderate reductions; longer
+        # reductions retain existing GEMM selection, not a decoder limitation.
+        return k <= 3072 and _is_mxfp8_decode_problem(m, n, k)
+
     @register_kernel(
         "gemm",
         "mm",
@@ -713,7 +718,7 @@ if platform.is_amd:
         signatures=_FP32_BLOCK_SIGNATURES,
         priority=Priority.SPECIALIZED + 1,
         traits={
-            "mnk_problem_filter": frozenset({_is_mxfp8_decode_problem}),
+            "mnk_problem_filter": frozenset({_is_fp32_blockscale_decode_problem}),
             "a_inner_stride_one": frozenset({True}),
             "b_inner_stride_one": frozenset({True}),
             "block_scale_layout": frozenset({"canonical"}),

@@ -90,7 +90,10 @@ def test_reducer_family_boundaries(shape, expected):
 @pytest.mark.parametrize(
     "shape,output_dtype,expected",
     [
-        ((1, 1024, 4096), torch.bfloat16, "gluon_mm_fp8_blockscale_decode_gfx950"),
+        ((1, 1024, 4096), torch.bfloat16, "gluon_mm_fp8_blockscale_gfx950"),
+        ((17, 130, 3072), torch.bfloat16, "gluon_mm_fp8_blockscale_decode_gfx950"),
+        ((17, 128, 3104), torch.bfloat16, "gluon_mm_fp8_blockscale_gfx950"),
+        ((17, 128, 3200), torch.bfloat16, "gluon_mm_fp8_blockscale_gfx950"),
         ((129, 4096, 512), torch.bfloat16, "gluon_mm_fp8_blockscale_decode_gfx950"),
         ((896, 6144, 4096), torch.bfloat16, "gluon_mm_fp8_blockscale_gfx950"),
         ((37, 208, 800), torch.bfloat16, "gluon_mm_fp8_blockscale_decode_gfx950"),
@@ -101,10 +104,10 @@ def test_reducer_family_boundaries(shape, expected):
         ((1, 15, 128), torch.bfloat16, "triton_mm_fp8_blockscale"),
         ((1, 16, 128), torch.bfloat16, "gluon_mm_fp8_blockscale_decode_gfx950"),
         ((1, 16, 96), torch.bfloat16, "triton_mm_fp8_blockscale"),
-        ((63, 16384, 4096), torch.bfloat16, "gluon_mm_fp8_blockscale_decode_gfx950"),
-        ((64, 16384, 4096), torch.bfloat16, "gluon_mm_fp8_blockscale_gfx950"),
-        ((1, 524272, 4096), torch.bfloat16, "gluon_mm_fp8_blockscale_decode_gfx950"),
-        ((1, 524288, 4096), torch.bfloat16, "gluon_mm_fp8_blockscale_gfx950"),
+        ((63, 32768, 2048), torch.bfloat16, "gluon_mm_fp8_blockscale_decode_gfx950"),
+        ((64, 32768, 2048), torch.bfloat16, "gluon_mm_fp8_blockscale_gfx950"),
+        ((1, 1048560, 2048), torch.bfloat16, "gluon_mm_fp8_blockscale_decode_gfx950"),
+        ((1, 1048576, 2048), torch.bfloat16, "gluon_mm_fp8_blockscale_gfx950"),
         ((4, 128, 512), torch.float16, "triton_mm_fp8_blockscale"),
     ],
 )

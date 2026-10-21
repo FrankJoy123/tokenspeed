@@ -279,6 +279,10 @@ to E8M0 or inherit the native path's exact-upcast arithmetic. Scale strides
 are unrestricted. Values require unit inner stride; unaligned rows use
 ordinary loads into the same shared-memory ring instead of direct-to-LDS
 copies. Neither form rearranges weights or creates a persistent weight copy.
+Public FP32 selection uses decode for measured short and moderate reductions;
+longer reductions retain the existing GEMM selection.
+This selection policy does not restrict the raw decoder's supported shapes
+or change native E8M0 selection.
 
 #### Algorithm
 

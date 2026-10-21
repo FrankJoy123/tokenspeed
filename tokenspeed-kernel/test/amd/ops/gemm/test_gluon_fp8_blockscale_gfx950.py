@@ -42,6 +42,8 @@ amd_decode = importlib.import_module(
     "tokenspeed_kernel_amd.ops.gfx950.gemm.mxfp8.decode"
 )
 SHAPES = [
+    (17, 130, 3072),
+    (17, 128, 3104),
     (4, 130, 256),
     (4, 128, 128),
     (1, 16, 288),
@@ -137,7 +139,7 @@ def test_public_fp32_scales_arbitrary_strides_and_canaries(shape, online):
         capture.enabled = False
     expected_kernel = (
         "gluon_mm_fp8_blockscale_decode_gfx950"
-        if m <= 256
+        if m <= 256 and k <= 3072
         else "gluon_mm_fp8_blockscale_gfx950"
     )
     assert capture._records[-1].kernel_name == expected_kernel
