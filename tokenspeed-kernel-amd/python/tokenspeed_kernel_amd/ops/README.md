@@ -238,9 +238,9 @@ The order matters when a product of scales would overflow or underflow.
 Partial K groups zero-fill invalid values; shifted output tiles store only
 their owned rows and columns. Scales are read again on graph replay.
 
-Compact masked tiles handle small or narrow projections and value layouts
-unsuitable for direct shared-memory copies. Other projections can use a
-shared-memory value pipeline. The shape-derived tile and split policy balances
+The general GEMM uses a shared-memory value pipeline. Aligned values copy
+directly into shared memory; other unit-inner-stride layouts use ordinary
+loads into the same shared buffers. The shape-derived tile and split policy balances
 output work distribution against FP32 scratch and reduction cost. Split
 partials are always summed in split order. The online operation uses the
 existing public Triton activation

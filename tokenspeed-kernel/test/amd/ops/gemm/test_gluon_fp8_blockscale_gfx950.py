@@ -33,9 +33,6 @@ if not is_cdna4():
 from tokenspeed_kernel.ops.gemm import mm as kernel_mm
 from tokenspeed_kernel.ops.quantization import quantize_fp8
 from tokenspeed_kernel.profiling import ShapeCapture
-from tokenspeed_kernel_amd.ops.gfx950.gemm.mxfp8.compact import (
-    gluon_mm_fp8_blockscale_compact_gfx950,
-)
 
 amd_mm = importlib.import_module("tokenspeed_kernel_amd.ops.gfx950.gemm.mxfp8.mm")
 amd_decode = importlib.import_module(
@@ -49,6 +46,7 @@ SHAPES = [
     (1, 16, 288),
     (37, 208, 800),
     (300, 256, 1056),
+    (300, 256, 384),
     (1, 1024, 4096),
     (1, 4096, 512),
     (2, 4096, 512),
@@ -322,7 +320,6 @@ def test_same_tile_row_counts_reuse_compiled_kernels(rows, n, k):
     with assert_no_triton_compile(
         amd_mm.gluon_mm_mxfp8_gfx950,
         amd_mm.gluon_mm_mxfp8_reduce_gfx950,
-        gluon_mm_fp8_blockscale_compact_gfx950,
         amd_decode.gluon_mm_mxfp8_decode_gfx950,
     ):
         execute(rows[1])

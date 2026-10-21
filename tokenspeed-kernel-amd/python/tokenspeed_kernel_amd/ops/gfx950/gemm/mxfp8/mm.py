@@ -41,9 +41,6 @@ from typing import NamedTuple
 
 import torch
 from tokenspeed_kernel_amd._triton import gl, gluon, tl, triton
-from tokenspeed_kernel_amd.ops.gfx950.gemm.mxfp8.compact import (
-    gluon_mm_fp8_blockscale_compact_gfx950,
-)
 
 cdna4 = gl.amd.cdna4
 async_copy = cdna4.async_copy
@@ -179,9 +176,14 @@ def _copy_k_tile(
     K: gl.constexpr,
     FP32_SCALES: gl.constexpr,
     FULL_K_TILES: gl.constexpr,
+    ALIGNED_VALUES: gl.constexpr,
 ):
     """Copy one value tile, zero-filling elements below the shifted K origin."""
-    if EVEN_K and (not FP32_SCALES or FULL_K_TILES):
+    if FP32_SCALES and not ALIGNED_VALUES:
+        in_k = (offs_k + k_start >= shift) & (offs_k + k_start - shift < K)
+        mask = in_k[:, None] if K_AXIS == 0 else in_k[None, :]
+        dest.store(gl.load(base + offsets, mask=mask, other=0))
+    elif EVEN_K and (not FP32_SCALES or FULL_K_TILES):
         async_copy.buffer_load_to_shared(dest, base, offsets)
     else:
         in_k = offs_k + k_start >= shift
@@ -426,6 +428,7 @@ def gluon_mm_mxfp8_gfx950(
     SMALL_N: gl.constexpr,
     FP32_SCALES: gl.constexpr,
     FULL_K_TILES: gl.constexpr,
+    ALIGNED_VALUES: gl.constexpr,
     UNIFORM_FP32_B_SCALE: gl.constexpr,
     FP32_B_PRELOAD_GROUPS: gl.constexpr,
 ):
@@ -441,12 +444,17 @@ def gluon_mm_mxfp8_gfx950(
     # Direct-to-LDS lowering rejects this 32-row shared-scale encoding.
     # Reuse the exact direct scale loads already used by shifted K partitions.
     FP32_A_STAGING: gl.constexpr = (
-        FP32_SCALES and EVEN_K and FULL_K_TILES and not SMALL_PIPELINE
+        FP32_SCALES
+        and ALIGNED_VALUES
+        and EVEN_K
+        and FULL_K_TILES
+        and not SMALL_PIPELINE
     )
     ASYNC_A_SCALES: gl.constexpr = ASYNC_SCALES or FP32_A_STAGING
     A_LDS_SCALES: gl.constexpr = LDS_SCALES or FP32_A_STAGING
     FP32_B_PRELOAD: gl.constexpr = (
         FP32_SCALES
+        and ALIGNED_VALUES
         and UNIFORM_FP32_B_SCALE
         and EVEN_K
         and FULL_K_TILES
@@ -896,6 +904,7 @@ def gluon_mm_mxfp8_gfx950(
         K,
         FP32_SCALES,
         FULL_K_TILES,
+        ALIGNED_VALUES,
     )
     if ASYNC_SCALES:
         async_copy.buffer_load_to_shared(smem_bs, bs_base, bs_pair_copy_offsets)
@@ -922,6 +931,7 @@ def gluon_mm_mxfp8_gfx950(
         K,
         FP32_SCALES,
         FULL_K_TILES,
+        ALIGNED_VALUES,
     )
     if ASYNC_A_SCALES:
         async_copy.buffer_load_to_shared(smem_as_top.index(0), as_base, as_copy_top)
@@ -939,6 +949,7 @@ def gluon_mm_mxfp8_gfx950(
             K,
             FP32_SCALES,
             FULL_K_TILES,
+            ALIGNED_VALUES,
         )
         if FP32_B_PRELOAD:
             async_copy.buffer_load_to_shared(
@@ -961,6 +972,7 @@ def gluon_mm_mxfp8_gfx950(
             K,
             FP32_SCALES,
             FULL_K_TILES,
+            ALIGNED_VALUES,
         )
         if ASYNC_A_SCALES:
             async_copy.buffer_load_to_shared(
@@ -980,6 +992,7 @@ def gluon_mm_mxfp8_gfx950(
             K,
             FP32_SCALES,
             FULL_K_TILES,
+            ALIGNED_VALUES,
         )
         if ASYNC_A_SCALES:
             async_copy.buffer_load_to_shared(
@@ -998,6 +1011,7 @@ def gluon_mm_mxfp8_gfx950(
             K,
             FP32_SCALES,
             FULL_K_TILES,
+            ALIGNED_VALUES,
         )
         async_copy.commit_group()
 
@@ -1013,6 +1027,7 @@ def gluon_mm_mxfp8_gfx950(
         K,
         FP32_SCALES,
         FULL_K_TILES,
+        ALIGNED_VALUES,
     )
     async_copy.commit_group()
     _copy_k_tile(
@@ -1027,6 +1042,7 @@ def gluon_mm_mxfp8_gfx950(
         K,
         FP32_SCALES,
         FULL_K_TILES,
+        ALIGNED_VALUES,
     )
     if ASYNC_A_SCALES:
         async_copy.buffer_load_to_shared(
@@ -1046,6 +1062,7 @@ def gluon_mm_mxfp8_gfx950(
             K,
             FP32_SCALES,
             FULL_K_TILES,
+            ALIGNED_VALUES,
         )
         async_copy.commit_group()
 
@@ -1061,6 +1078,7 @@ def gluon_mm_mxfp8_gfx950(
             K,
             FP32_SCALES,
             FULL_K_TILES,
+            ALIGNED_VALUES,
         )
         if ASYNC_A_SCALES:
             async_copy.buffer_load_to_shared(
@@ -1080,6 +1098,7 @@ def gluon_mm_mxfp8_gfx950(
             K,
             FP32_SCALES,
             FULL_K_TILES,
+            ALIGNED_VALUES,
         )
         if ASYNC_A_SCALES:
             async_copy.buffer_load_to_shared(
@@ -1098,6 +1117,7 @@ def gluon_mm_mxfp8_gfx950(
             K,
             FP32_SCALES,
             FULL_K_TILES,
+            ALIGNED_VALUES,
         )
         async_copy.commit_group()
 
@@ -1199,6 +1219,7 @@ def gluon_mm_mxfp8_gfx950(
                         K,
                         FP32_SCALES,
                         FULL_K_TILES,
+                        ALIGNED_VALUES,
                     )
                     if ASYNC_SCALES:
                         async_copy.buffer_load_to_shared(
@@ -1264,6 +1285,7 @@ def gluon_mm_mxfp8_gfx950(
                         K,
                         FP32_SCALES,
                         FULL_K_TILES,
+                        ALIGNED_VALUES,
                     )
                     if ASYNC_A_SCALES:
                         async_copy.buffer_load_to_shared(
@@ -1309,6 +1331,7 @@ def gluon_mm_mxfp8_gfx950(
                             K,
                             FP32_SCALES,
                             FULL_K_TILES,
+                            ALIGNED_VALUES,
                         )
                     else:
                         _copy_k_tile(
@@ -1323,6 +1346,7 @@ def gluon_mm_mxfp8_gfx950(
                             K,
                             FP32_SCALES,
                             FULL_K_TILES,
+                            ALIGNED_VALUES,
                         )
                     if ASYNC_SCALES:
                         async_copy.buffer_load_to_shared(
@@ -1374,6 +1398,7 @@ def gluon_mm_mxfp8_gfx950(
                             K,
                             FP32_SCALES,
                             FULL_K_TILES,
+                            ALIGNED_VALUES,
                         )
                         if FP32_A_STAGING:
                             async_copy.buffer_load_to_shared(
@@ -1394,6 +1419,7 @@ def gluon_mm_mxfp8_gfx950(
                             K,
                             FP32_SCALES,
                             FULL_K_TILES,
+                            ALIGNED_VALUES,
                         )
                     async_copy.commit_group()
 
@@ -1449,6 +1475,7 @@ def gluon_mm_mxfp8_gfx950(
                         K,
                         FP32_SCALES,
                         FULL_K_TILES,
+                        ALIGNED_VALUES,
                     )
                     async_copy.commit_group()
 
@@ -1508,6 +1535,7 @@ def gluon_mm_mxfp8_gfx950(
                         K,
                         FP32_SCALES,
                         FULL_K_TILES,
+                        ALIGNED_VALUES,
                     )
                     if ASYNC_A_SCALES:
                         async_copy.buffer_load_to_shared(
@@ -1553,6 +1581,7 @@ def gluon_mm_mxfp8_gfx950(
                             K,
                             FP32_SCALES,
                             FULL_K_TILES,
+                            ALIGNED_VALUES,
                         )
                     else:
                         _copy_k_tile(
@@ -1567,6 +1596,7 @@ def gluon_mm_mxfp8_gfx950(
                             K,
                             FP32_SCALES,
                             FULL_K_TILES,
+                            ALIGNED_VALUES,
                         )
                     if ASYNC_SCALES:
                         async_copy.buffer_load_to_shared(
@@ -1630,6 +1660,7 @@ def gluon_mm_mxfp8_gfx950(
                             K,
                             FP32_SCALES,
                             FULL_K_TILES,
+                            ALIGNED_VALUES,
                         )
                         if FP32_A_STAGING:
                             async_copy.buffer_load_to_shared(
@@ -1650,6 +1681,7 @@ def gluon_mm_mxfp8_gfx950(
                             K,
                             FP32_SCALES,
                             FULL_K_TILES,
+                            ALIGNED_VALUES,
                         )
                     async_copy.commit_group()
                     a_base += 2 * a_next_k
@@ -2111,7 +2143,6 @@ def _fp32_weight_scale_table_groups(n: int, k: int, block_n: int) -> int:
 
 
 class _FP32LaunchConfig(NamedTuple):
-    pipeline: bool
     block_m: int
     block_n: int
     waves: int
@@ -2129,10 +2160,8 @@ def _small_fp32_long_k_family(m: int, n: int, k: int) -> bool:
 def _fp32_pipeline_waves_per_eu(
     m: int, n: int, k: int, config: _FP32LaunchConfig
 ) -> int:
-    if (
-        config.pipeline
-        and (config.block_m, config.block_n) == (64, 64)
-        and _small_fp32_long_k_family(m, n, k)
+    if (config.block_m, config.block_n) == (64, 64) and _small_fp32_long_k_family(
+        m, n, k
     ):
         return 0
     return MXFP8_WAVES_PER_EU
@@ -2152,7 +2181,6 @@ def _fp32_launch_config(m: int, n: int, k: int) -> _FP32LaunchConfig:
         if n > 256 and k > 512 and triton.cdiv(m, 64) * 64 == triton.cdiv(m, 32) * 32:
             block_m = 64
         block_n = 16 if n <= 16 else (32 if n <= 256 or k <= 512 else 64)
-        waves = min(4, block_m * block_n // 256)
         groups = triton.cdiv(m, block_m) * triton.cdiv(n, block_n)
         # Narrow and short projections avoid the second launch. Eight is a
         # conservative reduction-cost choice, not a legal limit.
@@ -2165,31 +2193,19 @@ def _fp32_launch_config(m: int, n: int, k: int) -> _FP32LaunchConfig:
         # partitions without reducing an existing larger choice.
         if _small_fp32_long_k_family(m, n, k):
             splits = max(splits, min(8, triton.cdiv(k, 256) // 2))
-        # Use double buffering only with four K128 steps in every partition.
-        if _small_fp32_family(m, n, k) and not _short_fp32_partition(k, splits):
-            return _FP32LaunchConfig(True, 64, 64, 4, splits)
-        return _FP32LaunchConfig(False, block_m, block_n, waves, splits)
+        # The pipeline walks pairs of K128 tiles, including masked padding.
+        # Every partition needs at least two pairs for its prologue and drain.
+        splits = min(splits, max(1, triton.cdiv(k, 256) // 2))
+        return _FP32LaunchConfig(64, 64, 4, splits)
     if triton.cdiv(m, 256) * triton.cdiv(n, 256) < 128 or k % 256 != 0:
         groups = triton.cdiv(m, 128) * triton.cdiv(n, 128)
         # Choose the nearest workgroup count, allowing grids above 256.
         splits = min(
             8, max(1, (256 + groups // 2) // groups), max(1, triton.cdiv(k, 256) // 2)
         )
-        return _FP32LaunchConfig(True, 128, 128, 8, splits)
+        return _FP32LaunchConfig(128, 128, 8, splits)
     # Filled, aligned grids retain the large tile and its split cost model.
-    return _FP32LaunchConfig(True, 256, 256, 8, _num_splits_for_tile(m, n, k, 256, 256))
-
-
-def _compact_warp_shape(block_m: int, block_n: int, waves: int):
-    for wm in (2, 1, 4, 8):
-        if waves % wm == 0 and wm * 16 <= block_m and waves // wm * 16 <= block_n:
-            return wm, waves // wm
-    raise ValueError("output tile must hold every MFMA wave")
-
-
-def _short_fp32_partition(k: int, splits: int) -> bool:
-    # Balanced pair boundaries give a minimum of floor(ceil(K/256)/splits).
-    return triton.cdiv(k, 256) // splits < 2
+    return _FP32LaunchConfig(256, 256, 8, _num_splits_for_tile(m, n, k, 256, 256))
 
 
 def launch_gluon_mm_mxfp8_gfx950(
@@ -2270,16 +2286,6 @@ def launch_gluon_mm_mxfp8_gfx950(
             )
 
     config = _fp32_launch_config(m, n, k) if fp32_scales else None
-    if (
-        fp32_scales
-        and config.pipeline
-        and any(
-            value.data_ptr() % 16 != 0 or value.stride(0) % 16 != 0 for value in (A, B)
-        )
-    ):
-        # Direct-to-LDS copies require aligned values. Ordinary loads preserve
-        # the unit-inner-stride contract without copying or repacking inputs.
-        config = _FP32LaunchConfig(False, 32, 32, 4, config.splits)
     block_m = config.block_m if fp32_scales else MXFP8_BLOCK_M
     block_n = config.block_n if fp32_scales else MXFP8_BLOCK_N
     grid_mn = triton.cdiv(m, block_m) * triton.cdiv(n, block_n)
@@ -2309,60 +2315,29 @@ def launch_gluon_mm_mxfp8_gfx950(
         target = torch.empty((splits, m, n), device=A.device, dtype=torch.float32)
     else:
         target = output
-    if fp32_scales and not config.pipeline:
-        warps_m, warps_n = _compact_warp_shape(block_m, block_n, config.waves)
-        gluon_mm_fp8_blockscale_compact_gfx950[(grid_mn, splits)](
-            A,
-            B,
-            A_scales,
-            B_scales,
-            target,
-            m,
-            n,
-            k,
-            splits,
-            target.stride(0) if splits > 1 else 0,
-            A.stride(0),
-            A.stride(1),
-            B.stride(0),
-            B.stride(1),
-            A_scales.stride(0),
-            A_scales.stride(1),
-            B_scales.stride(0),
-            B_scales.stride(1),
-            target.stride(-2),
-            target.stride(-1),
-            BLOCK_M=block_m,
-            BLOCK_N=block_n,
-            WAVES=config.waves,
-            WARPS_M=warps_m,
-            WARPS_N=warps_n,
-            num_warps=config.waves,
-        )
-    else:
-        _launch_pipeline_fp32_or_native(
-            A,
-            B,
-            A_scales,
-            B_scales,
-            target,
-            m,
-            n,
-            k,
-            block_m,
-            block_n,
-            grid_mn,
-            splits,
-            scale_mode,
-            even_k,
-            fp32_scales,
-            config.waves if fp32_scales else MXFP8_NUM_WARPS,
-            (
-                _fp32_pipeline_waves_per_eu(m, n, k, config)
-                if fp32_scales
-                else MXFP8_WAVES_PER_EU
-            ),
-        )
+    _launch_pipeline_fp32_or_native(
+        A,
+        B,
+        A_scales,
+        B_scales,
+        target,
+        m,
+        n,
+        k,
+        block_m,
+        block_n,
+        grid_mn,
+        splits,
+        scale_mode,
+        even_k,
+        fp32_scales,
+        config.waves if fp32_scales else MXFP8_NUM_WARPS,
+        (
+            _fp32_pipeline_waves_per_eu(m, n, k, config)
+            if fp32_scales
+            else MXFP8_WAVES_PER_EU
+        ),
+    )
     if splits > 1:
         reduce_m, reduce_n = (
             _fp32_reducer_tile(m, n, k)
@@ -2450,6 +2425,10 @@ def _launch_pipeline_fp32_or_native(
         # Model K is fixed; avoid a runtime full-tile branch on every copy.
         # This does not specialize the runtime token count or split count.
         FULL_K_TILES=k % MXFP8_BLOCK_K == 0,
+        ALIGNED_VALUES=not fp32_scales
+        or all(
+            value.data_ptr() % 16 == 0 and value.stride(0) % 16 == 0 for value in (A, B)
+        ),
         UNIFORM_FP32_B_SCALE=fp32_scales and _uniform_fp32_weight_block(n, block_n),
         FP32_B_PRELOAD_GROUPS=(
             _fp32_weight_scale_table_groups(n, k, block_n) if fp32_scales else 0

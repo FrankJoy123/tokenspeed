@@ -34,16 +34,17 @@ mm = importlib.import_module("tokenspeed_kernel_amd.ops.gfx950.gemm.mxfp8.mm")
 @pytest.mark.parametrize(
     "shape,expected,hint",
     [
-        ((1, 1024, 4096), (True, 64, 64, 4, 8), 0),
-        ((64, 1024, 4096), (True, 64, 64, 4, 8), 2),
-        ((65, 1024, 4096), (True, 64, 64, 4, 6), 2),
-        ((128, 1024, 4096), (True, 64, 64, 4, 8), 2),
-        ((129, 4096, 512), (False, 32, 32, 4, 1), 2),
-        ((16, 4096, 1536), (False, 16, 64, 4, 4), 2),
-        ((896, 6144, 4096), (True, 128, 128, 8, 1), 2),
-        ((1616, 1024, 4096), (True, 128, 128, 8, 2), 2),
-        ((1616, 2048, 4096), (True, 128, 128, 8, 1), 2),
-        ((3536, 4096, 512), (True, 256, 256, 8, 1), 2),
+        ((1, 1024, 4096), (64, 64, 4, 8), 0),
+        ((64, 1024, 4096), (64, 64, 4, 8), 2),
+        ((65, 1024, 4096), (64, 64, 4, 6), 2),
+        ((128, 1024, 4096), (64, 64, 4, 8), 2),
+        ((129, 4096, 512), (64, 64, 4, 1), 2),
+        ((16, 4096, 1536), (64, 64, 4, 3), 2),
+        ((300, 256, 384), (64, 64, 4, 1), 2),
+        ((896, 6144, 4096), (128, 128, 8, 1), 2),
+        ((1616, 1024, 4096), (128, 128, 8, 2), 2),
+        ((1616, 2048, 4096), (128, 128, 8, 1), 2),
+        ((3536, 4096, 512), (256, 256, 8, 1), 2),
     ],
 )
 def test_fp32_shape_policy_boundaries(shape, expected, hint):
@@ -64,13 +65,8 @@ def test_fp32_shape_policy_boundaries(shape, expected, hint):
 )
 def test_fp32_ragged_partitions_have_work_and_legal_wave_tiles(m, n, k):
     config = mm._fp32_launch_config(m, n, k)
-    if config.pipeline:
-        assert ((k + 255) // 256) // config.splits >= 2
-    else:
-        assert ((k + 127) // 128) // config.splits >= 1
-        wm, wn = mm._compact_warp_shape(config.block_m, config.block_n, config.waves)
-        assert wm * wn == config.waves
-        assert 16 * wm <= config.block_m and 16 * wn <= config.block_n
+    assert ((k + 255) // 256) // config.splits >= 2
+    assert config.waves in (4, 8)
 
 
 @pytest.mark.parametrize(
