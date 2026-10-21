@@ -23,10 +23,10 @@
 
 # Run via sbatch with a native client, or from the login host in a held job.
 # All paths must be absolute and visible where they are used. See agentx.md.
-# AgentX configs contain the engine recipes; this script owns launch and replay.
+# Shared configs supply the base recipe; this script supplies AgentX overrides and replay.
 set -euo pipefail
 : "${SLURM_JOB_ID:?use sbatch or an existing allocation}"
-: "${RUN_MODE:?smoke or formal}" "${TOKENIZER_PATH:?pinned tokenizer}" \
+: "${MODEL_NAME:?served model name}" "${RUN_MODE:?smoke or formal}" \
   "${CLIENT_ROOT:?prepared client venv root}" "${INFERENCEX_WORKSPACE:?InferenceX checkout}"
 case "$RUN_MODE" in
     smoke|formal) ;;
@@ -35,6 +35,16 @@ esac
 
 # Check the complete sweep before starting any GPU work.
 read -r -a CONFIGS <<< "${CONFIG_NAMES:?server configurations}"
+[[ ${#CONFIGS[@]} -gt 0 ]] || { echo 'CONFIG_NAMES must not be empty' >&2; exit 2; }
+declare -A seen_config=()
+for config in "${CONFIGS[@]}"; do
+    case "$config" in
+        attn_tp8_moe_tp8|attn_tp8_moe_ep8) ;;
+        *) echo "Unknown configuration: $config" >&2; exit 2 ;;
+    esac
+    [[ -z "${seen_config[$config]:-}" ]] || { echo "Duplicate configuration: $config" >&2; exit 2; }
+    seen_config[$config]=1
+done
 read -r -a CONCURRENCY_VALUES <<< "${CONCURRENCIES:?concurrency points}"
 [[ ${#CONCURRENCY_VALUES[@]} -gt 0 ]] || { echo 'CONCURRENCIES must not be empty' >&2; exit 2; }
 declare -A seen_concurrency=()
@@ -91,10 +101,6 @@ stop_server() {
 }
 
 launch_server() {
-    case "$CONFIG" in
-        attn_tp8_moe_tp8|attn_tp8_moe_ep8) ;;
-        *) echo "Unknown configuration: $CONFIG" >&2; exit 2 ;;
-    esac
     scontrol show job "$SLURM_JOB_ID" > "$RUN_ROOT/allocation.txt"
     mapfile -t NODES < <(scontrol show hostnames "$(squeue -h -j "$SLURM_JOB_ID" -o '%N')")
     [[ "${#NODES[@]}" = 2 ]] || { echo "K3 TP8 requires two four-GPU nodes" >&2; exit 2; }
@@ -116,8 +122,18 @@ launch_server() {
         bash -c '
             set -euo pipefail
             if [[ -n "$SERVER_VENV" ]]; then source "$SERVER_VENV/bin/activate"; fi
-            exec bash "$1"
-        ' agentx-server "$SOURCE_ROOT/test/agentic_benchmark/kimi_k3/tokenspeed/configs/agentx_${CONFIG}.sh" > "$RUN_ROOT/server.log" 2>&1 &
+            exec bash -x "$@"
+        ' agentx-server "$SOURCE_ROOT/test/agentic_benchmark/kimi_k3/tokenspeed/configs/${CONFIG}.sh" \
+        --served-model-name "$MODEL_NAME" \
+        --max-model-len 1048576 --max-num-seqs 16 --gpu-memory-utilization 0.92 \
+        --seed 0 --max-cudagraph-capture-size 1024 \
+        --language-model-only --mm-encoder-tp-mode weights \
+        --mamba-ssm-dtype bfloat16 --prefix-granularity 128 \
+        --chunked-prefill-size 8192 --max-prefill-tokens 8192 \
+        --sampling-backend greedy --synthetic-acceptance-length "${AL_TARGET:?fixed acceptance length}" \
+        --stream-interval 10 --enable-log-request-stats --disable-kvstore \
+        --port "$API_PORT" --enable-metrics --metrics-host 0.0.0.0 --metrics-port "$METRICS_PORT" \
+        > "$RUN_ROOT/server.log" 2>&1 &
     SERVER_PID=$!
 }
 
@@ -160,7 +176,7 @@ unset MAX_MODEL_LEN
 # AIPerf reads this in its worker processes too: always replay recorded turns.
 export AIPERF_DATASET_WEKA_LIVE_ASSISTANT_RESPONSES=0
 # InferenceX build_replay_cmd reads these shell variables and builds AIPerf CLI flags.
-MODEL="$TOKENIZER_PATH" SERVED_MODEL_NAME="$MODEL_NAME" CONC="$CONCURRENCY" \
+MODEL=nvidia/Kimi-K3-NVFP4 SERVED_MODEL_NAME="$MODEL_NAME" CONC="$CONCURRENCY" \
 FRAMEWORK=tokenspeed AIPERF_EXPERIMENTAL_FAST=0 AIPERF_UNSAFE_OVERRIDE=false \
 AGENTIC_WARMUP_GRACE_PERIOD=1800 \
 AIPERF_TRACE_IDLE_GAP_CAP_SECONDS=300 AIPERF_LIVE_FAILED_REQUEST_THRESHOLD=0.1 \
@@ -233,7 +249,7 @@ wait_for_drain() {
 }
 
 # Keep the configuration sweep beside the launch lifecycle, like agentic_bench.slurm.
-(( $# == 0 )) || { echo 'Use MODEL_DIR, DRAFT_DIR and AL_TARGET; trailing flags are unsupported' >&2; exit 2; }
+(( $# == 0 )) || { echo 'Use the named recipe inputs; trailing flags are unsupported' >&2; exit 2; }
 SWEEP_ROOT=$RUN_ROOT
 mkdir "$SWEEP_ROOT"
 for CONFIG in "${CONFIGS[@]}"; do

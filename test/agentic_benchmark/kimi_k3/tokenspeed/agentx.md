@@ -9,17 +9,18 @@ native full trace (`weka-062126-full`). It does not launch PD workers or a separ
 `agentx.slurm` manages the benchmark lifecycle:
 
 - `launch_server` resolves the allocation and endpoints, then calls the selected
-  `configs/agentx_attn_tp8_moe_tp8.sh` or `configs/agentx_attn_tp8_moe_ep8.sh`
+  `configs/attn_tp8_moe_tp8.sh` or `configs/attn_tp8_moe_ep8.sh`
   inside the GPU container.
 - `run_benchmark` runs native InferenceX in a fresh client shell per concurrency point.
 - Readiness, drain and cleanup keep the server lifecycle around the sweep.
 
-Each AgentX config writes its fixed engine flags and TP/EP topology directly in
-the command. Inputs are the checkpoint paths, served name,
-AL target, API/metrics ports and output directory. Slurm handles venv activation.
-There is no generic server wrapper or arbitrary extra-argument passthrough. The command is
-recorded before execution. The existing `agentic_bench` configs remain unchanged
-because their workload settings differ from this AgentX recipe.
+The shared configs contain the HF model IDs, topology and EAGLE3 settings.
+They append `"$@"` to `ts serve`; `launch_server` passes the fixed AgentX overrides
+explicitly, including context length, sequence capacity, text-only execution,
+synthetic AL and metrics. Repeated scalar flags use the last supplied value.
+Calling the configs without extra arguments preserves the existing benchmark recipe.
+The launcher uses `bash -x` to record the expanded server command in `server.log`.
+There is no separate AgentX server script.
 
 InferenceX defines the replay protocol and aggregates results. Its native
 `build_replay_cmd` invokes AIPerf (`aiperf profile --scenario inferencex-agentx-mvp`),
@@ -67,7 +68,7 @@ example resolves dependencies once; version ranges are not a dependency lock.
 Keep the client environment, model, tokenizer and full-trace revision fixed
 across comparisons. The native loader reads
 `semianalysisai/cc-traces-weka-062126`; prepare its cache before running.
-Use whitespace-free client, tokenizer and output paths: the native command
+Use whitespace-free client and output paths: the native command
 builder splits arguments on whitespace.
 
 ## Run
@@ -87,8 +88,7 @@ SOURCE_ROOT="$SOURCE_ROOT" CLIENT_ROOT="$CLIENT_ROOT" \
 INFERENCEX_WORKSPACE="$CLIENT_ROOT/inferencex" \
 CONTAINER_IMAGE="$BENCH_ROOT/server.sqsh" CONTAINER_MOUNTS="$BENCH_ROOT:$BENCH_ROOT" \
 SERVER_VENV="" \
-MODEL_DIR="$BENCH_ROOT/models/k3" DRAFT_DIR="$BENCH_ROOT/models/eagle3" \
-MODEL_NAME=moonshotai/Kimi-K3 TOKENIZER_PATH="$BENCH_ROOT/models/k3-tokenizer" \
+MODEL_NAME=moonshotai/Kimi-K3 \
 TOKENSPEED_FLASHINFER_AUTOTUNE_CACHE_DIR="$BENCH_ROOT/autotune-cache" \
 CONFIG_NAMES=attn_tp8_moe_tp8 AL_TARGET=3.7 \
 RUN_MODE=smoke CONCURRENCIES=1 \
@@ -105,8 +105,12 @@ to native InferenceX functions/result processing, not recipe selectors.
 For a formal run, use the same command with `RUN_MODE=formal`, `CONCURRENCIES="1 2 4 8 16"` and a new
 `RUN_ROOT="$BENCH_ROOT/new-agentx-formal"`.
 
-EAGLE3 is fixed at three draft steps and four draft tokens. `DRAFT_DIR` must
-point to the matching EAGLE3 checkpoint; there is no external strategy selector.
+EAGLE3 is fixed at three draft steps and four draft tokens. The server commands
+use `nvidia/Kimi-K3-NVFP4` and `lightseekorg/kimi-k3-eagle3-mla` directly;
+the client loads its tokenizer from `nvidia/Kimi-K3-NVFP4` too.
+There are no model-path inputs or external strategy selector.
+Prepare these repositories in the Hugging Face cache before running, and record
+the resolved revisions with each comparison; a model ID alone does not pin a revision.
 The full-trace loader is fixed in `agentx.slurm`.
 The model checkpoint must be K3 FP4 and the tokenizer must match it. AL is a
 synthetic control, not a measured natural acceptance rate.
@@ -120,18 +124,18 @@ sbatch --nodes=2 --ntasks-per-node=1 --gpus-per-node=4 --cpus-per-task=64 \
   "$SOURCE_ROOT/test/agentic_benchmark/kimi_k3/tokenspeed/agentx.slurm"
 ```
 
-There is no external `SERVER_ARGS` and trailing flags are rejected. Change fixed
-engine values in the selected `configs/agentx_*.sh` when deliberately defining a different recipe.
+There is no external `SERVER_ARGS` and trailing flags are rejected. Change AgentX overrides in `launch_server` when deliberately defining a different recipe.
 PD receiver/routing options belong in the separate PD benchmark scripts, not here.
 
 ## Fixed settings
 
-The complete engine command lives in each AgentX config: context 1048576,
+The shared engine command plus the explicit `launch_server` overrides set: context 1048576,
 max sequences 16, memory utilization 0.92, FP8 KV, BF16 SSM, prefix granularity
 128, prefill limits 8192, graph capture limit 1024, stream interval 10, seed 0,
 greedy synthetic acceptance, metrics enabled and KV offloading disabled.
 
-`run_benchmark` in `agentx.slurm` contains the client protocol: seed 42, tail grace
+The pinned InferenceX `build_replay_cmd` explicitly adds `--random-seed 42`.
+`run_benchmark` in `agentx.slurm` supplies tail grace
 30 s, warmup grace 1800 s, idle gap cap 300 s, request timeout 21600 s and error threshold 10%.
 `smoke` sends for 180 s with one warmup request per lane; `formal` sends for
 3600 s with ten warmup requests per lane. Both use the native trace loader and
@@ -150,7 +154,7 @@ remain so inherited environment settings cannot change the fixed protocol.
 ## Lifecycle and outputs
 
 The launcher checks the required client inputs, run mode, and the complete
-concurrency list (including duplicates) before starting GPU work.
+configuration and concurrency lists (including duplicates) before starting GPU work.
 Each selected configuration starts one server, waits for `/readiness`, then runs
 the ordered concurrency points. The launcher drains running and waiting requests
 after each point before continuing. Missing or invalid counters never mean idle;
@@ -167,7 +171,7 @@ Failure or interruption stops the sweep and cleans up only its server steps,
 not the allocation. Allocation retention and multi-job scheduling stay outside.
 
 `RUN_ROOT` must be new and its parent must exist. Each `<config>/` saves the
-expanded **actual `ts serve` command** in `server-command.txt`, the server log,
+expanded **actual `ts serve` command** in `server.log`, the server log,
 allocation, endpoint and exit code. Each `c<N>/` saves its client log, exit code,
 drain counters and `client/` containing native exports and `inferencex_result.json`.
 The client requires a nonempty metrics export. It does not rewrite native metrics.
