@@ -182,7 +182,7 @@ def _copy_k_tile(
     if FP32_SCALES and not ALIGNED_VALUES:
         in_k = (offs_k + k_start >= shift) & (offs_k + k_start - shift < K)
         mask = in_k[:, None] if K_AXIS == 0 else in_k[None, :]
-        dest.store(gl.load(base + offsets, mask=mask, other=0))
+        dest.store(cdna4.buffer_load(base, offsets, mask=mask, other=0.0))
     elif EVEN_K and (not FP32_SCALES or FULL_K_TILES):
         async_copy.buffer_load_to_shared(dest, base, offsets)
     else:
