@@ -468,6 +468,14 @@ computes the stored width and consumes only logical columns, while CuTe gives
 TMA a logical view of that same storage. Eager and CUDA graph calls therefore
 share both the weight layout and its update semantics.
 
+CuTe QSA uses runtime query rows and selected-slot strides. Model dimensions,
+the selection budget and the finite launch configurations stay static. Startup
+autotuning warms those configurations and the streaming top-k capacity buckets;
+gated residual mixing also warms full/tail tiles and scheduling rounds. This
+uses the ordinary operator entry points, without extra model-forward paths.
+See the [QSA kernel contract](../../tokenspeed-kernel/python/tokenspeed_kernel/ops/attention/qsa/README.md)
+and [gated residual warmup](../../tokenspeed-kernel/python/tokenspeed_kernel/ops/residual/README.md).
+
 QSA logits scoring uses the same paged kernel for every query layout. A batch
 whose request lengths are all available on the host may shorten its compressed
 block-table view to the maximum prefix-plus-query length, rounded to the cache

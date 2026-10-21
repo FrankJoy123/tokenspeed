@@ -541,6 +541,50 @@ def test_dynamic_rows_reuse_plan_in_eager_and_capture(row_counts, dtype, monkeyp
     )
 
 
+def test_startup_warms_full_tail_tiles_and_rounds(monkeypatch):
+    from tokenspeed_kernel.ops.tuning import autotune
+
+    _reset_caches(monkeypatch)
+    monkeypatch.setattr(cute_fused, "_WARMED", set())
+    values = inputs(256, torch.bfloat16, True)
+    pdl_enabled(True)
+
+    def forward(rows):
+        return gated_residual_mix(
+            values[0][:rows],
+            values[1],
+            values[2],
+            4,
+            2560,
+            320,
+            projection_rows=324,
+            projection_scale=0.25,
+            weights_independent=True,
+            override=None,
+            solution=None,
+        )
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        with autotune(tune_mode=True, tuning_buckets=None, round_up=None):
+            forward(1)
+    stream.synchronize()
+    plans = dict(cute_fused._PLANS)
+    row_counts = (13, 16, 23, 32, 33, 64, 95, 96, 97, 128, 191, 192, 193, 224, 255, 256)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        outputs = [forward(rows) for rows in row_counts]
+    for factor in (0.75, -0.5):
+        values[0].mul_(factor)
+        graph.replay()
+        torch.cuda.synchronize()
+        expected = reference(values, 0.25)
+        for rows, actual in zip(row_counts, outputs):
+            check(actual, tuple(value[:rows] for value in expected), torch.bfloat16)
+    assert cute_fused._PLANS == plans
+
+
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("enable_pdl", [False, True])
 @pytest.mark.filterwarnings("ignore:The CUDA Graph is empty:UserWarning")

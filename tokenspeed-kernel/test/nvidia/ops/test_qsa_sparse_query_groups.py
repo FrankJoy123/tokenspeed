@@ -83,6 +83,134 @@ def _reference_rows(q, k, v, selected, row_ids):
 
 
 @pytest.mark.parametrize(
+    ("q_heads", "kv_heads", "tokens", "row_counts", "cache_dtype"),
+    [
+        (24, 2, 1, (33, 35, 37), torch.bfloat16),
+        (24, 2, 2, (80, 82, 86), torch.bfloat16),
+        (24, 2, 4, (256, 260, 268), torch.bfloat16),
+        (24, 2, 6, (576, 582, 594), torch.bfloat16),
+        (24, 2, 8, (512, 520, 528), torch.bfloat16),
+        (6, 1, 6, (192, 198, 204), torch.bfloat16),
+        (24, 2, 1, (17, 19, 23), torch.float8_e4m3fn),
+    ],
+)
+def test_qsa_dynamic_rows_reuse_compilation(
+    device, monkeypatch, q_heads, kv_heads, tokens, row_counts, cache_dtype
+):
+    _require_blackwell()
+    from tokenspeed_kernel.thirdparty.cute_dsl import qsa_sparse
+
+    monkeypatch.setattr(qsa_sparse, "_COMPILED_KERNELS", {})
+    torch.manual_seed(109)
+    keys = (torch.randn(256, kv_heads, 256, device=device) * 0.25).to(cache_dtype)
+    values = (torch.randn_like(keys, dtype=torch.float32) * 0.25).to(cache_dtype)
+    queries = [
+        torch.randn(rows, q_heads, 256, device=device, dtype=torch.bfloat16)
+        for rows in row_counts
+    ]
+    selections = [
+        torch.empty_strided(
+            (rows, 2051), strides, device=device, dtype=torch.int32
+        ).fill_(-1)
+        for rows, strides in zip(row_counts, ((2051, 1), (2056, 1), (4102, 2)))
+    ]
+    for selected in selections:
+        selected[:, :8] = torch.arange(1, 9, device=device)
+        # Exercise both exact prefix reuse and independent-query fallback.
+        selected[1::2, 7] = 9
+        selected[:, -3:] = torch.arange(10, 13, device=device)
+
+    def forward(index):
+        return qsa_sparse.kernel(
+            queries[index],
+            keys,
+            values,
+            selections[index],
+            scale=1 / 16,
+            max_seqlen_q=tokens,
+            k_scale=None,
+            v_scale=None,
+            enable_pdl=True,
+        )
+
+    forward(0)
+    compiled = dict(qsa_sparse._COMPILED_KERNELS)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = [forward(index) for index in (1, 2)]
+    for factor in (0.75, -0.5):
+        for query in queries:
+            query.mul_(factor)
+        graph.replay()
+        for index, output in zip((1, 2), captured):
+            row_ids = [0, 1, row_counts[index] - 1]
+            expected = _reference_rows(
+                queries[index], keys, values, selections[index], row_ids
+            )
+            torch.testing.assert_close(
+                output[row_ids].double(), expected, rtol=0.01, atol=0.003
+            )
+            torch.testing.assert_close(forward(index), output, rtol=0, atol=0)
+    # Compiling during capture or a later eager forward is serving behavior.
+    assert qsa_sparse._COMPILED_KERNELS == compiled
+
+
+@pytest.mark.parametrize("cache_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+def test_qsa_startup_warms_launch_configurations(device, monkeypatch, cache_dtype):
+    _require_blackwell()
+    from tokenspeed_kernel.ops.attention.qsa import qsa_sparse_attention
+    from tokenspeed_kernel.ops.tuning import autotune
+    from tokenspeed_kernel.thirdparty.cute_dsl import qsa_sparse
+
+    monkeypatch.setattr(qsa_sparse, "_COMPILED_KERNELS", {})
+    monkeypatch.setattr(qsa_sparse, "_WARMED", set())
+    torch.manual_seed(113)
+    keys = (torch.randn(256, 2, 256, device=device) * 0.25).to(cache_dtype)
+    values = (torch.randn_like(keys, dtype=torch.float32) * 0.25).to(cache_dtype)
+
+    def inputs(rows):
+        query = torch.randn(rows, 24, 256, device=device, dtype=torch.bfloat16)
+        selected = torch.full((rows, 2051), -1, device=device, dtype=torch.int32)
+        selected[:, :8] = torch.arange(1, 9, device=device)
+        return query, selected
+
+    def forward(query, selected, width):
+        return qsa_sparse_attention(
+            query,
+            keys,
+            values,
+            selected,
+            scale=1 / 16,
+            max_seqlen_q=width,
+            metadata_capacity_rows=None,
+            k_scale=None,
+            v_scale=None,
+            override=None,
+            solution="cute_dsl",
+            sparse_metadata=None,
+        )
+
+    first = inputs(1)
+    with autotune(tune_mode=True, tuning_buckets=None, round_up=None):
+        forward(*first, 1)
+    compiled = dict(qsa_sparse._COMPILED_KERNELS)
+    assert compiled
+    # Cross launch-policy thresholds and query-group widths after startup.
+    for rows, width in ((3, 1), (37, 1), (86, 2), (260, 4), (582, 6), (520, 8)):
+        query, selected = inputs(rows)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = forward(query, selected, width)
+        graph.replay()
+        row_ids = [0, rows - 1]
+        expected = _reference_rows(query, keys, values, selected, row_ids)
+        torch.testing.assert_close(
+            output[row_ids].double(), expected, rtol=0.01, atol=0.003
+        )
+    assert qsa_sparse._COMPILED_KERNELS == compiled
+
+
+@pytest.mark.parametrize(
     "selected_strides", [(2051, 1), (2056, 1)], ids=["compact", "row_padded"]
 )
 @pytest.mark.parametrize(

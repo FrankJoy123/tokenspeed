@@ -24,6 +24,7 @@ import math
 
 import torch
 from tokenspeed_kernel.ops.attention.qsa.metadata import QSASparseMetadata, QSAWorkspace
+from tokenspeed_kernel.ops.tuning import get_autotune_max_num_tokens, is_autotuning
 from tokenspeed_kernel.registry import KernelRegistry
 from tokenspeed_kernel.selection import select_kernel
 from tokenspeed_kernel.signature import (
@@ -222,6 +223,22 @@ def qsa_sparse_attention(
         return q.new_empty((0, q.shape[1], v_cache.shape[-1]))
     if k_cache.shape[0] < 2 or v_cache.shape[0] < 2:
         raise ValueError("QSA caches must include slot 1 for masked reads")
+    if (
+        is_autotuning()
+        and solution in (None, "cute_dsl")
+        and override in (None, "cute_dsl", "cute_dsl_blackwell_qsa_sparse_attention")
+    ):
+        from tokenspeed_kernel.ops.attention.qsa.cute_dsl import (
+            _warmup_qsa_sparse_attention,
+        )
+
+        _warmup_qsa_sparse_attention(
+            q,
+            k_cache,
+            v_cache,
+            selected_slots,
+            max_rows=get_autotune_max_num_tokens(),
+        )
     kernel = select_qsa_sparse_attention_kernel(
         q,
         k_cache,
@@ -413,6 +430,24 @@ def qsa_block_topk_stream(
         queries_per_request=queries_per_request,
         max_partial_bytes=max_partial_bytes,
     )
+    if (
+        is_autotuning()
+        and solution in (None, "cute_dsl")
+        and override in (None, "cute_dsl", "cute_dsl_qwen4_exp_qsa_block_topk")
+    ):
+        from tokenspeed_kernel.ops.attention.qsa.cute_dsl import _warmup_qsa_stream_topk
+
+        _warmup_qsa_stream_topk(
+            query,
+            key_cache,
+            page_table,
+            request_indices,
+            complete_blocks,
+            page_size=page_size,
+            block_topk=block_topk,
+            max_partial_bytes=max_partial_bytes,
+            enable_pdl=enable_pdl,
+        )
     kernel = select_kernel(
         "attention",
         "qsa_block_topk_stream",
@@ -540,6 +575,25 @@ def qwen4_exp_qsa_block_topk(
         queries_per_request=queries_per_request,
         max_partial_bytes=max_partial_bytes,
     )
+    if (
+        is_autotuning()
+        and path == "auto"
+        and solution in (None, "cute_dsl")
+        and override in (None, "cute_dsl", "cute_dsl_qwen4_exp_qsa_block_topk")
+    ):
+        from tokenspeed_kernel.ops.attention.qsa.cute_dsl import _warmup_qsa_stream_topk
+
+        _warmup_qsa_stream_topk(
+            query,
+            key_cache,
+            page_table,
+            request_indices,
+            complete_blocks,
+            page_size=page_size,
+            block_topk=block_topk,
+            max_partial_bytes=max_partial_bytes,
+            enable_pdl=enable_pdl,
+        )
     if path == "auto":
         # Keep shape routing independent of live device frontiers.
         min_stream_rows = 512 if num_blocks >= 16384 else 8192

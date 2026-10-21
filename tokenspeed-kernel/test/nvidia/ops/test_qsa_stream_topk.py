@@ -880,6 +880,94 @@ def test_stream_topk_small_shapes_reuse_capacity_buckets(
     assert compile_count == 1
 
 
+@pytest.mark.parametrize(
+    ("max_partial_bytes", "startup_rows"),
+    [(0, 1), (0, 8), (32 << 20, 1)],
+)
+@pytest.mark.parametrize("enable_pdl", [False, True])
+def test_stream_topk_startup_warms_algorithm_and_capacity_buckets(
+    device, monkeypatch, max_partial_bytes, startup_rows, enable_pdl
+):
+    from tokenspeed_kernel.ops.tuning import autotune
+    from tokenspeed_kernel.selection import kernel_override
+
+    monkeypatch.setattr(stream_topk, "_COMPILED", {})
+    monkeypatch.setattr(stream_topk, "_WARMED", set())
+    torch.manual_seed(157)
+    keys = torch.randn(260 * 64, 1, 128, device=device, dtype=torch.bfloat16)
+    table_storage = torch.arange(260, device=device, dtype=torch.int32)[None]
+
+    def inputs(rows, pages):
+        query = torch.randn(rows, 4, 128, device=device, dtype=torch.bfloat16)
+        requests = torch.zeros(rows, device=device, dtype=torch.int32)
+        complete = torch.linspace(0, pages * 64, rows, device=device).int()
+        return query, table_storage[:, :pages], requests, complete
+
+    def forward(values, width, *, path, solution):
+        query, table, requests, complete = values
+        return qwen4_exp_qsa_block_topk(
+            query,
+            keys,
+            table,
+            requests,
+            complete,
+            page_size=64,
+            block_topk=512,
+            queries_per_request=width,
+            max_partial_bytes=max_partial_bytes,
+            path=path,
+            max_logits_bytes=256 << 20,
+            solution=solution,
+            override=None,
+            enable_pdl=enable_pdl,
+        )
+
+    # A tiny auto-path startup can use logits even though later grouped
+    # prefill calls use stream kernels without any global scratch.
+    startup_path = "auto" if max_partial_bytes == 0 and startup_rows == 1 else "stream"
+    # The logits startup uses its portable selector; this test targets CuTe warmup.
+    with (
+        autotune(tune_mode=True, tuning_buckets=None, round_up=None),
+        kernel_override("attention", "qsa_block_topk_select", "triton"),
+    ):
+        forward(
+            inputs(startup_rows, 16),
+            startup_rows,
+            path=startup_path,
+            solution=None if startup_path == "auto" else "cute_dsl",
+        )
+    compiled = dict(stream_topk._COMPILED)
+    for rows, pages, width in (
+        (7, 129, None),
+        (24, 200, 8),
+        (136, 31, 136),
+        (136, 63, 136),
+        (136, 127, 136),
+        (136, 260, 136),
+    ):
+        if max_partial_bytes == 0 and width is None:
+            continue
+        values = inputs(rows, pages)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            selected = forward(values, width, path="stream", solution="cute_dsl")
+        assert stream_topk._COMPILED == compiled
+        graph.replay()
+        query, table, requests, complete = values
+        row_ids = [0, rows // 2, rows - 1]
+        _assert_matches_reference(
+            query[row_ids],
+            keys,
+            table,
+            requests[row_ids],
+            complete[row_ids],
+            selected[row_ids],
+            64,
+            512,
+        )
+    assert stream_topk._COMPILED == compiled
+
+
 @pytest.mark.parametrize("enable_pdl", [False, True])
 @pytest.mark.parametrize(
     ("rows", "width", "pages"),
