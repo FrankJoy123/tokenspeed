@@ -23,78 +23,33 @@
 
 # Run via sbatch with a native client, or from the login host in a held job.
 # All paths must be absolute and visible where they are used. See agentx.md.
-# Caller arguments are preserved; API_PORT supplies the final server port override.
+# AgentX configs contain the engine recipes; this script owns launch and replay.
 set -euo pipefail
 : "${SLURM_JOB_ID:?use sbatch or an existing allocation}"
+: "${RUN_MODE:?smoke or formal}" "${TOKENIZER_PATH:?pinned tokenizer}" \
+  "${CLIENT_ROOT:?prepared client venv root}" "${INFERENCEX_WORKSPACE:?InferenceX checkout}"
+case "$RUN_MODE" in
+    smoke|formal) ;;
+    *) echo 'RUN_MODE must be smoke or formal' >&2; exit 2 ;;
+esac
 
-validate_config() {
-    : "${SOURCE_ROOT:?absolute checkout path; independent of sbatch submit directory}"
-    : "${CONFIG_NAMES:?space-separated server configuration names}"
-    read -r -a CONFIGS <<< "$CONFIG_NAMES"
-    (( ${#CONFIGS[@]} > 0 )) || { echo "CONFIG_NAMES must select at least one config" >&2; exit 2; }
-    for config in "${CONFIGS[@]}"; do
-        case "$config" in attn_tp8_moe_tp8|attn_tp8_moe_ep8) ;; *) echo "Unknown config: $config" >&2; exit 2 ;; esac
-    done
-    declare -A seen=()
-    for config in "${CONFIGS[@]}"; do
-        [[ ! -v "seen[$config]" ]] || { echo "Duplicate config: $config" >&2; exit 2; }
-        seen[$config]=1
-    done
-    : "${SERVER_VENV?server venv path; set empty to use the image environment}"
-    export SERVER_VENV
-    : "${CONTAINER_IMAGE:?pinned server image}"
-    : "${CONTAINER_MOUNTS:?explicit shared mounts}"
-    : "${CLIENT_PYTHON:?absolute Python from the prepared InferenceX AgentX venv}"
-    : "${MODEL_NAME:?served model name}"
-    : "${TOKENIZER_PATH:?pinned tokenizer path or ID}"
-    : "${CLIENT_ROOT:?prepared InferenceX checkout and venv directory}"
-    : "${INFERENCEX_WORKSPACE:?directory containing benchmarks/benchmark_lib.sh}"
-    : "${CPUS_PER_TASK:?CPU allocation per node}"
-    : "${CONCURRENCIES:?space-separated root session concurrency values}"
-    read -r -a CONCURRENCY_VALUES <<< "$CONCURRENCIES"
-    (( ${#CONCURRENCY_VALUES[@]} > 0 )) || { echo "Empty CONCURRENCIES" >&2; exit 2; }
-    local concurrency
-    declare -A seen_concurrencies=()
-    for concurrency in "${CONCURRENCY_VALUES[@]}"; do
-        [[ "$concurrency" =~ ^[1-9][0-9]{0,8}$ && ! -v "seen_concurrencies[$concurrency]" ]] ||
-            { echo "Invalid or duplicate concurrency: $concurrency" >&2; exit 2; }
-        seen_concurrencies[$concurrency]=1
-    done
-    export CONCURRENCY="${CONCURRENCY_VALUES[0]}"
-    : "${DRAIN_TIMEOUT:?maximum wait for server requests to finish between points}"
-    : "${API_PORT:?server API port}"
-    : "${READINESS_PATH:?readiness endpoint, including leading slash}"
-    : "${READINESS_TIMEOUT:?maximum server startup seconds}"
-    : "${CLIENT_TIMEOUT:?maximum total client wall time seconds}"
-    : "${RUN_ROOT:?new absolute output directory}"
-    for variable in SOURCE_ROOT CLIENT_PYTHON CLIENT_ROOT RUN_ROOT; do
-        [[ "${!variable}" = /* ]] || { echo "$variable must be absolute" >&2; exit 2; }
-    done
-    for variable in CONCURRENCY API_PORT READINESS_TIMEOUT CLIENT_TIMEOUT CPUS_PER_TASK DRAIN_TIMEOUT; do
-        [[ "${!variable}" =~ ^[1-9][0-9]*$ ]] || { echo "$variable must be a positive integer" >&2; exit 2; }
-    done
-    SCRIPT_DIR="$SOURCE_ROOT/test/agentic_benchmark/kimi_k3/tokenspeed"
-    [[ -x "$CLIENT_PYTHON" ]] || { echo "Client Python is not executable: $CLIENT_PYTHON" >&2; exit 2; }
-    [[ -f "$INFERENCEX_WORKSPACE/benchmarks/benchmark_lib.sh" ]] || { echo "Missing InferenceX benchmark_lib.sh under $INFERENCEX_WORKSPACE" >&2; exit 2; }
-    [[ -f "$SCRIPT_DIR/agentx.sh" ]] || { echo "Missing client script: $SCRIPT_DIR/agentx.sh" >&2; exit 2; }
-    source "$SCRIPT_DIR/agentx.sh"
-    validate_agentx_config
-    if (( ${#CONCURRENCY_VALUES[@]} > 1 )) && [[ "$SERVER_METRICS" != true ]]; then
-        echo 'Concurrency sweeps require SERVER_METRICS=true for server draining' >&2
-        exit 2
-    fi
-    validate_agentx_values RUN_ROOT
-    [[ "$CLIENT_PYTHON" = "$CLIENT_ROOT/venv/bin/python" ]] || { echo "CLIENT_PYTHON must use CLIENT_ROOT/venv" >&2; exit 2; }
-    for config in "${CONFIGS[@]}"; do
-        [[ -f "$SCRIPT_DIR/configs/$config.sh" ]] || { echo "Missing server config: $SCRIPT_DIR/configs/$config.sh" >&2; exit 2; }
-    done
-    [[ "$(squeue -h -j "$SLURM_JOB_ID" -o '%u')" = "$(id -un)" ]] || { echo 'Allocation not owned by current user' >&2; exit 1; }
-    [[ "$(squeue -h -j "$SLURM_JOB_ID" -o '%T')" = RUNNING ]] || { echo 'Allocation must be RUNNING' >&2; exit 1; }
-}
+# Check the complete sweep before starting any GPU work.
+read -r -a CONFIGS <<< "${CONFIG_NAMES:?server configurations}"
+read -r -a CONCURRENCY_VALUES <<< "${CONCURRENCIES:?concurrency points}"
+[[ ${#CONCURRENCY_VALUES[@]} -gt 0 ]] || { echo 'CONCURRENCIES must not be empty' >&2; exit 2; }
+declare -A seen_concurrency=()
+for concurrency in "${CONCURRENCY_VALUES[@]}"; do
+    case "$concurrency" in
+        1|2|4|8|16) ;;
+        *) echo "Unsupported concurrency: $concurrency" >&2; exit 2 ;;
+    esac
+    [[ -z "${seen_concurrency[$concurrency]:-}" ]] || {
+        echo "Duplicate concurrency: $concurrency" >&2; exit 2;
+    }
+    seen_concurrency[$concurrency]=1
+done
 
-STEP_NAME="agentx_server_${SLURM_JOB_ID}_$$"
 SERVER_PID=
-PREFLIGHT_PID=
 CLIENT_PID=
 CLIENT_SIGNAL=TERM
 
@@ -109,11 +64,6 @@ finish() {
         wait "$CLIENT_PID" 2>/dev/null || true
         CLIENT_PID=
     fi
-    if [[ -n "$PREFLIGHT_PID" ]]; then
-        kill -TERM "$PREFLIGHT_PID" 2>/dev/null || true
-        wait "$PREFLIGHT_PID" 2>/dev/null || true
-        PREFLIGHT_PID=
-    fi
     stop_server
     if [[ -d "$RUN_ROOT" ]]; then printf '%s\n' "$result" > "$RUN_ROOT/client-exit-code.txt"; fi
     exit "$result"
@@ -122,7 +72,7 @@ finish() {
 cancel_steps() {
     # Never cancel the held allocation or another invocation's steps.
     while read -r step name; do
-        if [[ "$name" = "$STEP_NAME" || "$name" = "${STEP_NAME}_preflight" ]]; then
+        if [[ "$name" = "$STEP_NAME" ]]; then
             scancel "$step" || true
         fi
     done < <(squeue -h -s -j "$SLURM_JOB_ID" -o '%i %j')
@@ -136,105 +86,116 @@ stop_server() {
         wait "$SERVER_PID" 2>/dev/null || true
     fi
     SERVER_PID=
+    # Catch a step that registered while its launch process was being stopped.
     cancel_steps
 }
 
-prepare_run() {
-    # A new directory preserves logs from earlier attempts.
-    mkdir "$RUN_ROOT"
-    export NVIDIA_VISIBLE_DEVICES=all NVIDIA_DRIVER_CAPABILITIES=compute,utility
-    printf '%q ' "$SERVER_SCRIPT" "$@" > "$RUN_ROOT/server-command.txt"
-    printf '\n' >> "$RUN_ROOT/server-command.txt"
-}
-
-setup_slurm() {
+launch_server() {
+    case "$CONFIG" in
+        attn_tp8_moe_tp8|attn_tp8_moe_ep8) ;;
+        *) echo "Unknown configuration: $CONFIG" >&2; exit 2 ;;
+    esac
     scontrol show job "$SLURM_JOB_ID" > "$RUN_ROOT/allocation.txt"
     mapfile -t NODES < <(scontrol show hostnames "$(squeue -h -j "$SLURM_JOB_ID" -o '%N')")
     [[ "${#NODES[@]}" = 2 ]] || { echo "K3 TP8 requires two four-GPU nodes" >&2; exit 2; }
-    export HEAD="${NODES[0]}"
+    HEAD="${NODES[0]}"
     BASE_URL="http://${HEAD}:${API_PORT}"
-    SRUN=(srun --jobid="$SLURM_JOB_ID" --overlap --nodes="${#NODES[@]}" --ntasks-per-node=1
-        --cpus-per-task="$CPUS_PER_TASK" --gpus-per-node=4
-        --container-env=NVIDIA_VISIBLE_DEVICES,NVIDIA_DRIVER_CAPABILITIES
-        --container-image="$CONTAINER_IMAGE" --container-name="agentx_${SLURM_JOB_ID}_$$"
-        --container-mounts="$CONTAINER_MOUNTS" --container-workdir="$SOURCE_ROOT"
-        --container-remap-root --no-container-mount-home --container-writable)
-}
+    AIPERF_SERVER_METRICS_URLS="http://${HEAD}:${METRICS_PORT}/metrics"
 
-check_resources() {
-    # Check once per server launch, before readiness polling or the CC sweep.
-    local ports=("$API_PORT")
-    if [[ "$SERVER_METRICS" = true ]]; then
-        [[ "$METRICS_PORT" != "$API_PORT" ]] || { echo 'API and metrics ports must differ' >&2; exit 2; }
-        ports+=("$METRICS_PORT")
-    fi
-    timeout --signal=TERM --kill-after=45 "$READINESS_TIMEOUT" \
-        "${SRUN[@]}" --job-name="${STEP_NAME}_preflight" --kill-on-bad-exit=1 bash -c '
-        set -euo pipefail
-        python3 - "$@" <<"PYTHON"
-import socket
-import sys
-
-for port in sys.argv[1:]:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            probe.bind(("0.0.0.0", int(port)))
-        except OSError as exc:
-            sys.exit(f"Server port {port} unavailable: {exc}")
-PYTHON
-        occupied=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader)
-        if [[ -n "$occupied" ]]; then echo "GPUs already occupied: $occupied" >&2; exit 1; fi
-        [[ "$(nvidia-smi --query-gpu=uuid --format=csv,noheader | wc -l)" = 4 ]]
-        gpus=$(nvidia-smi --query-gpu=name,uuid,driver_version --format=csv,noheader)
-        printf '%s\n' "$gpus"
-        while IFS= read -r gpu; do
-            [[ "$gpu" = *GB300* ]] || { echo "This recipe reports GB300 results" >&2; exit 1; }
-        done <<< "$gpus"
-    ' agentx-preflight "${ports[@]}" > "$RUN_ROOT/gpu-preflight.log" 2>&1 &
-    PREFLIGHT_PID=$!
-    PREFLIGHT_RESULT=0
-    wait "$PREFLIGHT_PID" || PREFLIGHT_RESULT=$?
-    PREFLIGHT_PID=
-    if (( PREFLIGHT_RESULT != 0 )); then exit "$PREFLIGHT_RESULT"; fi
-}
-
-launch_server() {
-    timeout --signal=TERM --kill-after=45 "$((READINESS_TIMEOUT + (CLIENT_TIMEOUT + DRAIN_TIMEOUT) * ${#CONCURRENCY_VALUES[@]} + 120))" \
-        "${SRUN[@]}" --job-name="$STEP_NAME" --mpi=pmix --kill-on-bad-exit=1 \
+    # Bound startup (7500 s), each client (8400 s), drains and cleanup.
+    NVIDIA_VISIBLE_DEVICES=all NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    HEAD="$HEAD" RUN_ROOT="$RUN_ROOT" SERVER_VENV="$SERVER_VENV" \
+    timeout --signal=TERM --kill-after=45 "$((7500 + (8400 + DRAIN_TIMEOUT) * ${#CONCURRENCY_VALUES[@]} + 120))" \
+        srun --jobid="$SLURM_JOB_ID" --overlap --nodes="${#NODES[@]}" --ntasks-per-node=1 \
+        --cpus-per-task=64 --gpus-per-node=4 \
+        --container-env=NVIDIA_VISIBLE_DEVICES,NVIDIA_DRIVER_CAPABILITIES \
+        --container-image="$CONTAINER_IMAGE" --container-name="agentx_${SLURM_JOB_ID}_$$" \
+        --container-mounts="$CONTAINER_MOUNTS" --container-workdir="$SOURCE_ROOT" \
+        --container-remap-root --no-container-mount-home --container-writable \
+        --job-name="$STEP_NAME" --mpi=pmix --kill-on-bad-exit=1 \
         bash -c '
             set -euo pipefail
             if [[ -n "$SERVER_VENV" ]]; then source "$SERVER_VENV/bin/activate"; fi
-            exec bash "$SERVER_SCRIPT" "$@"
-        ' agentx-server "$@" > "$RUN_ROOT/server.log" 2>&1 &
+            exec bash "$1"
+        ' agentx-server "$SOURCE_ROOT/test/agentic_benchmark/kimi_k3/tokenspeed/configs/agentx_${CONFIG}.sh" > "$RUN_ROOT/server.log" 2>&1 &
     SERVER_PID=$!
 }
 
 wait_for_ready() {
-    START=$SECONDS
-    until curl --fail --silent --max-time 5 --output /dev/null "$BASE_URL$READINESS_PATH"; do
+    local start=$SECONDS
+    until curl --fail --silent --max-time 5 --output /dev/null "$BASE_URL/readiness"; do
         kill -0 "$SERVER_PID" 2>/dev/null || { echo 'Server step exited before readiness' >&2; exit 1; }
-        (( SECONDS - START < READINESS_TIMEOUT )) || { echo 'Server readiness timeout' >&2; exit 1; }
+        (( SECONDS - start < 7500 )) || { echo 'Server readiness timeout' >&2; exit 1; }
         sleep 5
     done
     printf '%s\n' "$BASE_URL" > "$RUN_ROOT/endpoint.txt"
-    curl --fail --silent --max-time 10 "$BASE_URL/v1/models" > "$RUN_ROOT/models.json"
-    if [[ "$SERVER_METRICS" = true ]]; then
-        export AIPERF_SERVER_METRICS_URLS="http://${HEAD}:${METRICS_PORT}/metrics"
-        curl --fail --silent --show-error --max-time 10 "$AIPERF_SERVER_METRICS_URLS" > "$RUN_ROOT/server-metrics-readiness.txt"
-    fi
 }
 
 run_benchmark() {
     # Run the prepared native client on this host, outside the server container.
-    export AIPERF_SERVER_URL="$BASE_URL" RESULT_DIR="$RUN_ROOT/c${CONCURRENCY}/client"
     mkdir "$RUN_ROOT/c${CONCURRENCY}"
     case "$CONFIG" in
-        attn_tp8_moe_tp8) export EP_SIZE=1 ;;
-        attn_tp8_moe_ep8) export EP_SIZE=8 ;;
+        attn_tp8_moe_tp8) EP_SIZE=1 ;;
+        attn_tp8_moe_ep8) EP_SIZE=8 ;;
     esac
-    timeout --signal=INT --kill-after=45 "$CLIENT_TIMEOUT" \
-        bash "$SCRIPT_DIR/agentx.sh" > "$RUN_ROOT/c${CONCURRENCY}/client.log" 2>&1 &
+    AIPERF_SERVER_URL="$BASE_URL" AIPERF_SERVER_METRICS_URLS="$AIPERF_SERVER_METRICS_URLS" \
+    RESULT_DIR="$RUN_ROOT/c${CONCURRENCY}/client" CONCURRENCY="$CONCURRENCY" EP_SIZE="$EP_SIZE" \
+    timeout --signal=INT --kill-after=45 8400 \
+        bash -se -o pipefail > "$RUN_ROOT/c${CONCURRENCY}/client.log" 2>&1 <<'CLIENT' &
+# InferenceX command-builder inputs: duration and warmup count per lane.
+case "${RUN_MODE:?smoke or formal}" in
+    smoke) DURATION=180; AIPERF_WARMUP_REQUESTS_PER_LANE=1 ;;
+    formal) DURATION=3600; AIPERF_WARMUP_REQUESTS_PER_LANE=10 ;;
+    *) echo 'RUN_MODE must be smoke or formal' >&2; exit 2 ;;
+esac
+# InferenceX helper inputs: source directory, prepared client venv and loader.
+mkdir "$RESULT_DIR"
+INFMAX_CONTAINER_WORKSPACE="$INFERENCEX_WORKSPACE"
+AIPERF_RUNTIME_DIR="$CLIENT_ROOT"
+source "$INFMAX_CONTAINER_WORKSPACE/benchmarks/benchmark_lib.sh"
+AIPERF_DEPS_READY=1  # InferenceX: reuse the prepared venv; do not install during a run.
+WEKA_LOADER_OVERRIDE=semianalysis_cc_traces_weka_062126 resolve_trace_source
+# The native loader selects the workload; do not impose a client context cap.
+unset MAX_MODEL_LEN
+# AIPerf reads this in its worker processes too: always replay recorded turns.
+export AIPERF_DATASET_WEKA_LIVE_ASSISTANT_RESPONSES=0
+# InferenceX build_replay_cmd reads these shell variables and builds AIPerf CLI flags.
+MODEL="$TOKENIZER_PATH" SERVED_MODEL_NAME="$MODEL_NAME" CONC="$CONCURRENCY" \
+FRAMEWORK=tokenspeed AIPERF_EXPERIMENTAL_FAST=0 AIPERF_UNSAFE_OVERRIDE=false \
+AGENTIC_WARMUP_GRACE_PERIOD=1800 \
+AIPERF_TRACE_IDLE_GAP_CAP_SECONDS=300 AIPERF_LIVE_FAILED_REQUEST_THRESHOLD=0.1 \
+AIPERF_EXTRA_INPUTS='{"ignore_eos":true,"temperature":1.0,"top_p":0.95,"top_k":20}' \
+build_replay_cmd "$RESULT_DIR"
+REPLAY_CMD+=" --benchmark-grace-period 30 --request-timeout-seconds 21600"
+
+# Override only the native reporting hook for aggregate topology accounting.
+write_agentic_result_json() {
+    # Upstream's multi-node report shape describes PD disaggregation. These two
+    # nodes are one aggregate TP8 worker: use native aggregate accounting (8 GPUs).
+    # Keep physical topology separately without rewriting native metrics or JSON.
+    printf '%s\n' '{"physical_nodes":2,"gpus_per_node":4,"num_gpus":8,"deployment":"aggregate","official_inferencex_result":false}' \
+        > "$RESULT_DIR/deployment.json"
+    [[ -s "$RESULT_DIR/aiperf_artifacts/server_metrics_export.json" ]] ||
+        { echo "Missing or empty server_metrics_export.json" >&2; return 2; }
+    # InferenceX process_agentic_result reads these environment fields for metadata/output.
+    MODEL="$MODEL_NAME" MODEL_PREFIX=kimik3 FRAMEWORK=tokenspeed RUNNER_TYPE=gb300 PRECISION=fp4 \
+    SPEC_DECODING=eagle3 CONC="$CONCURRENCY" TP=8 EP_SIZE="$EP_SIZE" \
+    PP_SIZE=1 PCP_SIZE=1 DCP_SIZE=1 IS_MULTINODE=false DISAGG=false \
+    KV_OFFLOAD_BACKEND= KV_OFFLOAD_BACKEND_METADATA= TOTAL_CPU_DRAM_GB=0 KV_OFFLOADING=none \
+    RESULT_DIR="$RESULT_DIR" AGENTIC_OUTPUT_DIR="$RESULT_DIR" RESULT_FILENAME=inferencex_result \
+    "$AIPERF_PYTHON" -m infx.results.agentic.process_agentic_result
+}
+# InferenceX replay/validation controls; power collection is explicitly disabled.
+# AIPerf reads the dataset-worker/header settings; Python and libraries read
+# PYTHONPATH and thread limits. These are process settings, not result metadata.
+AIPERF_FAILED_REQUEST_THRESHOLD=0.1 AIPERF_REQUIRED_SERVER_METRIC_PREFIX=tokenspeed: \
+ENABLE_AGENTX_POWER=0 \
+PYTHONPATH="$INFMAX_CONTAINER_WORKSPACE" \
+AIPERF_DATASET_WEKA_PARALLEL_WORKERS=2 TOKENIZERS_PARALLELISM=false \
+AIPERF_HTTP_X_DYNAMO_SESSION_ID_FROM_CORRELATION_ID=false \
+OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 \
+run_agentic_replay_and_write_outputs "$RESULT_DIR"
+CLIENT
     CLIENT_PID=$!
     local result=0
     wait "$CLIENT_PID" || result=$?
@@ -272,51 +233,21 @@ wait_for_drain() {
 }
 
 # Keep the configuration sweep beside the launch lifecycle, like agentic_bench.slurm.
-validate_config
-# These settings have a single owner: the explicit protocol, not trailing CLI flags.
-for argument in "$@"; do
-    flag="${argument%%=*}"
-    case "${flag//_/-}" in
-        --speculative-config|--speculative-eagle-topk|--max-model-len|--max-num-seqs|--speculative-algorithm|--speculative-num-steps|--speculative-num-draft-tokens|--synthetic-acceptance-length|--sampling-backend|--enable-metrics|--metrics-host|--metrics-port)
-            echo "Set protocol variables instead of overriding $argument" >&2; exit 2 ;;
-    esac
-done
-# AgentX engine tuning lives with the server command, not in the submission example.
-# The shared configs still own TP8/EP8 topology and kernel backend selection.
-SERVER_ARGS=(
-    --gpu-memory-utilization 0.92 --seed 0
-    --language-model-only --stream-interval 10 --max-cudagraph-capture-size 1024
-    --chunked-prefill-size 8192 --max-prefill-tokens 8192
-    --mamba-ssm-dtype bfloat16 --prefix-granularity 128
-    --enable-log-request-stats --engine-startup-timeout 7200
-)
-PROTOCOL_ARGS=(--max-model-len "$MAX_MODEL_LEN" --max-num-seqs "$MAX_NUM_SEQS"
-    --speculative-algorithm "${SPEC_DECODING^^}" --speculative-num-steps "$SPEC_STEPS"
-    --speculative-num-draft-tokens "$((SPEC_STEPS + 1))")
-if [[ "$ACCEPTANCE_MODE" = synthetic ]]; then
-    PROTOCOL_ARGS+=(--sampling-backend greedy --synthetic-acceptance-length "$AL_TARGET")
-fi
-if [[ "$SERVER_METRICS" = true ]]; then
-    PROTOCOL_ARGS+=(--enable-metrics --metrics-host 0.0.0.0 --metrics-port "$METRICS_PORT")
-fi
+(( $# == 0 )) || { echo 'Use MODEL_DIR, DRAFT_DIR and AL_TARGET; trailing flags are unsupported' >&2; exit 2; }
 SWEEP_ROOT=$RUN_ROOT
 mkdir "$SWEEP_ROOT"
 for CONFIG in "${CONFIGS[@]}"; do
-    export SERVER_SCRIPT="$SCRIPT_DIR/configs/$CONFIG.sh"
-    export RUN_ROOT="$SWEEP_ROOT/$CONFIG"
+    RUN_ROOT="$SWEEP_ROOT/$CONFIG"
     STEP_NAME="agentx_server_${SLURM_JOB_ID}_$$_${CONFIG}"
     trap finish EXIT
     trap 'CLIENT_SIGNAL=INT; exit 130' INT
     trap 'CLIENT_SIGNAL=TERM; exit 143' TERM
-    prepare_run "${SERVER_ARGS[@]}" "$@" "${PROTOCOL_ARGS[@]}" --port "$API_PORT"
-    setup_slurm
-    check_resources
-    launch_server "${SERVER_ARGS[@]}" "$@" "${PROTOCOL_ARGS[@]}" --port "$API_PORT"
+    mkdir "$RUN_ROOT"
+    launch_server
     wait_for_ready
     for CONCURRENCY in "${CONCURRENCY_VALUES[@]}"; do
-        export CONCURRENCY
         run_benchmark
-        if [[ "$SERVER_METRICS" = true ]]; then wait_for_drain; fi
+        wait_for_drain
     done
     stop_server
     printf '0\n' > "$RUN_ROOT/client-exit-code.txt"

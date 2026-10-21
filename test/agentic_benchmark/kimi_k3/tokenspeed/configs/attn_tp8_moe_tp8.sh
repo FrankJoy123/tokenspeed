@@ -26,5 +26,4 @@ exec ts serve \
     --tool-call-parser passthrough \
     --host 0.0.0.0 \
     --port 8000 \
-    --engine-startup-timeout 7200 \
-    "$@"
+    --engine-startup-timeout 7200
