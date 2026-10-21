@@ -26,9 +26,30 @@ import importlib
 import pytest
 import torch
 from tokenspeed_kernel.ops.gemm import _gemm_format_signature
+from tokenspeed_kernel.ops.gemm.gluon import gluon_mm_fp8_blockscale_gfx950
 from tokenspeed_kernel.selection import select_kernel
 
 mm = importlib.import_module("tokenspeed_kernel_amd.ops.gfx950.gemm.mxfp8.mm")
+
+
+@pytest.mark.parametrize(
+    "missing_scale,block_size",
+    [("activation", [128, 128]), ("weight", [128, 128]), (None, [1, 32])],
+)
+def test_public_fp32_requires_canonical_scales(missing_scale, block_size):
+    a = torch.empty((1, 512), device="meta", dtype=torch.float8_e4m3fn)
+    b = torch.empty((128, 512), device="meta", dtype=torch.float8_e4m3fn)
+    scale = torch.empty((1, 4), device="meta")
+    with pytest.raises(ValueError, match="both scales and block_size"):
+        gluon_mm_fp8_blockscale_gfx950(
+            a,
+            b,
+            None if missing_scale == "activation" else scale,
+            None if missing_scale == "weight" else scale,
+            torch.bfloat16,
+            alpha=None,
+            block_size=block_size,
+        )
 
 
 @pytest.mark.parametrize(
