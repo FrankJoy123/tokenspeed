@@ -221,11 +221,13 @@ runtime argument.
 
 #### FP32 block scales
 
-The shared matrix pipeline also supports canonical FP32 block-scaled E4M3
-through `gluon_mm_fp8_blockscale_gfx950`. Automatic selection uses this entry
-for BF16 output, K-contiguous values, N divisible by 16, and K greater than
-256 and divisible by 32. Other shapes and output types retain the existing
-Triton fallback. Native E8M0 registration and routing remain separate.
+Canonical FP32 block-scaled E4M3 GEMM has one public Gluon entry that selects
+streaming decode or the general matrix path internally. Both require BF16
+output and K-contiguous values. The general path covers N divisible by 16
+and K greater than 256 and divisible by 32; the streaming path additionally
+covers smaller reductions and partial output-column tiles within its small-row
+domain below. Unsupported contracts retain the existing fallback. Native E8M0
+registration and routing remain separate.
 
 Activation scales are `[M, ceil(K/128)]`; weight scales are
 `[ceil(N/128), ceil(K/128)]`, with explicit block size `[128, 128]`.

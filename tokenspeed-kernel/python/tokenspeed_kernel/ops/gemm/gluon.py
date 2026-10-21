@@ -615,6 +615,11 @@ if platform.is_amd:
         # reductions retain existing GEMM selection, not a decoder limitation.
         return k <= 3072 and _is_mxfp8_decode_problem(m, n, k)
 
+    def _is_fp32_blockscale_problem(m: int, n: int, k: int) -> bool:
+        return _supports_mxfp8_gemm_shape(
+            m, n, k
+        ) or _is_fp32_blockscale_decode_problem(m, n, k)
+
     @register_kernel(
         "gemm",
         "mm",
@@ -668,7 +673,7 @@ if platform.is_amd:
         signatures=_FP32_BLOCK_SIGNATURES,
         priority=Priority.SPECIALIZED,
         traits={
-            "mnk_problem_filter": frozenset({_supports_mxfp8_gemm_shape}),
+            "mnk_problem_filter": frozenset({_is_fp32_blockscale_problem}),
             "a_inner_stride_one": frozenset({True}),
             "b_inner_stride_one": frozenset({True}),
             "block_scale_layout": frozenset({"canonical"}),
@@ -691,12 +696,35 @@ if platform.is_amd:
 
         Activation scales have shape ``[M, ceil(K/128)]`` and weight scales
         ``[ceil(N/128), ceil(K/128)]``. Scale strides are unrestricted; values
-        and the optional BF16 output require unit inner stride. The shared
-        AMD launcher also serves the separate native E8M0 registration.
+        and the optional BF16 output require unit inner stride. Shape-based
+        dispatch selects streaming decode or the general matrix launcher;
+        native E8M0 registration remains separate.
         """
-        if A_scales is None or B_scales is None or block_size != [128, 128]:
+        if (
+            A_scales is None
+            or B_scales is None
+            or block_size is None
+            or list(block_size) != [128, 128]
+        ):
             raise ValueError(
                 "gfx950 FP32 block-scale GEMM requires both scales and block_size=[128, 128]"
+            )
+        if _is_fp32_blockscale_decode_problem(A.shape[0], B.shape[0], A.shape[1]):
+            counters = zeroed_state(
+                _mm_mxfp8_decode_counters(A.shape[0], B.shape[0], A.shape[1]),
+                dtype=torch.int32,
+                device=A.device,
+            )
+            return _mm_mxfp8_decode_impl(
+                A,
+                B,
+                A_scales,
+                B_scales,
+                out_dtype,
+                alpha=alpha,
+                block_size=block_size,
+                counters=counters,
+                out=out,
             )
         return _mm_mxfp8_impl(
             A,
@@ -709,23 +737,6 @@ if platform.is_amd:
             out=out,
         )
 
-    @register_kernel(
-        "gemm",
-        "mm",
-        name="gluon_mm_fp8_blockscale_decode_gfx950",
-        solution="gluon",
-        capability=_GFX950_CAPABILITY,
-        signatures=_FP32_BLOCK_SIGNATURES,
-        priority=Priority.SPECIALIZED + 1,
-        traits={
-            "mnk_problem_filter": frozenset({_is_fp32_blockscale_decode_problem}),
-            "a_inner_stride_one": frozenset({True}),
-            "b_inner_stride_one": frozenset({True}),
-            "block_scale_layout": frozenset({"canonical"}),
-            "out_dtype": frozenset({torch.bfloat16}),
-            "out_inner_stride_one": frozenset({True}),
-        },
-    )
     @register_kernel(
         "gemm",
         "mm",

@@ -137,12 +137,7 @@ def test_public_fp32_scales_arbitrary_strides_and_canaries(shape, online):
         actual = run(a, b, supplied_sa, sb, out)
     finally:
         capture.enabled = False
-    expected_kernel = (
-        "gluon_mm_fp8_blockscale_decode_gfx950"
-        if m <= 256 and k <= 3072
-        else "gluon_mm_fp8_blockscale_gfx950"
-    )
-    assert capture._records[-1].kernel_name == expected_kernel
+    assert capture._records[-1].kernel_name == "gluon_mm_fp8_blockscale_gfx950"
     assert actual is out and expected.abs().max().item() > 0.02 / 0.99
     torch.testing.assert_close(actual, expected, atol=0.02, rtol=0.01)
     assert torch.all(backing[[0, -1], :] == -7)
@@ -169,7 +164,7 @@ def test_contiguous_single_row_preserves_output_and_multiplier(scaled):
         B_scales=sb,
         out_dtype=torch.bfloat16,
         alpha=alpha,
-        block_size=[128, 128],
+        block_size=(128, 128),
         quant="mxfp8",
         out=out,
     )

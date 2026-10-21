@@ -6529,16 +6529,15 @@ _CASES = [
         )
         for m, n, k, dtype, expected in (
             (1, 1024, 4096, torch.bfloat16, "gluon_mm_fp8_blockscale_gfx950"),
-            (17, 130, 3072, torch.bfloat16, "gluon_mm_fp8_blockscale_decode_gfx950"),
+            (17, 130, 3072, torch.bfloat16, "gluon_mm_fp8_blockscale_gfx950"),
             (17, 128, 3104, torch.bfloat16, "gluon_mm_fp8_blockscale_gfx950"),
-            (17, 128, 3200, torch.bfloat16, "gluon_mm_fp8_blockscale_gfx950"),
-            (129, 4096, 512, torch.bfloat16, "gluon_mm_fp8_blockscale_decode_gfx950"),
+            (129, 4096, 512, torch.bfloat16, "gluon_mm_fp8_blockscale_gfx950"),
             (896, 6144, 4096, torch.bfloat16, "gluon_mm_fp8_blockscale_gfx950"),
             (8192, 4096, 512, torch.bfloat16, "gluon_mm_fp8_blockscale_gfx950"),
-            (37, 208, 800, torch.bfloat16, "gluon_mm_fp8_blockscale_decode_gfx950"),
-            (4, 128, 256, torch.bfloat16, "gluon_mm_fp8_blockscale_decode_gfx950"),
-            (4, 130, 256, torch.bfloat16, "gluon_mm_fp8_blockscale_decode_gfx950"),
-            (256, 130, 256, torch.bfloat16, "gluon_mm_fp8_blockscale_decode_gfx950"),
+            (37, 208, 800, torch.bfloat16, "gluon_mm_fp8_blockscale_gfx950"),
+            (4, 128, 256, torch.bfloat16, "gluon_mm_fp8_blockscale_gfx950"),
+            (4, 130, 256, torch.bfloat16, "gluon_mm_fp8_blockscale_gfx950"),
+            (256, 130, 256, torch.bfloat16, "gluon_mm_fp8_blockscale_gfx950"),
             (257, 4096, 512, torch.bfloat16, "gluon_mm_fp8_blockscale_gfx950"),
             (4, 128, 512, torch.float16, "triton_mm_fp8_blockscale"),
         )
