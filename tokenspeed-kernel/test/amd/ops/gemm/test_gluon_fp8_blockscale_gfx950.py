@@ -38,7 +38,12 @@ from tokenspeed_kernel_amd.ops.gfx950.gemm.mxfp8.compact import (
 )
 
 amd_mm = importlib.import_module("tokenspeed_kernel_amd.ops.gfx950.gemm.mxfp8.mm")
+amd_decode = importlib.import_module(
+    "tokenspeed_kernel_amd.ops.gfx950.gemm.mxfp8.decode"
+)
 SHAPES = [
+    (4, 130, 256),
+    (4, 128, 128),
     (1, 16, 288),
     (37, 208, 800),
     (300, 256, 1056),
@@ -130,7 +135,12 @@ def test_public_fp32_scales_arbitrary_strides_and_canaries(shape, online):
         actual = run(a, b, supplied_sa, sb, out)
     finally:
         capture.enabled = False
-    assert capture._records[-1].kernel_name == "gluon_mm_fp8_blockscale_gfx950"
+    expected_kernel = (
+        "gluon_mm_fp8_blockscale_decode_gfx950"
+        if m <= 256
+        else "gluon_mm_fp8_blockscale_gfx950"
+    )
+    assert capture._records[-1].kernel_name == expected_kernel
     assert actual is out and expected.abs().max().item() > 0.02 / 0.99
     torch.testing.assert_close(actual, expected, atol=0.02, rtol=0.01)
     assert torch.all(backing[[0, -1], :] == -7)
@@ -257,8 +267,6 @@ def test_unscaled_block_cancellation_remains_finite(m, n, k):
 @pytest.mark.parametrize(
     "shape,out_dtype",
     [
-        ((4, 130, 512), torch.bfloat16),
-        ((4, 128, 256), torch.bfloat16),
         ((4, 128, 512), torch.float16),
     ],
 )
@@ -304,5 +312,6 @@ def test_same_tile_row_counts_reuse_compiled_kernels(rows, n, k):
         amd_mm.gluon_mm_mxfp8_gfx950,
         amd_mm.gluon_mm_mxfp8_reduce_gfx950,
         gluon_mm_fp8_blockscale_compact_gfx950,
+        amd_decode.gluon_mm_mxfp8_decode_gfx950,
     ):
         execute(rows[1])

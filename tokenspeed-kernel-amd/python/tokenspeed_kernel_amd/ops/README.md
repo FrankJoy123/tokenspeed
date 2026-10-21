@@ -271,6 +271,15 @@ rows on weights of at least 2**26 elements, use the prefill kernel above.
   measured per bucket for the V4.1 TP4 projection shapes, a heuristic
   otherwise. `K` is a compile-time model constant.
 
+The same decode machinery also accepts the canonical FP32 block-scale
+contract described above, including partial final K128 groups. This form
+requires BF16 output and applies each activation scale before its weight
+scale to an unscaled FP8 K128 matrix partial; it does not convert coefficients
+to E8M0 or inherit the native path's exact-upcast arithmetic. Scale strides
+are unrestricted. Values require unit inner stride; unaligned rows use
+ordinary loads into the same shared-memory ring instead of direct-to-LDS
+copies. Neither form rearranges weights or creates a persistent weight copy.
+
 #### Algorithm
 
 Each program owns a `BLOCK_M x BLOCK_N` output tile and one K slice, so the

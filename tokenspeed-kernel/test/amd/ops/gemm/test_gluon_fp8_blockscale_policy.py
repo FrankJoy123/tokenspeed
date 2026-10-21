@@ -29,30 +29,6 @@ from tokenspeed_kernel.ops.gemm import _gemm_format_signature
 from tokenspeed_kernel.selection import select_kernel
 
 mm = importlib.import_module("tokenspeed_kernel_amd.ops.gfx950.gemm.mxfp8.mm")
-gluon = importlib.import_module("tokenspeed_kernel.ops.gemm.gluon")
-
-
-@pytest.mark.parametrize(
-    "m,n,k,padded,scaled,expected",
-    [
-        (1, 4096, 512, False, False, True),
-        (2, 4096, 512, False, False, False),
-        (1, 1024, 512, False, False, False),
-        (1, 6144, 512, False, False, False),
-        (1, 4096, 544, False, False, False),
-        (1, 4096, 480, False, False, False),
-        (1, 4096, 512, True, False, False),
-        (1, 4096, 512, False, True, False),
-        (1, 1024, 4096, False, False, False),
-    ],
-)
-def test_single_row_tuning_preserves_neighbor_and_layout_choices(
-    m, n, k, padded, scaled, expected
-):
-    a = torch.empty((m, k), dtype=torch.float8_e4m3fn, device="meta")
-    b = torch.empty((n, k + 32 * padded), dtype=a.dtype, device="meta")[:, :k]
-    alpha = torch.empty((), device="meta") if scaled else None
-    assert gluon._prefers_tuned_single_row_fp32(a, b, alpha) is expected
 
 
 @pytest.mark.parametrize(
@@ -114,12 +90,21 @@ def test_reducer_family_boundaries(shape, expected):
 @pytest.mark.parametrize(
     "shape,output_dtype,expected",
     [
-        ((1, 1024, 4096), torch.bfloat16, "gluon_mm_fp8_blockscale_gfx950"),
-        ((129, 4096, 512), torch.bfloat16, "gluon_mm_fp8_blockscale_gfx950"),
+        ((1, 1024, 4096), torch.bfloat16, "gluon_mm_fp8_blockscale_decode_gfx950"),
+        ((129, 4096, 512), torch.bfloat16, "gluon_mm_fp8_blockscale_decode_gfx950"),
         ((896, 6144, 4096), torch.bfloat16, "gluon_mm_fp8_blockscale_gfx950"),
-        ((37, 208, 800), torch.bfloat16, "gluon_mm_fp8_blockscale_gfx950"),
-        ((4, 128, 256), torch.bfloat16, "triton_mm_fp8_blockscale"),
-        ((4, 130, 512), torch.bfloat16, "triton_mm_fp8_blockscale"),
+        ((37, 208, 800), torch.bfloat16, "gluon_mm_fp8_blockscale_decode_gfx950"),
+        ((4, 128, 256), torch.bfloat16, "gluon_mm_fp8_blockscale_decode_gfx950"),
+        ((4, 130, 256), torch.bfloat16, "gluon_mm_fp8_blockscale_decode_gfx950"),
+        ((256, 130, 256), torch.bfloat16, "gluon_mm_fp8_blockscale_decode_gfx950"),
+        ((257, 4096, 512), torch.bfloat16, "gluon_mm_fp8_blockscale_gfx950"),
+        ((1, 15, 128), torch.bfloat16, "triton_mm_fp8_blockscale"),
+        ((1, 16, 128), torch.bfloat16, "gluon_mm_fp8_blockscale_decode_gfx950"),
+        ((1, 16, 96), torch.bfloat16, "triton_mm_fp8_blockscale"),
+        ((63, 16384, 4096), torch.bfloat16, "gluon_mm_fp8_blockscale_decode_gfx950"),
+        ((64, 16384, 4096), torch.bfloat16, "gluon_mm_fp8_blockscale_gfx950"),
+        ((1, 524272, 4096), torch.bfloat16, "gluon_mm_fp8_blockscale_decode_gfx950"),
+        ((1, 524288, 4096), torch.bfloat16, "gluon_mm_fp8_blockscale_gfx950"),
         ((4, 128, 512), torch.float16, "triton_mm_fp8_blockscale"),
     ],
 )
@@ -160,8 +145,8 @@ def test_registry_fp32_contract_and_fallback(shape, output_dtype, expected, onli
         ("a_inner_stride_one", "triton_mm_fp8_blockscale"),
         ("b_inner_stride_one", "triton_mm_fp8_blockscale"),
         ("out_inner_stride_one", "triton_mm_fp8_blockscale"),
-        ("a_scales_inner_stride_one", "gluon_mm_fp8_blockscale_gfx950"),
-        ("b_scales_inner_stride_one", "gluon_mm_fp8_blockscale_gfx950"),
+        ("a_scales_inner_stride_one", "gluon_mm_fp8_blockscale_decode_gfx950"),
+        ("b_scales_inner_stride_one", "gluon_mm_fp8_blockscale_decode_gfx950"),
     ],
 )
 def test_registry_value_and_scale_stride_boundaries(trait, expected):
