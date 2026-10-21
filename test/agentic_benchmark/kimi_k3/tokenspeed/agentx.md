@@ -16,7 +16,7 @@ native full trace (`weka-062126-full`). It does not launch PD workers or a separ
 
 The existing configs contain the fixed engine recipe directly, including HF model
 IDs, topology, EAGLE3 settings, context length and sequence capacity.
-The configs fix the served name to `moonshotai/Kimi-K3`, synthetic AL to 3.7,
+The configs fix the served name to `nvidia/Kimi-K3-NVFP4`, synthetic AL to 3.7,
 API port to 8000 and metrics port to 8010. The launcher uses the same endpoints
 and model name for replay and reporting; no external recipe variables or
 positional arguments are accepted by the configs. The launcher uses `bash -x`

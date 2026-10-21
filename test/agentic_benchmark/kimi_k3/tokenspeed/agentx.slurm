@@ -167,7 +167,7 @@ unset MAX_MODEL_LEN
 # AIPerf reads this in its worker processes too: always replay recorded turns.
 export AIPERF_DATASET_WEKA_LIVE_ASSISTANT_RESPONSES=0
 # InferenceX build_replay_cmd reads these shell variables and builds AIPerf CLI flags.
-MODEL=nvidia/Kimi-K3-NVFP4 SERVED_MODEL_NAME=moonshotai/Kimi-K3 CONC="$CONCURRENCY" \
+MODEL=nvidia/Kimi-K3-NVFP4 SERVED_MODEL_NAME=nvidia/Kimi-K3-NVFP4 CONC="$CONCURRENCY" \
 FRAMEWORK=tokenspeed AIPERF_EXPERIMENTAL_FAST=0 AIPERF_UNSAFE_OVERRIDE=false \
 AGENTIC_WARMUP_GRACE_PERIOD=1800 \
 AIPERF_TRACE_IDLE_GAP_CAP_SECONDS=300 AIPERF_LIVE_FAILED_REQUEST_THRESHOLD=0.1 \
@@ -185,7 +185,7 @@ write_agentic_result_json() {
     [[ -s "$RESULT_DIR/aiperf_artifacts/server_metrics_export.json" ]] ||
         { echo "Missing or empty server_metrics_export.json" >&2; return 2; }
     # InferenceX process_agentic_result reads these environment fields for metadata/output.
-    MODEL=moonshotai/Kimi-K3 MODEL_PREFIX=kimik3 FRAMEWORK=tokenspeed RUNNER_TYPE=gb300 PRECISION=fp4 \
+    MODEL=nvidia/Kimi-K3-NVFP4 MODEL_PREFIX=kimik3 FRAMEWORK=tokenspeed RUNNER_TYPE=gb300 PRECISION=fp4 \
     SPEC_DECODING=eagle3 CONC="$CONCURRENCY" TP=8 EP_SIZE="$EP_SIZE" \
     PP_SIZE=1 PCP_SIZE=1 DCP_SIZE=1 IS_MULTINODE=false DISAGG=false \
     KV_OFFLOAD_BACKEND= KV_OFFLOAD_BACKEND_METADATA= TOTAL_CPU_DRAM_GB=0 KV_OFFLOADING=none \

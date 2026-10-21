@@ -6,7 +6,7 @@ set -euo pipefail
 
 exec ts serve \
     --model nvidia/Kimi-K3-NVFP4 \
-    --served-model-name moonshotai/Kimi-K3 \
+    --served-model-name nvidia/Kimi-K3-NVFP4 \
     --attn-tp-size 8 \
     --moe-tp-size 8 \
     --max-model-len 1048576 \
