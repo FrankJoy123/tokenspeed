@@ -554,19 +554,19 @@ else:
 
 
 if platform.is_amd:
-    from tokenspeed_kernel.ops.gemm._gluon.fp8 import (
-        _is_fp32_blockscale_problem,
-        _is_mxfp8_decode_problem,
-        _is_mxfp8_prefill_problem,
-    )
-    from tokenspeed_kernel.ops.gemm._gluon.fp8 import (
-        gluon_mm_fp8_blockscale_gfx950 as _mm_fp8_blockscale_impl,
-    )
     from tokenspeed_kernel_amd.ops.gfx950.gemm.mxfp8.decode import (
         gluon_mm_mxfp8_decode_num_counters_gfx950 as _mm_mxfp8_decode_counters,
     )
     from tokenspeed_kernel_amd.ops.gfx950.gemm.mxfp8.decode import (
         launch_gluon_mm_mxfp8_decode_gfx950 as _mm_mxfp8_decode_impl,
+    )
+    from tokenspeed_kernel_amd.ops.gfx950.gemm.mxfp8.mm import (
+        _is_fp32_blockscale_problem,
+        _is_mxfp8_decode_problem,
+        _is_mxfp8_prefill_problem,
+    )
+    from tokenspeed_kernel_amd.ops.gfx950.gemm.mxfp8.mm import (
+        launch_gluon_mm_fp8_blockscale_gfx950 as _mm_fp8_blockscale_impl,
     )
     from tokenspeed_kernel_amd.ops.gfx950.gemm.mxfp8.mm import (
         launch_gluon_mm_mxfp8_gfx950 as _mm_mxfp8_impl,
@@ -671,6 +671,7 @@ if platform.is_amd:
             alpha=alpha,
             block_size=block_size,
             out=out,
+            allocate_zeroed=zeroed_state,
         )
 
     @register_kernel(

@@ -32,6 +32,54 @@ from tokenspeed_kernel.selection import select_kernel
 mm = importlib.import_module("tokenspeed_kernel_amd.ops.gfx950.gemm.mxfp8.mm")
 
 
+@pytest.mark.parametrize("k,decode", [(3072, True), (3104, False)])
+def test_public_fp32_workspace_and_argument_forwarding(monkeypatch, k, decode):
+    registration = importlib.import_module("tokenspeed_kernel.ops.gemm.gluon")
+    a = torch.empty((17, k), device="meta", dtype=torch.float8_e4m3fn)
+    b = torch.empty((128, k), device="meta", dtype=torch.float8_e4m3fn)
+    sa = torch.empty((17, (k + 127) // 128), device="meta")
+    sb = torch.empty((1, (k + 127) // 128), device="meta")
+    out = torch.empty((17, 128), device="meta", dtype=torch.bfloat16)
+    alpha = torch.empty((), device="meta")
+    block_size = (128, 128)
+    counters = torch.empty(
+        mm.gluon_mm_mxfp8_decode_num_counters_gfx950(17, 128, k),
+        device="meta",
+        dtype=torch.int32,
+    )
+
+    def allocate(size, *, dtype, device):
+        assert decode
+        assert size == counters.numel() and dtype == counters.dtype
+        assert device == a.device
+        return counters
+
+    # Only the unavailable GPU launch and its device workspace are replaced.
+    def launch(aa, bb, ascales, bscales, dtype, **kwargs):
+        assert aa is a and bb is b and ascales is sa and bscales is sb
+        assert dtype == out.dtype and kwargs["out"] is out
+        assert kwargs["alpha"] is alpha and kwargs["block_size"] is block_size
+        assert kwargs.get("counters") is (counters if decode else None)
+        return out
+
+    monkeypatch.setattr(registration, "zeroed_state", allocate)
+    monkeypatch.setattr(
+        mm,
+        (
+            "launch_gluon_mm_mxfp8_decode_gfx950"
+            if decode
+            else "launch_gluon_mm_mxfp8_gfx950"
+        ),
+        launch,
+    )
+    assert (
+        gluon_mm_fp8_blockscale_gfx950(
+            a, b, sa, sb, out.dtype, alpha=alpha, block_size=block_size, out=out
+        )
+        is out
+    )
+
+
 @pytest.mark.parametrize(
     "missing_scale,block_size",
     [("activation", [128, 128]), ("weight", [128, 128]), (None, [1, 32])],
