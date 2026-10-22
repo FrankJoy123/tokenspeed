@@ -468,9 +468,19 @@ computes the stored width and consumes only logical columns, while CuTe gives
 TMA a logical view of that same storage. Eager and CUDA graph calls therefore
 share both the weight layout and its update semantics.
 
+Startup runs the ordinary dummy model traversal inside TokenSpeed's
+`kernel_warmup(enabled=True)` context. Operators check `is_warming_up()` to
+prepare their own compilation variants; this state is independent of
+FlashInfer and is restored when the context exits. FlashInfer tactic profiling
+is optional within that same traversal. `--disable-autotune` disables profiling
+while retaining compilation warmup and loading existing tactic caches.
+Pipeline parallelism still skips the traversal because dummy forwards do not
+perform pipeline stage transfers. Coverage is limited to operators reached by
+the dummy forward and the static signatures their warmup helpers prepare.
+
 CuTe QSA uses runtime query rows and selected-slot strides. Model dimensions,
 the selection budget and the finite launch configurations stay static. Startup
-autotuning warms those configurations and the streaming top-k capacity buckets;
+warmup prepares those configurations and the streaming top-k capacity buckets;
 gated residual mixing also warms full/tail tiles and scheduling rounds. This
 uses the ordinary operator entry points, without extra model-forward paths.
 Stream calls share one warmup entry; an auto-selected logits call also warms
@@ -478,12 +488,11 @@ stream configurations for later larger batches.
 Warmup preserves the caller's scratch budget, including zero, and filters
 configurations against it. Effective kernel overrides, including environment
 and context overrides, exclude unselected CuTe implementations from warmup.
-This extra coverage requires the FlashInfer autotuner to be installed and the
-startup autotuning traversal to run. Without that tuner, or with startup
-autotuning disabled, these CuTe variants compile on demand. Capture-stream
-occupancy still needs its ordinary warmup.
+This extra CuTe coverage does not require FlashInfer. Variants outside the
+startup coverage compile on demand. Capture-stream occupancy still needs its
+ordinary warmup.
 
-When QSA selects PrimTS, the same startup autotuning traversal prepares its
+When QSA selects PrimTS, the same startup warmup traversal prepares its
 legal query groups (G1 through G8, limited by head tiling) and static/persistent
 scheduler variants. This retains PrimTS's native group-selection heuristic;
 it prepares kernels rather than searching timing tactics. Scratch queries,
@@ -491,7 +500,8 @@ KV and metadata keep these preparations independent of model cache contents
 and graph-owned plans. Packed row counts are dynamic in the native compiler
 cache. Each actual geometry still needs its ordinary eager plan before graph
 capture, and a changed model layout or KV capacity can require new compilation.
-Disabling startup autotuning also skips this PrimTS preparation.
+PrimTS itself still requires FlashInfer, but its compilation preparation does
+not depend on FlashInfer's autotuning state.
 
 QSA logits scoring uses the same paged kernel for every query layout. A batch
 whose request lengths are all available on the host may shorten its compressed

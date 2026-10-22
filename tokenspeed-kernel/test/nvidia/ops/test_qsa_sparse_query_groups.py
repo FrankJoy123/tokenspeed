@@ -169,9 +169,8 @@ def test_qsa_startup_warms_launch_configurations(
     device, monkeypatch, q_heads, kv_heads, cache_dtype
 ):
     _require_blackwell()
-    pytest.importorskip("flashinfer.autotuner")
     from tokenspeed_kernel.ops.attention.qsa import qsa_sparse_attention
-    from tokenspeed_kernel.ops.tuning import autotune, get_autotune_max_num_tokens
+    from tokenspeed_kernel.ops.tuning import get_autotune_max_num_tokens, kernel_warmup
     from tokenspeed_kernel.thirdparty.cute_dsl import qsa_sparse
 
     monkeypatch.setattr(qsa_sparse, "_COMPILED_KERNELS", {})
@@ -203,7 +202,7 @@ def test_qsa_startup_warms_launch_configurations(
         )
 
     first = inputs(1)
-    with autotune(tune_mode=True, tuning_buckets=None, round_up=None):
+    with kernel_warmup(enabled=True):
         forward(*first, 1)
     compiled = dict(qsa_sparse._COMPILED_KERNELS)
     assert compiled
@@ -297,9 +296,8 @@ def test_qsa_warmup_skips_unsupported_tensors(device, monkeypatch, unsupported):
 @pytest.mark.parametrize("override_source", ["context", "environment"])
 def test_qsa_startup_respects_kernel_override(device, monkeypatch, override_source):
     _require_blackwell()
-    pytest.importorskip("flashinfer.autotuner")
     from tokenspeed_kernel.ops.attention.qsa import qsa_sparse_attention
-    from tokenspeed_kernel.ops.tuning import autotune
+    from tokenspeed_kernel.ops.tuning import kernel_warmup
     from tokenspeed_kernel.selection import kernel_override
     from tokenspeed_kernel.thirdparty.cute_dsl import qsa_sparse
 
@@ -318,7 +316,7 @@ def test_qsa_startup_respects_kernel_override(device, monkeypatch, override_sour
         context = nullcontext()
     else:
         context = kernel_override("attention", "qsa_sparse_attention", "triton")
-    with context, autotune(tune_mode=True, tuning_buckets=None, round_up=None):
+    with context, kernel_warmup(enabled=True):
         output = qsa_sparse_attention(
             query,
             keys,

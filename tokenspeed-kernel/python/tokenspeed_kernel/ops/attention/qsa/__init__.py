@@ -24,7 +24,7 @@ import math
 
 import torch
 from tokenspeed_kernel.ops.attention.qsa.metadata import QSASparseMetadata, QSAWorkspace
-from tokenspeed_kernel.ops.tuning import get_autotune_max_num_tokens, is_autotuning
+from tokenspeed_kernel.ops.tuning import get_autotune_max_num_tokens, is_warming_up
 from tokenspeed_kernel.registry import KernelRegistry
 from tokenspeed_kernel.selection import resolve_kernel_override, select_kernel
 from tokenspeed_kernel.signature import (
@@ -224,7 +224,7 @@ def qsa_sparse_attention(
     if k_cache.shape[0] < 2 or v_cache.shape[0] < 2:
         raise ValueError("QSA caches must include slot 1 for masked reads")
     if (
-        is_autotuning()
+        is_warming_up()
         and solution in (None, "cute_dsl")
         and resolve_kernel_override("attention", "qsa_sparse_attention", override)
         in (None, "cute_dsl", "cute_dsl_blackwell_qsa_sparse_attention")
@@ -432,7 +432,7 @@ def qsa_block_topk_stream(
         max_partial_bytes=max_partial_bytes,
     )
     if (
-        is_autotuning()
+        is_warming_up()
         and solution in (None, "cute_dsl")
         and resolve_kernel_override("attention", "qsa_block_topk_stream", override)
         in (None, "cute_dsl", "cute_dsl_qwen4_exp_qsa_block_topk")
@@ -587,7 +587,7 @@ def qwen4_exp_qsa_block_topk(
         # share the warmup in qsa_block_topk_stream below.
         if (
             path == "logits"
-            and is_autotuning()
+            and is_warming_up()
             and solution in (None, "cute_dsl")
             and resolve_kernel_override("attention", "qsa_block_topk_stream", override)
             in (None, "cute_dsl", "cute_dsl_qwen4_exp_qsa_block_topk")

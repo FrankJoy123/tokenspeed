@@ -906,8 +906,7 @@ def test_stream_topk_startup_warms_algorithm_and_capacity_buckets(
     max_logits_bytes,
     enable_pdl,
 ):
-    pytest.importorskip("flashinfer.autotuner")
-    from tokenspeed_kernel.ops.tuning import autotune
+    from tokenspeed_kernel.ops.tuning import kernel_warmup
     from tokenspeed_kernel.selection import kernel_override
 
     monkeypatch.setattr(stream_topk, "_COMPILED", {})
@@ -947,7 +946,7 @@ def test_stream_topk_startup_warms_algorithm_and_capacity_buckets(
     # prefill calls use stream kernels without any global scratch.
     # The logits startup uses its portable selector; this test targets CuTe warmup.
     with (
-        autotune(tune_mode=True, tuning_buckets=None, round_up=None),
+        kernel_warmup(enabled=True),
         kernel_override("attention", "qsa_block_topk_select", "triton"),
     ):
         forward(
@@ -998,8 +997,7 @@ def test_stream_topk_startup_warms_algorithm_and_capacity_buckets(
 def test_stream_topk_startup_respects_kernel_override(
     device, monkeypatch, override_source, entry
 ):
-    pytest.importorskip("flashinfer.autotuner")
-    from tokenspeed_kernel.ops.tuning import autotune
+    from tokenspeed_kernel.ops.tuning import kernel_warmup
     from tokenspeed_kernel.selection import kernel_override
 
     monkeypatch.setattr(stream_topk, "_COMPILED", {})
@@ -1031,7 +1029,7 @@ def test_stream_topk_startup_respects_kernel_override(
         context,
         kernel_override("attention", "qsa_block_scores", "triton"),
         kernel_override("attention", "qsa_block_topk_select", "triton"),
-        autotune(tune_mode=True, tuning_buckets=None, round_up=None),
+        kernel_warmup(enabled=True),
     ):
         if entry == "direct":
             selected = qsa_block_topk_stream(

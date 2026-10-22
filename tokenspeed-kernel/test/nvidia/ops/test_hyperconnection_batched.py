@@ -542,8 +542,7 @@ def test_dynamic_rows_reuse_plan_in_eager_and_capture(row_counts, dtype, monkeyp
 
 
 def test_startup_warms_full_tail_tiles_and_rounds(monkeypatch):
-    pytest.importorskip("flashinfer.autotuner")
-    from tokenspeed_kernel.ops.tuning import autotune
+    from tokenspeed_kernel.ops.tuning import kernel_warmup
 
     _reset_caches(monkeypatch)
     monkeypatch.setattr(cute_fused, "_WARMED", set())
@@ -568,7 +567,7 @@ def test_startup_warms_full_tail_tiles_and_rounds(monkeypatch):
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
-        with autotune(tune_mode=True, tuning_buckets=None, round_up=None):
+        with kernel_warmup(enabled=True):
             forward(1)
     stream.synchronize()
     plans = dict(cute_fused._PLANS)

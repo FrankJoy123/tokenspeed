@@ -35,7 +35,7 @@ from flashinfer.attention.prims_ts.q_token_kv_block_sparse_metadata import (
     get_q_token_kv_block_sparse_workspace_size,
 )
 from tokenspeed_kernel.ops.attention.qsa.metadata import QSASparseMetadata, QSAWorkspace
-from tokenspeed_kernel.ops.tuning import get_autotune_max_num_tokens, is_autotuning
+from tokenspeed_kernel.ops.tuning import get_autotune_max_num_tokens, is_warming_up
 from tokenspeed_kernel.workspace import retain_for_capture
 
 
@@ -349,7 +349,7 @@ def qsa_attention(
         A new BF16 output tensor with the query shape.
     """
     runner = _get_runner(metadata.workspace, q.device)
-    if is_autotuning():
+    if is_warming_up():
         runner.warmup(
             q, k_cache, v_cache, metadata, max_rows=get_autotune_max_num_tokens()
         )

@@ -488,9 +488,9 @@ def gated_residual_mix(
         )
         return mixed, inject
 
-    from tokenspeed_kernel.ops.tuning import is_autotuning
+    from tokenspeed_kernel.ops.tuning import is_warming_up
 
-    if is_autotuning():
+    if is_warming_up():
         from tokenspeed_kernel.ops.residual.cute_fused import warmup
 
         warmup(

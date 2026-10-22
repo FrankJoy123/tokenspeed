@@ -168,6 +168,12 @@ every graph it captures.
 Prepared plans can use `retain_for_capture` in that session to keep their
 allocations alive until the graph owner is released.
 
+Startup callers can enter `ops.tuning.kernel_warmup(enabled=True)` around
+ordinary execution. Selected operators check `is_warming_up()` and prepare
+the compilation variants they own, using their existing caches. This context
+does not require FlashInfer; optional tactic profiling uses the separate
+`autotune` context.
+
 ### Solution choices
 
 - **Triton** — in-tree; default portable JIT path for various kernels, including

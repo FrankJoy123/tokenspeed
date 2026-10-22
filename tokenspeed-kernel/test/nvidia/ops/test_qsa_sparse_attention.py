@@ -182,10 +182,9 @@ def test_prims_qsa_prefill_matches_causal_reference(shared_candidates, device):
 def test_prims_qsa_startup_warms_query_groups_and_schedulers(device):
     if current_platform().arch_version not in (ArchVersion(10, 0), ArchVersion(10, 3)):
         pytest.skip("PrimTS QSA requires SM100 or SM103")
-    pytest.importorskip("flashinfer.autotuner")
-    from flashinfer.attention.prims_ts import decode
+    decode = pytest.importorskip("flashinfer.attention.prims_ts.decode")
     from tokenspeed_kernel.ops.attention.qsa.triton import qwen4_exp_qsa_selected_slots
-    from tokenspeed_kernel.ops.tuning import autotune
+    from tokenspeed_kernel.ops.tuning import kernel_warmup
 
     _, k, v, _, prototype = _prims_case(
         lengths=(1024,),
@@ -249,7 +248,7 @@ def test_prims_qsa_startup_warms_query_groups_and_schedulers(device):
     # Clear the compiler lookup cache; live plans retain their own binaries.
     decode._get_compiled_decode.cache_clear()
     original_k, original_v = k.clone(), v.clone()
-    with autotune(tune_mode=True, tuning_buckets=None, round_up=None):
+    with kernel_warmup(enabled=True):
         forward(*case((1,)))
     torch.testing.assert_close(k, original_k, atol=0, rtol=0)
     torch.testing.assert_close(v, original_v, atol=0, rtol=0)
