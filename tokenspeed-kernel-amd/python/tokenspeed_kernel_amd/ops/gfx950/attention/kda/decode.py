@@ -1280,7 +1280,7 @@ def gluon_kda_fused_decode_gfx950(
             graph-padding rows.
         write_indices: Destination state page per batch row. Negative entries
             suppress state updates.
-        num_heads: Number of local KDA heads; this specialization requires 12.
+        num_heads: Number of local KDA heads.
         head_dim: Per-head key/value width; this specialization requires 128.
         cu_seqlens: Packed row boundaries with shape ``[batch + 1]``. Active
             rows contain one token and graph-padding rows contain zero tokens.
@@ -1308,8 +1308,8 @@ def gluon_kda_fused_decode_gfx950(
     )
     if not all(tensor.is_cuda for tensor in tensors):
         raise ValueError("gfx950 fused KDA decode requires GPU tensors")
-    if num_heads != 12 or head_dim != 128:
-        raise ValueError("gfx950 fused KDA decode requires 12 heads of width 128")
+    if head_dim != 128:
+        raise ValueError("gfx950 fused KDA decode requires heads of width 128")
 
     tokens = read_indices.numel()
     projection_width = num_heads * head_dim
