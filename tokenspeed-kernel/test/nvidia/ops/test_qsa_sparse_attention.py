@@ -183,8 +183,9 @@ def test_prims_qsa_startup_warms_query_groups_and_schedulers(device):
     if current_platform().arch_version not in (ArchVersion(10, 0), ArchVersion(10, 3)):
         pytest.skip("PrimTS QSA requires SM100 or SM103")
     decode = pytest.importorskip("flashinfer.attention.prims_ts.decode")
+    pytest.importorskip("flashinfer.autotuner")
     from tokenspeed_kernel.ops.attention.qsa.triton import qwen4_exp_qsa_selected_slots
-    from tokenspeed_kernel.ops.tuning import kernel_warmup
+    from tokenspeed_kernel.ops.tuning import autotune, kernel_warmup
 
     _, k, v, _, prototype = _prims_case(
         lengths=(1024,),
@@ -248,7 +249,10 @@ def test_prims_qsa_startup_warms_query_groups_and_schedulers(device):
     # Clear the compiler lookup cache; live plans retain their own binaries.
     decode._get_compiled_decode.cache_clear()
     original_k, original_v = k.clone(), v.clone()
-    with kernel_warmup(enabled=True):
+    with (
+        kernel_warmup(enabled=False),
+        autotune(tune_mode=True, tuning_buckets=None, round_up=None),
+    ):
         forward(*case((1,)))
     torch.testing.assert_close(k, original_k, atol=0, rtol=0)
     torch.testing.assert_close(v, original_v, atol=0, rtol=0)
@@ -272,6 +276,53 @@ def test_prims_qsa_startup_warms_query_groups_and_schedulers(device):
         expected = _reference(q[row_ids], k, v, selected[row_ids], 1 / 16)
         torch.testing.assert_close(captured[row_ids], expected, atol=4e-3, rtol=1e-2)
         assert decode._get_compiled_decode.cache_info().misses == misses
+
+
+def test_prims_qsa_kernel_warmup_does_not_enable_extra_compilation(device):
+    if current_platform().arch_version not in (ArchVersion(10, 0), ArchVersion(10, 3)):
+        pytest.skip("PrimTS QSA requires SM100 or SM103")
+    decode = pytest.importorskip("flashinfer.attention.prims_ts.decode")
+    from tokenspeed_kernel.ops.tuning import autotune, kernel_warmup
+
+    q, k, v, slots, metadata = _prims_case(
+        lengths=(1,),
+        prefixes=(17,),
+        kv_heads=1,
+        shared_candidates=True,
+        block_size=4,
+        device=device,
+    )
+    k.mul_(0.25)
+    v.mul_(0.25)
+
+    def forward():
+        return qsa_sparse_attention(
+            q,
+            k,
+            v,
+            slots,
+            scale=1 / 16,
+            max_seqlen_q=None,
+            metadata_capacity_rows=None,
+            k_scale=None,
+            v_scale=None,
+            override=None,
+            solution="flashinfer_prims",
+            sparse_metadata=metadata,
+        )
+
+    decode._get_compiled_decode.cache_clear()
+    with autotune(tune_mode=False, tuning_buckets=None, round_up=None):
+        with kernel_warmup(enabled=False):
+            forward()
+        misses = decode._get_compiled_decode.cache_info().misses
+        assert misses > 0
+        with kernel_warmup(enabled=True):
+            actual = forward()
+    assert decode._get_compiled_decode.cache_info().misses == misses
+    torch.testing.assert_close(
+        actual, _reference(q, k, v, slots, 1 / 16), atol=4e-3, rtol=1e-2
+    )
 
 
 @pytest.mark.parametrize("query_width", [1, 4])

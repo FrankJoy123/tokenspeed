@@ -33,6 +33,7 @@ from tokenspeed_kernel.platform import (
     pdl_enabled,
 )
 from tokenspeed_kernel.registry import Priority, register_kernel
+from tokenspeed_kernel.selection import resolve_kernel_override
 from tokenspeed_kernel.signature import format_signatures
 
 try:
@@ -207,24 +208,28 @@ def warmup(
         projection_rows: Logical down/inject rows before storage padding.
         projection_scale: Scale applied to the down/inject projection.
         weights_independent: Whether weights are ready before the PDL wait.
-        override: Explicit kernel override, preserved during selection.
+        override: Call-site kernel override. Global overrides follow dispatch
+            precedence for eligibility and the row bound.
         solution: Explicit solution choice, preserved during selection.
 
     Returns:
         None. Eligible plans and workspaces remain cached for serving.
     """
+    effective_override = resolve_kernel_override(
+        "residual", "hyperconnection_mix", override
+    )
     if (
-        (hc_count, hidden_size, lowrank) != (4, 2560, 320)
+        effective_override not in (None, "cute_fused", "cute_fused_hyperconnection_mix")
+        or (effective_override is None and solution not in (None, "cute_fused"))
+        or (hc_count, hidden_size, lowrank) != (4, 2560, 320)
         or not weights_independent
         or not supports_fused_hc(normalized.device)
         or normalized.dtype not in (torch.bfloat16, torch.float16)
-        or solution not in (None, "cute_fused")
-        or override not in (None, "cute_fused", "cute_fused_hyperconnection_mix")
     ):
         return
     from tokenspeed_kernel.ops.residual import select_gated_residual_mix_kernel
 
-    max_rows = 256 if override is None else _MAX_OVERRIDE_TOKENS
+    max_rows = 256 if effective_override is None else _MAX_OVERRIDE_TOKENS
     key = (
         normalized.device.index,
         normalized.dtype,

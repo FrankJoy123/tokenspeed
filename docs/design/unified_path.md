@@ -469,7 +469,7 @@ TMA a logical view of that same storage. Eager and CUDA graph calls therefore
 share both the weight layout and its update semantics.
 
 Startup runs the ordinary dummy model traversal inside TokenSpeed's
-`kernel_warmup(enabled=True)` context. Operators check `is_warming_up()` to
+`kernel_warmup(enabled=True)` context. CuTe operators check `is_warming_up()` to
 prepare their own compilation variants; this state is independent of
 FlashInfer and is restored when the context exits. FlashInfer tactic profiling
 is optional within that same traversal. `--disable-autotune` disables profiling
@@ -488,11 +488,14 @@ stream configurations for later larger batches.
 Warmup preserves the caller's scratch budget, including zero, and filters
 configurations against it. Effective kernel overrides, including environment
 and context overrides, exclude unselected CuTe implementations from warmup.
+Gated residual mixing prepares 1–256 rows for automatic selection and 1–1024
+rows for an effective fused override. Eligibility and the row bound use the
+same override precedence as dispatch: environment, context, then call site.
 This extra CuTe coverage does not require FlashInfer. Variants outside the
 startup coverage compile on demand. Capture-stream occupancy still needs its
 ordinary warmup.
 
-When QSA selects PrimTS, the same startup warmup traversal prepares its
+When QSA selects PrimTS, FlashInfer startup autotuning prepares its
 legal query groups (G1 through G8, limited by head tiling) and static/persistent
 scheduler variants. This retains PrimTS's native group-selection heuristic;
 it prepares kernels rather than searching timing tactics. Scratch queries,
@@ -500,8 +503,11 @@ KV and metadata keep these preparations independent of model cache contents
 and graph-owned plans. Packed row counts are dynamic in the native compiler
 cache. Each actual geometry still needs its ordinary eager plan before graph
 capture, and a changed model layout or KV capacity can require new compilation.
-PrimTS itself still requires FlashInfer, but its compilation preparation does
-not depend on FlashInfer's autotuning state.
+PrimTS requires FlashInfer, and this extra compilation preparation follows
+`is_autotuning()`. `--disable-autotune` skips the extra group/scheduler
+enumeration; ordinary plan/run still uses the native heuristic and compiles
+encountered variants on demand. `kernel_warmup` alone does not enable PrimTS
+enumeration.
 
 QSA logits scoring uses the same paged kernel for every query layout. A batch
 whose request lengths are all available on the host may shorten its compressed
