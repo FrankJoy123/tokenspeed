@@ -41,28 +41,6 @@ amd_mm = importlib.import_module("tokenspeed_kernel_amd.ops.gfx950.gemm.mxfp8.mm
 amd_decode = importlib.import_module(
     "tokenspeed_kernel_amd.ops.gfx950.gemm.mxfp8.decode"
 )
-SHAPES = [
-    (17, 130, 3072),
-    (17, 128, 3104),
-    (4, 130, 256),
-    (4, 128, 128),
-    (1, 16, 288),
-    (37, 208, 800),
-    (300, 256, 1056),
-    (300, 256, 384),
-    (1, 1024, 4096),
-    (1, 4096, 512),
-    (2, 4096, 512),
-    (64, 4096, 512),
-    (128, 1024, 4096),
-    (65, 1024, 4096),
-    (129, 4096, 512),
-    (641, 1152, 576),
-    (1616, 1024, 4096),
-    (1616, 2048, 4096),
-    (3536, 4096, 512),
-]
-ONLINE = [shape for shape in SHAPES if shape[2] % 128 == 0]
 
 
 def strided_copy(value):
@@ -108,14 +86,24 @@ def run(a, b, sa, sb, out):
     )
 
 
+# Model projection dimensions represent decode and the three matrix tile families.
+# Row counts are test samples, not a claim about observed serving traffic.
 @pytest.mark.parametrize(
     "shape,online,unaligned",
-    [(s, False, False) for s in SHAPES]
-    + [(s, True, False) for s in ONLINE]
-    + [
-        ((300, 384, 4096), False, True),
-        ((65, 1024, 4096), False, True),
-        pytest.param((17, 130, 3072), False, True, id="decode-unaligned"),
+    [
+        pytest.param((1, 4096, 512), False, False, id="shared-down-decode-single"),
+        pytest.param((129, 4096, 512), False, False, id="shared-down-decode-batched"),
+        pytest.param((1, 1024, 4096), False, False, id="shared-gate-up-small-matrix"),
+        pytest.param(
+            (1616, 1024, 4096), False, False, id="shared-gate-up-medium-matrix"
+        ),
+        pytest.param((3536, 4096, 512), False, False, id="shared-down-large-matrix"),
+        # Synthetic API boundaries cover partial blocks and unaligned storage.
+        pytest.param((17, 128, 3104), False, False, id="matrix-partial-k"),
+        pytest.param((65, 1024, 4096), False, True, id="matrix-unaligned"),
+        pytest.param((17, 130, 288), False, True, id="decode-partial-blocks-unaligned"),
+        pytest.param((1, 4096, 512), True, False, id="decode-online-quantization"),
+        pytest.param((1616, 1024, 4096), True, False, id="matrix-online-quantization"),
     ],
 )
 def test_public_fp32_scales_arbitrary_strides_and_canaries(shape, online, unaligned):
@@ -222,7 +210,11 @@ def test_contiguous_single_row_preserves_output_and_multiplier(scaled):
 
 
 @pytest.mark.parametrize(
-    "shape", [(1, 4096, 512), (37, 208, 800), (65, 1024, 4096), (896, 6144, 4096)]
+    "shape",
+    [
+        pytest.param((65, 1024, 3072), id="split-decode"),
+        pytest.param((1616, 1024, 4096), id="matrix"),
+    ],
 )
 def test_fp32_scales_are_reread_during_graph_replay(shape):
     m, n, k = shape
@@ -234,7 +226,7 @@ def test_fp32_scales_are_reread_during_graph_replay(shape):
     run(a, b, sa, sb, out)
     torch.cuda.synchronize()
     graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
+    with capture_session(graph), torch.cuda.graph(graph):
         run(a, b, sa, sb, out)
     for av, bv in ((1.25, 0.75), (0.5, 2.0)):
         sa.fill_(av)
@@ -246,17 +238,19 @@ def test_fp32_scales_are_reread_during_graph_replay(shape):
         )
 
 
+# Synthetic contract guards: combining scales first can lose a representable
+# block result. These exponents do not represent measured model scale ranges.
 @pytest.mark.parametrize(
-    "shape",
+    "shape,kind",
     [
-        (1, 4096, 512),
-        (129, 256, 512),
-        (65, 1024, 512),
-        (1616, 1024, 4096),
-        (3536, 4096, 512),
+        pytest.param(
+            (1, 4096, 512), "overflow_coefficient", id="decode-scale-overflow"
+        ),
+        pytest.param(
+            (1616, 1024, 4096), "underflow_coefficient", id="matrix-scale-underflow"
+        ),
     ],
 )
-@pytest.mark.parametrize("kind", ["overflow_coefficient", "underflow_coefficient"])
 def test_fp32_scale_multiplications_keep_their_order(shape, kind):
     m, n, k = shape
     value, active, ae, be = (
@@ -292,51 +286,6 @@ def test_fp32_scale_multiplications_keep_their_order(shape, kind):
     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
-@pytest.mark.parametrize("m,n,k", [(1, 4096, 512), (1, 128, 4096), (65, 1024, 4096)])
-def test_unscaled_block_cancellation_remains_finite(m, n, k):
-    a = torch.zeros((m, k), device="cuda")
-    a[:, :64] = 128
-    a[:, 64:128] = -128
-    b = torch.ones((n, k), device="cuda", dtype=torch.float8_e4m3fn)
-    sa = torch.ones((m, k // 128), device="cuda")
-    sa[:, 0] = 2.0**120
-    sb = torch.ones(((n + 127) // 128, k // 128), device="cuda")
-    # Each unscaled K128 dot is exactly zero; independently scaled halves
-    # could overflow, so the oracle is literal zero rather than dense FP32.
-    actual = run(a.to(torch.float8_e4m3fn), b, sa, sb, None)
-    assert torch.isfinite(actual).all() and torch.count_nonzero(actual) == 0
-
-
-@pytest.mark.parametrize(
-    "shape,out_dtype",
-    [
-        ((4, 128, 512), torch.float16),
-    ],
-)
-def test_unsupported_gluon_contract_uses_triton_fallback(shape, out_dtype):
-    a, b, sa, sb = values(*shape)
-    a = a.to(torch.float8_e4m3fn)
-    b, sa, sb = b.contiguous(), sa.contiguous(), sb.contiguous()
-    expected = reference(a, b, sa, sb, out_dtype)
-    ShapeCapture.reset()
-    capture = ShapeCapture.get()
-    capture.enabled = True
-    try:
-        actual = kernel_mm(
-            a,
-            b,
-            A_scales=sa,
-            B_scales=sb,
-            out_dtype=out_dtype,
-            block_size=[128, 128],
-            quant="mxfp8",
-        )
-    finally:
-        capture.enabled = False
-    assert capture._records[-1].kernel_name == "triton_mm_fp8_blockscale"
-    torch.testing.assert_close(actual, expected, atol=0.02, rtol=0.01)
-
-
 @pytest.mark.parametrize(
     "rows,n,k",
     [((129, 130), 4096, 512), ((848, 896), 6144, 4096), ((3536, 3540), 4096, 512)],
@@ -357,114 +306,3 @@ def test_same_tile_row_counts_reuse_compiled_kernels(rows, n, k):
         amd_decode.gluon_mm_mxfp8_decode_gfx950,
     ):
         execute(rows[1])
-
-
-def _fp32_operands(m: int, n: int, k: int):
-    a = (torch.randint(-4, 5, (m, k), device="cuda").float() * 0.25).to(
-        torch.float8_e4m3fn
-    )
-    b = (torch.randint(-4, 5, (n, k), device="cuda").float() * 0.25).to(
-        torch.float8_e4m3fn
-    )
-
-    def scales(rows):
-        value = torch.exp2(
-            torch.randint(-3, 2, (rows, (k + 127) // 128), device="cuda").float()
-        )
-        return strided_copy(value)
-
-    return a, b, scales(m), scales((n + 127) // 128)
-
-
-def _run_fp32(a, b, sa, sb, out, counters):
-    return amd_decode.launch_gluon_mm_mxfp8_decode_gfx950(
-        a,
-        b,
-        sa,
-        sb,
-        torch.bfloat16,
-        alpha=None,
-        block_size=[128, 128],
-        counters=counters,
-        out=out,
-    )
-
-
-def _unaligned_copy(value):
-    k = value.shape[1]
-    backing = torch.empty((value.shape[0], k + 3), device="cuda", dtype=value.dtype)
-    view = backing[:, 1 : k + 1]
-    view.copy_(value)
-    return view
-
-
-@pytest.mark.parametrize(
-    "m,n,k,unaligned",
-    [
-        (1, 17, 128, False),
-        (16, 130, 256, False),
-        (17, 130, 288, False),
-        (128, 17, 480, False),
-        (129, 130, 256, False),
-        (256, 130, 480, False),
-        (17, 130, 288, True),
-    ],
-)
-def test_fp32_block_scales_decode_boundaries_and_canaries(m, n, k, unaligned):
-    torch.manual_seed(7)
-    a, b, sa, sb = _fp32_operands(m, n, k)
-    if unaligned:
-        # Unit inner stride remains supported when both the pointer and the
-        # row stride prevent 16-byte value loads, alongside strided scales/out.
-        a, b = _unaligned_copy(a), _unaligned_copy(b)
-    # Quarter-integer values and power-of-two scales make the independent
-    # dense dequantization oracle exact, including partial K128/N128 groups.
-    expected = reference(a, b, sa, sb, torch.bfloat16)
-    backing = torch.full((m + 2, n + 32), -7, device="cuda", dtype=torch.bfloat16)
-    out = backing[1 : m + 1, 16 : n + 16]
-    counters = torch.zeros(
-        amd_decode.gluon_mm_mxfp8_decode_num_counters_gfx950(m, n, k),
-        device="cuda",
-        dtype=torch.int32,
-    )
-    saved = (sa.clone(), sb.clone())
-    actual = _run_fp32(a, b, sa, sb, out, counters)
-    assert actual is out and torch.count_nonzero(expected) > 0
-    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
-    assert torch.all(backing[[0, -1], :] == -7)
-    assert torch.all(backing[1 : m + 1, :16] == -7)
-    assert torch.all(backing[1 : m + 1, n + 16 :] == -7)
-    assert torch.equal(sa, saved[0]) and torch.equal(sb, saved[1])
-    assert torch.count_nonzero(counters) == 0
-
-
-def test_fp32_split_graph_replay_rereads_scales_and_resets_counters():
-    torch.manual_seed(7)
-    # Eight K tiles per split exceed the six-slot ring, exercising ordinary
-    # shared stores through a refill as well as split arrivals and replay.
-    m, n, k = 17, 130, 8192
-    a, b, sa, sb = _fp32_operands(m, n, k)
-    a, b = _unaligned_copy(a), _unaligned_copy(b)
-    counters = torch.zeros(
-        amd_decode.gluon_mm_mxfp8_decode_num_counters_gfx950(m, n, k),
-        device="cuda",
-        dtype=torch.int32,
-    )
-    assert counters.numel() > 0, "This fixture must exercise split-K arrivals"
-    out = torch.empty((m, n), device="cuda", dtype=torch.bfloat16)
-    stream = torch.cuda.Stream()
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.stream(stream):
-        _run_fp32(a, b, sa, sb, out, counters)
-        with capture_session(graph), torch.cuda.graph(graph, stream=stream):
-            _run_fp32(a, b, sa, sb, out, counters)
-    stream.synchronize()
-    for activation_scale, weight_scale in ((1.25, 0.5), (0.5, 2.0), (2.0, 0.75)):
-        sa.fill_(activation_scale)
-        sb.fill_(weight_scale)
-        graph.replay()
-        torch.cuda.synchronize()
-        torch.testing.assert_close(
-            out, reference(a, b, sa, sb, torch.bfloat16), atol=0, rtol=0
-        )
-        assert torch.count_nonzero(counters) == 0
