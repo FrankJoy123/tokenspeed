@@ -168,11 +168,9 @@ every graph it captures.
 Prepared plans can use `retain_for_capture` in that session to keep their
 allocations alive until the graph owner is released.
 
-Startup callers can enter `ops.tuning.kernel_warmup(enabled=True)` around
-ordinary execution. Selected operators check `is_warming_up()` and prepare
-the compilation variants they own, using their existing caches. This context
-does not require FlashInfer; optional tactic profiling uses the separate
-`autotune` context.
+Operators can prepare compilation variants during ordinary execution with
+`ops.tuning.kernel_warmup(enabled=True)` and `is_warming_up()`. FlashInfer
+profiling uses a separate `autotune` context.
 
 ### Solution choices
 
