@@ -38,10 +38,16 @@ ut:
           ))
           return events
       torch.profiler.profile.events = record_events
+      class RepeatCapacityTest:
+          def pytest_collection_modifyitems(self, items):
+              capacity = items.pop()
+              assert capacity.name == "test_index_scan_capacity_launches_and_scratch"
+              items.extend([capacity] * 20)
       result = pytest.main([
+          "tokenspeed-kernel/test/ops/test_attention_dsv41_dcp.py",
           "tokenspeed-kernel/test/ops/test_attention_dsv41_index_scan.py::test_index_scan_capacity_launches_and_scratch",
           "-vv", "-s",
-      ])
+      ], plugins=[RepeatCapacityTest()])
       for counts in traces:
           print("DEVICE_EVENTS", json.dumps(counts, sort_keys=True), flush=True)
       raise SystemExit(result)
