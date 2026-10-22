@@ -337,6 +337,80 @@ def test_qsa_startup_respects_kernel_override(device, monkeypatch, override_sour
     assert not qsa_sparse._WARMED
 
 
+@pytest.mark.parametrize("override_source", ["context", "environment", "callsite"])
+def test_qsa_startup_warms_override_with_conflicting_solution(
+    device, monkeypatch, override_source
+):
+    _require_blackwell()
+    from tokenspeed_kernel.ops.attention.qsa import qsa_sparse_attention
+    from tokenspeed_kernel.ops.tuning import kernel_warmup
+    from tokenspeed_kernel.selection import kernel_override
+    from tokenspeed_kernel.thirdparty.cute_dsl import qsa_sparse
+
+    monkeypatch.setattr(qsa_sparse, "_COMPILED_KERNELS", {})
+    monkeypatch.setattr(qsa_sparse, "_WARMED", set())
+    env_key = "TOKENSPEED_KERNEL_OVERRIDE_ATTENTION_QSA_SPARSE_ATTENTION"
+    monkeypatch.delenv(env_key, raising=False)
+    forced = "cute_dsl_blackwell_qsa_sparse_attention"
+    override = forced if override_source == "callsite" else "triton"
+    if override_source == "environment":
+        monkeypatch.setenv(env_key, forced)
+        context = nullcontext()
+    elif override_source == "context":
+        context = kernel_override("attention", "qsa_sparse_attention", forced)
+    else:
+        context = nullcontext()
+
+    torch.manual_seed(193)
+    keys = torch.randn(16, 2, 256, device=device, dtype=torch.bfloat16) * 0.25
+    values = torch.randn_like(keys) * 0.25
+
+    def inputs(rows):
+        query = torch.randn(rows, 24, 256, device=device, dtype=torch.bfloat16)
+        selected = torch.full((rows, 2051), -1, device=device, dtype=torch.int32)
+        selected[:, :8] = torch.arange(1, 9, device=device)
+        return query, selected
+
+    def forward(query, selected, width):
+        return qsa_sparse_attention(
+            query,
+            keys,
+            values,
+            selected,
+            scale=1 / 16,
+            max_seqlen_q=width,
+            metadata_capacity_rows=None,
+            k_scale=None,
+            v_scale=None,
+            override=override,
+            solution="triton",
+            sparse_metadata=None,
+        )
+
+    with context:
+        with kernel_warmup(enabled=True):
+            forward(*inputs(1), 1)
+        compiled = dict(qsa_sparse._COMPILED_KERNELS)
+        assert compiled
+        for rows, width in ((80, 2), (256, 4), (520, 8), (594, 6)):
+            query, selected = inputs(rows)
+            eager = forward(query, selected, width)
+            assert qsa_sparse._COMPILED_KERNELS == compiled
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                output = forward(query, selected, width)
+            graph.replay()
+            torch.testing.assert_close(eager, output, rtol=0, atol=0)
+            query.mul_(0.75)
+            graph.replay()
+            row_ids = [0, rows - 1]
+            expected = _reference_rows(query, keys, values, selected, row_ids)
+            torch.testing.assert_close(
+                output[row_ids].double(), expected, rtol=0.01, atol=0.003
+            )
+            assert qsa_sparse._COMPILED_KERNELS == compiled
+
+
 @pytest.mark.parametrize(
     "selected_strides", [(2051, 1), (2056, 1)], ids=["compact", "row_padded"]
 )

@@ -24,11 +24,16 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass
+from functools import cache
 from weakref import WeakValueDictionary
 
 import torch
+from flashinfer.attention.prims_ts._q_token_kv_block_sparse_policy import (
+    SUPPORTED_GROUP_SIZES,
+)
 from flashinfer.attention.prims_ts.decode import (
     suggest_q_token_kv_block_sparse_group_size,
+    validate_q_token_kv_block_sparse_group_size,
 )
 from flashinfer.attention.prims_ts.q_token_kv_block_sparse_metadata import (
     QTokenKvBlockSparsePagedTSWrapper,
@@ -50,6 +55,31 @@ def _group_offsets(offsets: tuple[int, ...], group_size: int) -> tuple[int, ...]
         for begin, end in zip(offsets, offsets[1:])
         for offset in range(begin, end, group_size)
     ) + (offsets[-1],)
+
+
+@cache
+def _warmup_group_sizes(q_heads: int, kv_heads: int, max_rows: int) -> tuple[int, ...]:
+    """Cache native-legal groups for one head geometry and startup row budget."""
+    offsets = torch.tensor([0, max_rows], dtype=torch.int32, device="cpu")
+    # Validate the geometry before filtering unsupported groups, so invalid
+    # model heads or row budgets still raise instead of returning no groups.
+    validate_q_token_kv_block_sparse_group_size(
+        offsets, max_rows, q_heads, kv_heads, group_size=1
+    )
+    groups = []
+    # PrimTS keeps its candidates in a private policy module. Its public
+    # validator owns the membership and head-tile limits; do not copy them.
+    for group in SUPPORTED_GROUP_SIZES:
+        if group > max_rows:
+            continue
+        try:
+            validate_q_token_kv_block_sparse_group_size(
+                offsets, max_rows, q_heads, kv_heads, group_size=group
+            )
+        except ValueError:
+            continue
+        groups.append(group)
+    return tuple(groups)
 
 
 @dataclass
@@ -135,8 +165,7 @@ class _PrimTSQSARunner:
         # Keep scratch plans and their workspace out of serving/graph state.
         scratch_runner = _PrimTSQSARunner(self._device)
         scratch_workspace = QSAWorkspace()
-        max_group = min(8, 128 // (q_heads // kv_heads), max_rows)
-        for group_size in range(1, max_group + 1):
+        for group_size in _warmup_group_sizes(q_heads, kv_heads, max_rows):
             for routes in route_counts:
                 scratch_metadata = QSASparseMetadata(
                     blocks[:routes],

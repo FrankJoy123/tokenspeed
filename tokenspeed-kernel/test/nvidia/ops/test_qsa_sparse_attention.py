@@ -179,13 +179,48 @@ def test_prims_qsa_prefill_matches_causal_reference(shared_candidates, device):
     )
 
 
+@pytest.mark.parametrize(
+    ("q_heads", "kv_heads", "max_rows"),
+    [(24, 2, 1), (24, 2, 3), (24, 2, 16), (128, 2, 16), (256, 2, 16)],
+)
+def test_prims_qsa_warmup_groups_follow_native_limits(q_heads, kv_heads, max_rows):
+    decode = pytest.importorskip("flashinfer.attention.prims_ts.decode")
+    from tokenspeed_kernel.thirdparty.flashinfer.qsa_prims import _warmup_group_sizes
+
+    offsets = torch.tensor([0, max_rows], dtype=torch.int32, device="cpu")
+    expected = []
+    for group in range(1, max_rows + 1):
+        try:
+            decode.validate_q_token_kv_block_sparse_group_size(
+                offsets, max_rows, q_heads, kv_heads, group_size=group
+            )
+        except ValueError:
+            continue
+        expected.append(group)
+    assert set(_warmup_group_sizes(q_heads, kv_heads, max_rows)) == set(expected)
+
+
+@pytest.mark.parametrize(("q_heads", "kv_heads", "max_rows"), [(3, 2, 16), (24, 2, 0)])
+def test_prims_qsa_warmup_rejects_invalid_group_geometry(q_heads, kv_heads, max_rows):
+    pytest.importorskip("flashinfer.attention.prims_ts.decode")
+    from tokenspeed_kernel.thirdparty.flashinfer.qsa_prims import _warmup_group_sizes
+
+    with pytest.raises(ValueError):
+        _warmup_group_sizes(q_heads, kv_heads, max_rows)
+
+
 def test_prims_qsa_startup_warms_query_groups_and_schedulers(device):
     if current_platform().arch_version not in (ArchVersion(10, 0), ArchVersion(10, 3)):
         pytest.skip("PrimTS QSA requires SM100 or SM103")
     decode = pytest.importorskip("flashinfer.attention.prims_ts.decode")
     pytest.importorskip("flashinfer.autotuner")
     from tokenspeed_kernel.ops.attention.qsa.triton import qwen4_exp_qsa_selected_slots
-    from tokenspeed_kernel.ops.tuning import autotune, kernel_warmup
+    from tokenspeed_kernel.ops.tuning import (
+        autotune,
+        get_autotune_max_num_tokens,
+        kernel_warmup,
+    )
+    from tokenspeed_kernel.thirdparty.flashinfer.qsa_prims import _get_runner
 
     _, k, v, _, prototype = _prims_case(
         lengths=(1024,),
@@ -257,6 +292,31 @@ def test_prims_qsa_startup_warms_query_groups_and_schedulers(device):
     torch.testing.assert_close(k, original_k, atol=0, rtol=0)
     torch.testing.assert_close(v, original_v, atol=0, rtol=0)
     misses = decode._get_compiled_decode.cache_info().misses
+    # Check every native-legal group independently of the adapter's candidates,
+    # including short routes and both native scheduler choices.
+    max_rows = get_autotune_max_num_tokens()
+    boundaries = torch.tensor([0, max_rows], dtype=torch.int32, device="cpu")
+    groups = []
+    for group in range(1, max_rows + 1):
+        try:
+            decode.validate_q_token_kv_block_sparse_group_size(
+                boundaries, max_rows, 24, 2, group_size=group
+            )
+        except ValueError:
+            continue
+        groups.append(group)
+    sm_count = torch.cuda.get_device_properties(device).multi_processor_count
+    for routes in (1, min(max_rows, sm_count + 1)):
+        q, selected, metadata = case((1,) * routes)
+        runner = _get_runner(workspace, q.device)
+        row_ids = [0, q.shape[0] - 1]
+        expected = _reference(q[row_ids], k, v, selected[row_ids], 1 / 16)
+        for group in groups:
+            output = runner._run(
+                q, k, v, metadata, group_size=group, scale=1 / 16, v_scale=1.0
+            )
+            assert decode._get_compiled_decode.cache_info().misses == misses
+            torch.testing.assert_close(output[row_ids], expected, atol=4e-3, rtol=1e-2)
     for lengths in ((7,), (128,), (1024,), (5, 3), (511, 513), (8,) + (1,) * 120):
         q, selected, metadata = case(lengths)
         eager = forward(q, selected, metadata)
