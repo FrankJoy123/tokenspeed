@@ -967,7 +967,7 @@ def _kda_verify_launch_config(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["stride_original_tok"])
 def fused_kda_verify_conv_update_kernel(
     qkv_raw,
     conv_w,
@@ -975,6 +975,8 @@ def fused_kda_verify_conv_update_kernel(
     conv_pool,
     read_indices,
     out,
+    original_qkv,
+    stride_original_tok,
     stride_raw_tok: tl.constexpr,
     stride_out_tok: tl.constexpr,
     stride_conv_page: tl.constexpr,
@@ -1005,9 +1007,17 @@ def fused_kda_verify_conv_update_kernel(
             qkv_raw + (i_n * T + i_raw) * stride_raw_tok + o_c,
             mask=mask_c & from_raw,
             other=0.0,
-        ).to(tl.float32)
+        )
+        if original_qkv is not None:
+            if i_w == 3:
+                # The last tap reads this row before convolution and SiLU.
+                tl.store(
+                    original_qkv + i_row * stride_original_tok + o_c,
+                    b_raw,
+                    mask=mask_c,
+                )
         b_w = tl.load(conv_w + o_c * 4 + i_w, mask=mask_c, other=0.0).to(tl.float32)
-        acc += tl.where(from_raw, b_raw, b_state) * b_w
+        acc += tl.where(from_raw, b_raw.to(tl.float32), b_state) * b_w
     if HAS_BIAS:
         acc += tl.load(conv_bias + o_c, mask=mask_c, other=0.0).to(tl.float32)
     acc = acc * tl.sigmoid(acc)
@@ -1029,6 +1039,7 @@ def fused_kda_verify_conv_update(
     draft_token_num: int,
     bias: torch.Tensor | None = None,
     out: torch.Tensor | None = None,
+    original_qkv: torch.Tensor | None = None,
     block_c: int = 256,
     num_warps: int = 4,
 ) -> torch.Tensor:
@@ -1045,6 +1056,8 @@ def fused_kda_verify_conv_update(
         draft_token_num: Draft positions per request (T).
         bias: Optional ``[3*P]`` convolution bias added before SiLU.
         out: Optional ``[N*T, 3*P]`` output tensor in the input dtype.
+        original_qkv: Optional separate ``[N*T, 3*P]`` destination in the
+            input dtype for pre-convolution rows. None skips retention.
         block_c: Number of feature channels handled by each program.
         num_warps: Number of warps used by each program.
 
@@ -1091,6 +1104,26 @@ def fused_kda_verify_conv_update(
         raise ValueError(f"out must have shape [{total}, {C}] and last stride 1")
     elif out.dtype != qkv_raw.dtype:
         raise ValueError(f"out must have dtype {qkv_raw.dtype}, got {out.dtype}")
+    if original_qkv is not None:
+        if (
+            original_qkv.shape != qkv_raw.shape
+            or original_qkv.dtype != qkv_raw.dtype
+            or original_qkv.device != qkv_raw.device
+            or original_qkv.stride(-1) != 1
+            or original_qkv.stride(0) < C
+        ):
+            raise ValueError("Original QKV destination must match the input rows")
+        storage = original_qkv.untyped_storage()
+        begin, end = storage.data_ptr(), storage.data_ptr() + storage.nbytes()
+        for source in (qkv_raw, conv_w, conv_pool, bias, out):
+            if source is None:
+                continue
+            source_storage = source.untyped_storage()
+            if (
+                begin < source_storage.data_ptr() + source_storage.nbytes()
+                and source_storage.data_ptr() < end
+            ):
+                raise ValueError("Original QKV destination must use separate storage")
     grid = (total, triton.cdiv(C, block_c))
     fused_kda_verify_conv_update_kernel[grid](
         qkv_raw=qkv_raw,
@@ -1099,6 +1132,8 @@ def fused_kda_verify_conv_update(
         conv_pool=conv_pool,
         read_indices=read_indices,
         out=out,
+        original_qkv=original_qkv,
+        stride_original_tok=0 if original_qkv is None else original_qkv.stride(0),
         stride_raw_tok=qkv_raw.stride(0),
         stride_out_tok=out.stride(0),
         stride_conv_page=conv_pool.stride(0),

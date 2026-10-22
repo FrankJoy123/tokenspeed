@@ -214,6 +214,7 @@ def triton_kda_verify_conv_update(
     head_dim: int,
     draft_token_num: int,
     bias: torch.Tensor | None = None,
+    original_qkv: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Materialize the shared split-verify convolution producer."""
     from tokenspeed_kernel.ops.attention.kda._triton.recurrent import (
@@ -229,6 +230,7 @@ def triton_kda_verify_conv_update(
         head_dim=head_dim,
         draft_token_num=draft_token_num,
         bias=bias,
+        original_qkv=original_qkv,
     )
 
 

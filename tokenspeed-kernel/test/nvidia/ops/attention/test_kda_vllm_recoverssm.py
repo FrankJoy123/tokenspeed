@@ -709,9 +709,10 @@ def test_verify_derived_records_with_serving_producers(
             head_dim=dim,
         )
     )
-    payloads[0].copy_(raw)
+    retained = torch.full((rows + 1, 3 * channels + 7), float("nan"), **kwargs)
+    payloads = (retained[:rows, : 3 * channels], *payloads[1:])
     qkv = kda_verify_conv_update(
-        payloads[0],
+        raw,
         conv_weights,
         conv_state,
         indices,
@@ -720,8 +721,45 @@ def test_verify_derived_records_with_serving_producers(
         draft_token_num=width,
         recurrent_layout="v_major",
         bias=conv_bias,
+        original_qkv=payloads[0],
     )
     torch.testing.assert_close(payloads[0], raw, atol=0, rtol=0)
+    assert torch.isnan(retained[rows:]).all()
+    assert torch.isnan(retained[:rows, 3 * channels :]).all()
+    if entry == "split" and not project_gate and not with_conv_bias and lower_bound is not None:
+        from tokenspeed_kernel.ops.attention.kda._triton.recurrent import (
+            fused_kda_verify_conv_update_kernel,
+        )
+        from utils import assert_no_triton_compile
+
+        # A different destination stride must reuse the kernel; replay must
+        # regenerate both original and convolved QKV at the captured addresses.
+        graph_storage = torch.full(
+            (rows + 1, 3 * channels + 16), float("nan"), **kwargs
+        )
+        graph_retained = graph_storage[:rows, : 3 * channels]
+        with assert_no_triton_compile(fused_kda_verify_conv_update_kernel):
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                graph_qkv = kda_verify_conv_update(
+                    raw,
+                    conv_weights,
+                    conv_state,
+                    indices,
+                    num_heads=heads,
+                    head_dim=dim,
+                    draft_token_num=width,
+                    recurrent_layout="v_major",
+                    bias=None,
+                    original_qkv=graph_retained,
+                )
+            graph.replay()
+            torch.testing.assert_close(graph_qkv, qkv, atol=0, rtol=0)
+            graph_retained.fill_(float("nan"))
+            graph.replay()
+        torch.testing.assert_close(graph_retained, raw, atol=0, rtol=0)
+        assert torch.isnan(graph_storage[rows:]).all()
+        assert torch.isnan(graph_storage[:rows, 3 * channels :]).all()
     torch.testing.assert_close(conv_state, initial_conv, atol=0, rtol=0)
     history = initial_conv[indices.long()].float().transpose(1, 2)
     sequence = torch.cat((history, raw.float().view(batch, width, -1)), dim=1)

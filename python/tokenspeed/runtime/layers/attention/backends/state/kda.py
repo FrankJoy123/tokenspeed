@@ -837,8 +837,6 @@ class KdaAttnBackend(CapacityPrefillBackend):
                 with fork.scope(enable=True) as producer_fork:
                     with producer_fork.branch():
                         g_raw = self._kda_gate(g_raw, f_a_out, f_b_weight)[:rows]
-                    # Conv commit needs the original projection rows, not activated QKV.
-                    qkv[:rows, : mixed_qkv.shape[-1]].copy_(mixed_qkv[:rows])
                     conv_qkv = kda_verify_conv_update(
                         mixed_qkv[:rows],
                         conv_weights,
@@ -849,6 +847,7 @@ class KdaAttnBackend(CapacityPrefillBackend):
                         draft_token_num=draft_token_num,
                         recurrent_layout=self.kda_recurrent_layout,
                         bias=bias,
+                        original_qkv=qkv[:rows, : mixed_qkv.shape[-1]],
                     )
                 # Eager allocations on the producer stream stay live through
                 # the consumer's verify. Graph capture owns its allocations.

@@ -108,7 +108,9 @@ def _prepare_records(x, t, *, raw_gate, original_qkv=None):
             draft_token_num=t,
             bias=None,
             recurrent_layout="v_major",
+            original_qkv=original_qkv,
         )
+        original_qkv = None
     if raw_gate is None and "conv_qkv" in producers:
         raw_gate = torch.mm(x["f_a"], x["w_fb"].t())
     x["correction"] = torch.empty(n, t, heads, V, device=DEV, dtype=torch.float32)
