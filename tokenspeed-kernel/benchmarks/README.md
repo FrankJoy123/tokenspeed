@@ -185,6 +185,15 @@ reproduces still fails.
 
 ## Running a suite
 
+The GLM-5.3 Flash TP4 GEMM fragment covers 125 canonical E4M3/FP32 block128
+geometries in seven projection groups, with ordered row-count lists. These
+measure prequantized GEMM with BF16 output and normal registration selection;
+activation quantization is outside this boundary. The row lists include
+scheduling-dependent prefill and draft sizes, not just request concurrency or
+shapes observed in one model run. Treat list order as part of each expanded
+case's stable identity. The generator also preserves the separate E8M0 K32
+format selected by `block_size: [1, 32]`.
+
 From the repository root and a prepared TokenSpeed kernel environment, run the
 revision-local worker:
 
