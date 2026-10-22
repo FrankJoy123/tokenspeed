@@ -483,6 +483,16 @@ startup autotuning traversal to run. Without that tuner, or with startup
 autotuning disabled, these CuTe variants compile on demand. Capture-stream
 occupancy still needs its ordinary warmup.
 
+When QSA selects PrimTS, the same startup autotuning traversal prepares its
+legal query groups (G1 through G8, limited by head tiling) and static/persistent
+scheduler variants. This retains PrimTS's native group-selection heuristic;
+it prepares kernels rather than searching timing tactics. Scratch queries,
+KV and metadata keep these preparations independent of model cache contents
+and graph-owned plans. Packed row counts are dynamic in the native compiler
+cache. Each actual geometry still needs its ordinary eager plan before graph
+capture, and a changed model layout or KV capacity can require new compilation.
+Disabling startup autotuning also skips this PrimTS preparation.
+
 QSA logits scoring uses the same paged kernel for every query layout. A batch
 whose request lengths are all available on the host may shorten its compressed
 block-table view to the maximum prefix-plus-query length, rounded to the cache
