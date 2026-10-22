@@ -18,9 +18,10 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+"""Public FP32 block-scale dispatch, numerical boundaries and graph safety."""
+
 from __future__ import annotations
 
-"""Public FP32 block-scale dispatch, numerical boundaries and graph safety."""
 import importlib
 
 import pytest

@@ -18,13 +18,19 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+"""Behavioral CPU checks for the shape-derived FP32 launch policy."""
+
 from __future__ import annotations
 
-"""Behavioral CPU checks for the shape-derived FP32 launch policy."""
 import importlib
 
 import pytest
 import torch
+from utils import is_cdna4
+
+if not is_cdna4():
+    pytest.skip("AMD CDNA4 is required", allow_module_level=True)
+
 from tokenspeed_kernel.ops.gemm import _gemm_format_signature
 from tokenspeed_kernel.ops.gemm.gluon import gluon_mm_fp8_blockscale_gfx950
 from tokenspeed_kernel.selection import select_kernel

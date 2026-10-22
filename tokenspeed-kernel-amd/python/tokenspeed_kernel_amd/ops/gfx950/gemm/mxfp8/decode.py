@@ -27,7 +27,8 @@ stream the weight once while the activation stays in L2,
 so the kernel is organized around weight bandwidth: small N tiles, optional
 split-K to occupy every CU, and a multi-buffered async global-to-LDS pipeline.
 
-For native UE8M0, gfx950 FP8 MFMAs sum their products at reduced internal precision, so small
+For native UE8M0, gfx950 FP8 MFMAs sum their products at reduced internal
+precision, so small
 results of large cancelling terms miss the FP8 GEMM contract. Instead, each
 32-value scale group runs one BF16 MFMA on the exactly upcast E4M3 values
 (products exact, sums in FP32), and the group's power-of-two row and column
