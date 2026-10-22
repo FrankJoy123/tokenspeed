@@ -1418,6 +1418,7 @@ def test_kda_fused_verify_and_replay_match_sequential_reference(
     verify_kwargs = {
         "state_pool": state_pool,
         "state_scratch": None,
+        "replay_payload": None,
         "read_indices": read_indices,
         "write_indices": write_indices,
         "num_heads": heads,

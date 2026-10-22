@@ -958,7 +958,7 @@ class TestKimiK3RegistrationTests:
         )
         torch.nn.Module.__init__(model)
         model.language_model = language_model
-        self.assertIsNone(layer._output_plan)
+        assert layer._output_plan is None
         with (
             mock.patch.dict(os.environ, {"TOKENSPEED_MAMBA_SSM_DTYPE": "bfloat16"}),
             mock.patch.dict(kimi_k3.global_server_args_dict, dense_gemm_backend="auto"),
@@ -967,53 +967,48 @@ class TestKimiK3RegistrationTests:
             ),
         ):
             model.post_load_weights()
-            self.assertIsNone(layer._output_plan)
+            assert layer._output_plan is None
             model.post_quant_warmup()
             first_plan = layer._output_plan
-            self.assertTrue(kimi_k3.fp8_linear_gated_rmsnorm_supported(first_plan))
+            assert kimi_k3.fp8_linear_gated_rmsnorm_supported(first_plan)
             scales = first_plan
             scales_ptr = scales.data_ptr()
             updated_scales = torch.tensor([[2.0, 3.0], [5.0, 7.0]])
             layer.o_proj.weight_scale_inv.copy_(updated_scales)
             model.post_load_weights()
-            self.assertIs(layer._output_plan, first_plan)
-            self.assertEqual(first_plan.data_ptr(), scales_ptr)
+            assert layer._output_plan is first_plan
+            assert first_plan.data_ptr() == scales_ptr
             torch.testing.assert_close(scales, updated_scales.t(), atol=0, rtol=0)
             model.post_quant_warmup()
-            self.assertIs(layer._output_plan, first_plan)
-            self.assertEqual(first_plan.data_ptr(), scales_ptr)
+            assert layer._output_plan is first_plan
+            assert first_plan.data_ptr() == scales_ptr
 
             layer.o_proj.quant_method.quant_config.scale_fmt = "ue8m0"
-            with self.assertRaisesRegex(ValueError, "changed format"):
+            with pytest.raises(ValueError, match="changed format"):
                 model.post_quant_warmup()
-            self.assertIs(layer._output_plan, first_plan)
+            assert layer._output_plan is first_plan
             unsupported = self._kda_output_layer(fp8=True)
             unsupported.o_proj.quant_method.quant_config.scale_fmt = "ue8m0"
             unsupported.prepare_output_plan()
-            self.assertIsNone(unsupported._output_plan)
+            assert unsupported._output_plan is None
             for weight_shape, scale_shape, scale_dtype in (
                 ((128, 128), (1,), torch.float32),
                 ((129, 128), (2, 1), torch.float32),
                 ((128, 129), (1, 2), torch.float32),
                 ((128, 128), (1, 1), torch.bfloat16),
             ):
-                with self.subTest(
-                    weight_shape=weight_shape,
-                    scale_shape=scale_shape,
-                    scale_dtype=scale_dtype,
-                ):
-                    unsupported = self._kda_output_layer(fp8=True)
-                    unsupported.o_proj.weight.data = torch.empty(
-                        weight_shape, dtype=torch.float8_e4m3fn
-                    )
-                    unsupported.o_proj.weight_scale_inv.data = torch.ones(
-                        scale_shape, dtype=scale_dtype
-                    )
-                    unsupported.prepare_output_plan()
-                    self.assertIsNone(unsupported._output_plan)
+                unsupported = self._kda_output_layer(fp8=True)
+                unsupported.o_proj.weight.data = torch.empty(
+                    weight_shape, dtype=torch.float8_e4m3fn
+                )
+                unsupported.o_proj.weight_scale_inv.data = torch.ones(
+                    scale_shape, dtype=scale_dtype
+                )
+                unsupported.prepare_output_plan()
+                assert unsupported._output_plan is None
             unquantized = self._kda_output_layer(fp8=False)
             unquantized.prepare_output_plan()
-            self.assertIsNone(unquantized._output_plan)
+            assert unquantized._output_plan is None
 
     def test_kda_output_fusion_preserves_projection_destinations_and_communication(
         self,
@@ -1038,50 +1033,43 @@ class TestKimiK3RegistrationTests:
             (True, True, False),
             (True, False, True),
         ):
-            with self.subTest(
-                prepared=prepared, destination=destination, parallel=parallel
+            layer._output_plan = plan if prepared else None
+            layer.output_parallel = SimpleNamespace() if parallel else None
+            backend = mock.Mock(return_value=hidden)
+            ctx = SimpleNamespace(
+                forward_mode=ForwardMode.DECODE,
+                bs=rows,
+                attn_backend=SimpleNamespace(forward=backend),
+                token_to_kv_pool=None,
+            )
+            with (
+                mock.patch.dict(os.environ, {"TOKENSPEED_MAMBA_SSM_DTYPE": "bfloat16"}),
+                mock.patch.object(
+                    layer, "_project_qkvfab", return_value=projection_outputs
+                ),
+                mock.patch.object(
+                    kimi_k3, "fp8_linear_gated_rmsnorm", return_value=output
+                ) as fused,
+                mock.patch.object(kimi_k3, "mm", return_value=output) as direct,
+                mock.patch.object(
+                    layer.o_proj, "forward", return_value=(output, None)
+                ) as projection,
             ):
-                layer._output_plan = plan if prepared else None
-                layer.output_parallel = SimpleNamespace() if parallel else None
-                backend = mock.Mock(return_value=hidden)
-                ctx = SimpleNamespace(
-                    forward_mode=ForwardMode.DECODE,
-                    bs=rows,
-                    attn_backend=SimpleNamespace(forward=backend),
-                    token_to_kv_pool=None,
+                result = layer(
+                    positions=torch.empty(rows, dtype=torch.int64),
+                    hidden_states=hidden,
+                    ctx=ctx,
+                    comm_manager=None,
+                    projection_out=output if destination else None,
                 )
-                with (
-                    mock.patch.dict(
-                        os.environ, {"TOKENSPEED_MAMBA_SSM_DTYPE": "bfloat16"}
-                    ),
-                    mock.patch.object(
-                        layer, "_project_qkvfab", return_value=projection_outputs
-                    ),
-                    mock.patch.object(
-                        kimi_k3, "fp8_linear_gated_rmsnorm", return_value=output
-                    ) as fused,
-                    mock.patch.object(kimi_k3, "mm", return_value=output) as direct,
-                    mock.patch.object(
-                        layer.o_proj, "forward", return_value=(output, None)
-                    ) as projection,
-                ):
-                    result = layer(
-                        positions=torch.empty(rows, dtype=torch.int64),
-                        hidden_states=hidden,
-                        ctx=ctx,
-                        comm_manager=None,
-                        projection_out=output if destination else None,
-                    )
-                self.assertIs(result, output)
-                self.assertEqual(
-                    fused.called, prepared and not destination and not parallel
-                )
-                self.assertEqual(direct.called, destination)
-                self.assertEqual(projection.called, parallel or not prepared)
-                if destination:
-                    self.assertIs(direct.call_args.kwargs["out"], output)
-                if parallel:
-                    self.assertIs(projection.call_args.kwargs["ctx"], ctx)
+            assert result is output
+            assert fused.called == (prepared and not destination and not parallel)
+            assert direct.called == destination
+            assert projection.called == (parallel or not prepared)
+            if destination:
+                assert direct.call_args.kwargs["out"] is output
+            if parallel:
+                assert projection.call_args.kwargs["ctx"] is ctx
 
     @_NVIDIA_ONLY
     def test_native_kimi_moe_uses_direct_ep_and_collective_tp_paths(self):
