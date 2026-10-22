@@ -17,6 +17,42 @@ install:
   - bash test/ci_system/install_deps.sh
 ut:
   commands:
-    - python3 -m pytest tokenspeed-kernel/test/ops/ -v
+    - |
+      python3 - <<'PY'
+      import collections
+      import hashlib
+      import json
+      from pathlib import Path
+
+      import pytest
+      import torch
+
+      test_file = Path("tokenspeed-kernel/test/ops/test_attention_dsv41_index_scan.py")
+      source = test_file.read_text()
+      marker = "                event.device_type == torch.autograd.DeviceType.CUDA\n"
+      assert source.count(marker) == 1
+      test_file.write_text(source.replace(marker,
+          "                event.device_type == torch.autograd.DeviceType.CPU\n"
+          '                and "LaunchKernel" in event.name\n'))
+      print("CANDIDATE_SOURCE", hashlib.sha256(test_file.read_bytes()).hexdigest(), flush=True)
+      traces = []
+      original_events = torch.profiler.profile.events
+      def record_events(self):
+          events = original_events(self)
+          device = collections.Counter(event.name for event in events
+              if event.device_type == torch.autograd.DeviceType.CUDA)
+          runtime = collections.Counter(event.name for event in events
+              if event.device_type == torch.autograd.DeviceType.CPU
+              and "LaunchKernel" in event.name)
+          traces.append((device, runtime))
+          assert sum(device.values()) == sum(runtime.values()) > 0
+          return events
+      torch.profiler.profile.events = record_events
+      result = pytest.main([str(test_file), "-v"])
+      for index, (device, runtime) in enumerate(traces):
+          print("TRACE", index, "DEVICE_EVENTS", json.dumps(device, sort_keys=True), flush=True)
+          print("TRACE", index, "RUNTIME_EVENTS", json.dumps(runtime, sort_keys=True), flush=True)
+      raise SystemExit(result)
+      PY
 report:
   github_step_summary: true
