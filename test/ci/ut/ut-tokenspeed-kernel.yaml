@@ -29,6 +29,7 @@ ut:
       import torch
 
       traces = []
+      runtime_traces = []
       original_events = torch.profiler.profile.events
       def record_events(self):
           events = original_events(self)
@@ -36,20 +37,26 @@ ut:
               event.name for event in events
               if event.device_type == torch.autograd.DeviceType.CUDA
           ))
+          runtime_traces.append(collections.Counter(
+              event.name for event in events
+              if "launch" in event.name.lower()
+          ))
           return events
       torch.profiler.profile.events = record_events
       class RepeatCapacityTest:
-          def pytest_collection_modifyitems(self, items):
-              capacity = items.pop()
-              assert capacity.name == "test_index_scan_capacity_launches_and_scratch"
-              items.extend([capacity] * 20)
+          def pytest_pyfunc_call(self, pyfuncitem):
+              if pyfuncitem.name == "test_index_scan_capacity_launches_and_scratch":
+                  for _ in range(20):
+                      pyfuncitem.obj(pyfuncitem.funcargs["device"])
+                  return True
       result = pytest.main([
           "tokenspeed-kernel/test/ops/test_attention_dsv41_dcp.py",
           "tokenspeed-kernel/test/ops/test_attention_dsv41_index_scan.py::test_index_scan_capacity_launches_and_scratch",
           "-vv", "-s",
       ], plugins=[RepeatCapacityTest()])
-      for counts in traces:
-          print("DEVICE_EVENTS", json.dumps(counts, sort_keys=True), flush=True)
+      for index, (counts, runtime) in enumerate(zip(traces, runtime_traces)):
+          print("TRACE", index, "DEVICE_EVENTS", json.dumps(counts, sort_keys=True), flush=True)
+          print("TRACE", index, "RUNTIME_EVENTS", json.dumps(runtime, sort_keys=True), flush=True)
       raise SystemExit(result)
       '''
       print("BASELINE_SOURCE", hashlib.sha256(test_file.read_bytes()).hexdigest(), flush=True)
