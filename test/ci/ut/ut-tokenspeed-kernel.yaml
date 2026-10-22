@@ -14,10 +14,50 @@ install:
   - bash test/ci_system/install_deps.sh
 ut:
   commands:
-    - python3 -m pytest tokenspeed-kernel/test/test_numerics.py -v
-    - python3 -m pytest tokenspeed-kernel/test/nvidia/thirdparty/test_trtllm_comm.py -v
-    - python3 -m pytest tokenspeed-kernel/test/nvidia/thirdparty/test_cuda.py -v
-    - python3 -m pytest tokenspeed-kernel/test/ -v --ignore=tokenspeed-kernel/test/ops --ignore=tokenspeed-kernel/test/test_numerics.py --ignore=tokenspeed-kernel/test/nvidia/thirdparty/test_trtllm_comm.py --ignore=tokenspeed-kernel/test/nvidia/thirdparty/test_cuda.py
-    - python3 -m pytest tokenspeed-kernel/test/ops/ -v
+    - |
+      python3 - <<'PY'
+      import hashlib
+      import subprocess
+      import sys
+      from pathlib import Path
+
+      test_file = Path("tokenspeed-kernel/test/ops/test_attention_dsv41_index_scan.py")
+      probe = r'''
+      import collections
+      import json
+      import pytest
+      import torch
+
+      activities = [torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
+      with torch.profiler.profile(activities=activities):
+          torch.cuda.synchronize()
+      original_exit = torch.profiler.profile.__exit__
+      def record_events(self, *args):
+          result = original_exit(self, *args)
+          counts = collections.Counter(
+              event.name for event in self.events()
+              if event.device_type == torch.autograd.DeviceType.CUDA
+          )
+          print("DEVICE_EVENTS", json.dumps(counts, sort_keys=True), flush=True)
+          return result
+      torch.profiler.profile.__exit__ = record_events
+      raise SystemExit(pytest.main([
+          "tokenspeed-kernel/test/ops/test_attention_dsv41_index_scan.py::test_index_scan_capacity_launches_and_scratch",
+          "-vv", "-s",
+      ]))
+      '''
+      print("BASELINE_SOURCE", hashlib.sha256(test_file.read_bytes()).hexdigest(), flush=True)
+      baseline = subprocess.run([sys.executable, "-c", probe], text=True, capture_output=True)
+      print(baseline.stdout, flush=True)
+      print(baseline.stderr, flush=True)
+      assert baseline.returncode == 1 and "assert launches[0]" in baseline.stdout, "baseline did not reproduce launch-count mismatch"
+      source = test_file.read_text()
+      marker = "        with torch.profiler.profile(\n"
+      assert source.count(marker) == 1
+      test_file.write_text(source.replace(marker, "        torch.cuda.synchronize()\n" + marker))
+      print("CANDIDATE_SOURCE", hashlib.sha256(test_file.read_bytes()).hexdigest(), flush=True)
+      subprocess.run([sys.executable, "-c", probe], check=True)
+      subprocess.run([sys.executable, "-m", "pytest", str(test_file), "-v"], check=True)
+      PY
 report:
   github_step_summary: true
