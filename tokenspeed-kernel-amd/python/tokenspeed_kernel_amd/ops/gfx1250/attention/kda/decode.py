@@ -1393,8 +1393,7 @@ def gluon_kda_fused_verify_gfx1250(
         LOWER_BOUND=0.0 if lower_bound is None else lower_bound,
         num_warps=8,
         num_stages=2,
-        # Keep record assertions without instrumenting every integer operation.
-        debug=True,
+        debug=False,
         sanitize_overflow=False,
     )
     return output
@@ -1502,8 +1501,7 @@ def launch_gluon_kda_fused_replay_gfx1250(
         BOUNDED=lower_bound is not None,
         num_warps=8,
         num_stages=2,
-        # Keep record assertions without instrumenting every integer operation.
-        debug=True,
+        debug=False,
         sanitize_overflow=False,
     )
 

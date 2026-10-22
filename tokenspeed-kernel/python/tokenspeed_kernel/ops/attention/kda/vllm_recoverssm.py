@@ -294,7 +294,7 @@ def vllm_triton_kda_recoverssm_commit(
         ALIGN_MODE=False,
         BATCH=batch,
         LAUNCH_DEPENDENT_KERNELS=False,
-        debug=True,
+        debug=False,
         sanitize_overflow=False,
         num_stages=2,
     )
@@ -470,7 +470,7 @@ def batched_recoverssm_commit(
         ALIGN_MODE=False,
         BATCH=batch,
         LAUNCH_DEPENDENT_KERNELS=False,
-        debug=True,
+        debug=False,
         sanitize_overflow=False,
         num_stages=2,
     )

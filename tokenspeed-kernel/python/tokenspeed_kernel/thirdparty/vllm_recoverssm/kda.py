@@ -842,12 +842,11 @@ def kda_recoverssm_verify(
         USE_LOWER_BOUND=lower_bound is not None,
         BATCH=triton.next_power_of_2(batch),
         num_warps=1,
-        # Keep explicit replay metadata assertions without instrumenting every
-        # integer operation. The four-token, 16-row tile no longer keeps the
-        # old state live, so its compiler-selected registers avoid spills.
-        # Other shapes retain the measured cap after preloading their inputs.
-        debug=True,
+        debug=False,
         sanitize_overflow=False,
+        # The four-token, 16-row tile no longer keeps the old state live, so its
+        # compiler-selected registers avoid spills. Other shapes retain the
+        # measured cap after preloading their inputs.
         maxnreg=(
             None
             if batch > 8 and spec_query_len == 4 and key_dim == value_dim == 128
