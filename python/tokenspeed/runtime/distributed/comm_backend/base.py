@@ -21,7 +21,7 @@
 """Abstract base class for communication backends."""
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import torch
 
@@ -35,6 +35,15 @@ if TYPE_CHECKING:
     from tokenspeed.runtime.execution.workspace import WorkspacePool
 
 
+class CommWork(Protocol):
+    """A collective started by an ``*_async`` op (``torch.distributed.Work``
+    is one)."""
+
+    def wait(self) -> object:
+        """Order the current stream after the collective; the host does not
+        block on a device collective."""
+
+
 class CommBackend(ABC):
     """Interface that all communication backends must implement.
 
@@ -42,7 +51,28 @@ class CommBackend(ABC):
     Process groups are looked up from pg_manager, not created here.
     """
 
+    def for_named_groups(self, name: str) -> "CommBackend":
+        """A backend running its collectives on the process groups named
+        ``name`` (``ProcessGroupManager.init_process_group``) instead of the
+        shared ones.
+
+        A named group has communicators of its own, so these collectives never
+        queue behind the shared ones: a caller overlaps transfers with the
+        shared collectives by starting them with an ``*_async`` op here.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not run on named process groups"
+        )
+
     # ---- Collective ops ----
+
+    def get_prepared_all_gather(self, group: Group, dtype: torch.dtype):
+        """Return a prepared column all-gather allowed by this backend's policy."""
+        return None
+
+    def broadcast_from_first_rank(self, tensor: torch.Tensor, group: Group) -> bool:
+        """Broadcast in place when prepared; otherwise let the caller fall back."""
+        return False
 
     def prepare_projection(
         self, spec: "ProjectionSpec", scratch_pool: "WorkspacePool | None" = None
@@ -53,6 +83,31 @@ class CommBackend(ABC):
         )
 
         return prepare_projection_workspace(spec, self, scratch_pool)
+
+    def try_fused_dp_column_linear(
+        self,
+        tensor: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scales: torch.Tensor | None,
+        owner_rows: tuple[int, ...],
+        out: torch.Tensor,
+        workspace: "ProjectionWorkspace",
+    ) -> bool:
+        """Run fused DP column-linear, or leave out untouched and return False."""
+        return False
+
+    def try_fused_dp_row_linear(
+        self,
+        tensor: torch.Tensor,
+        input_scales: torch.Tensor | None,
+        weight: torch.Tensor,
+        weight_scales: torch.Tensor | None,
+        owner_rows: tuple[int, ...],
+        out: torch.Tensor,
+        workspace: "ProjectionWorkspace",
+    ) -> bool:
+        """Run fused DP row-linear, or leave out untouched and return False."""
+        return False
 
     def projection_all_gather(
         self,
@@ -76,6 +131,8 @@ class CommBackend(ABC):
         quantize: bool,
         out: torch.Tensor | None,
         workspace: "ProjectionWorkspace",
+        *,
+        input_scales: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Exchange token/channel axes using prepared layout and fusion resources."""
         from tokenspeed.runtime.distributed.comm_backend.projection import (
@@ -83,7 +140,14 @@ class CommBackend(ABC):
         )
 
         return projection_all_to_all(
-            tensor, rows, inverse, quantize, out, workspace, self
+            tensor,
+            rows,
+            inverse,
+            quantize,
+            out,
+            workspace,
+            self,
+            input_scales=input_scales,
         )
 
     def acquire_projection_output(
@@ -132,10 +196,6 @@ class CommBackend(ABC):
         *,
         staged_max_numel: int,
         producer_direct_max_numel: int,
-        attnres_max_numel: int,
-        attnres_max_rows: int,
-        enable_lamport: bool,
-        moe_tail_max_rows: int,
         dtype: torch.dtype,
     ) -> bool:
         """Return false when the backend has no persistent buffers to prepare."""
@@ -164,6 +224,32 @@ class CommBackend(ABC):
         """
 
         return False
+
+    def all_reduce_mhc_post(
+        self,
+        tensor: torch.Tensor,
+        residual: torch.Tensor,
+        post: torch.Tensor,
+        comb: torch.Tensor,
+        group: Group,
+    ) -> torch.Tensor | None:
+        """Sum ``tensor`` over ``group`` and apply the hc=4 mHC post in one step.
+
+        Args:
+            tensor: BF16 [T, H] partial, normally from
+                ``acquire_all_reduce_outputs``.
+            residual: BF16 residual streams [T, 4, H].
+            post: FP32 post coefficients [T, 4].
+            comb: FP32 combination [T, 4 input, 4 output].
+            group: Global ranks participating in the reduction.
+
+        Returns:
+            The new BF16 residual streams [T, 4, H], or None when the backend
+            has no fused path for these operands (nothing has run then; the
+            caller reduces and applies the post itself). The answer must agree
+            on every rank of ``group``.
+        """
+        return None
 
     def acquire_all_reduce_outputs(
         self,
@@ -196,6 +282,22 @@ class CommBackend(ABC):
     def all_gather_single(
         self, output: torch.Tensor, input: torch.Tensor, group: Group
     ) -> None: ...
+
+    def all_gather_single_async(
+        self, output: torch.Tensor, input: torch.Tensor, group: Group
+    ) -> CommWork:
+        """Start ``all_gather_single`` without ordering the current stream
+        after it.
+
+        The collective reads ``input`` after the work queued on the current
+        stream so far. ``wait()`` on the returned work orders the stream it is
+        called on after the collective; ``output`` holds the gathered rows
+        from there on. The backend keeps both tensors' memory from reuse until
+        the collective completes.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} has no asynchronous all-gather"
+        )
 
     @abstractmethod
     def reduce_scatter(self, tensor: torch.Tensor, group: Group) -> torch.Tensor: ...

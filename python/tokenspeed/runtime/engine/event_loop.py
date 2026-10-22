@@ -32,9 +32,12 @@ import torch
 import torch.distributed as dist
 import zmq
 from tokenspeed_kernel.compile_monitor import compile_stats
-from tokenspeed_scheduler import Scheduler
+from tokenspeed_scheduler import Scheduler, StorageConfig
 
+from tokenspeed.runtime.cache.l3.factory import create_l3_executor
+from tokenspeed.runtime.cache.l3.metrics import L3Metrics
 from tokenspeed.runtime.configs.model_config import ModelConfig
+from tokenspeed.runtime.distributed.nccl_suspend import nccl_suspend_supported
 from tokenspeed.runtime.distributed.process_group_manager import (
     process_group_manager as pg_manager,
 )
@@ -44,6 +47,11 @@ from tokenspeed.runtime.engine.eplb_hooks import (
     EplbHooks,
     make_expert_rebalance_controller,
     rebalance_release_refusal,
+)
+from tokenspeed.runtime.engine.gc_hooks import (
+    FULL_COLLECTION_INTERVAL,
+    GcHooks,
+    freeze_startup_heap,
 )
 from tokenspeed.runtime.engine.generation_output_processor import OutputProcesser
 from tokenspeed.runtime.engine.io_struct import IpcReceiver, IpcSender, NullSender
@@ -55,11 +63,13 @@ from tokenspeed.runtime.engine.request_handler import RequestHandler
 from tokenspeed.runtime.engine.scheduler_utils import (
     RequestHistoryRows,
     advance_scheduler,
+    cache_ops_from_plan,
     engram_context_len,
     input_logprob_plan_for_forward,
     make_config,
     ngram_inputs_for_forward,
     resolve_dspark_prefix_replay_tokens,
+    sampled_top_k_for_forward,
     scheduler_cache_group_pages,
     scheduler_pd_lifecycle,
     should_use_overlap_schedule,
@@ -80,9 +90,11 @@ from tokenspeed.runtime.execution.types import (
     DpForwardMetadata,
     PendingExecution,
     PlannedForward,
+    StopCriteria,
 )
 from tokenspeed.runtime.grammar.capturable_grammar import GrammarStepInputs
 from tokenspeed.runtime.metrics.collector import EngineMetrics
+from tokenspeed.runtime.metrics.service import metrics_service
 from tokenspeed.runtime.multimodal.inputs import multimodal_context_for_forward
 from tokenspeed.runtime.pd.kv_events import (
     EventPublisherFactory,
@@ -152,6 +164,7 @@ def scheduler_config_from_args(
     server_args,
     specs,
     *,
+    storage_config: StorageConfig | None,
     max_scheduled_tokens: int,
     max_batch_size: int,
     decode_input_tokens: int,
@@ -159,16 +172,14 @@ def scheduler_config_from_args(
     enable_kv_cache_events: bool,
     prefix_replay_tokens: int,
 ):
-    """The C++ scheduler's config from the server arguments and the device build.
-
-    One place turns the two into ``make_config``'s arguments, so the knobs an
-    engine does not have -- the L3 prefetch threshold without an L3 store --
-    are translated here, not left as None for the binding.
+    """Build scheduler config from Device facts and separate Host-storage limits.
 
     Args:
         server_args: The resolved server arguments.
         specs: The ``DeviceSpecs`` of the built device side: the cache
             geometry, the cache groups and the Host tiers' page counts.
+        storage_config: Shared storage scheduling limits, or None
+            when no storage backend is configured.
         max_scheduled_tokens: Per-step prefill token budget.
         max_batch_size: Rank-local batch slots.
         decode_input_tokens: Verify width per decode step.
@@ -189,8 +200,7 @@ def scheduler_config_from_args(
         role=server_args.disaggregation_mode,
         num_snapshot_pages=specs.num_snapshot_pages,
         max_retracted_requests=specs.max_retracted_requests,
-        # The threshold is unset (None) without a store; the binding takes 0.
-        l3_prefetch_min_pages=server_args.kvstore_prefetch_min_pages if has_l3 else 0,
+        storage_config=storage_config,
         debug_force_retraction_interval=server_args.debug_force_retraction_interval,
         enable_kv_cache_events=enable_kv_cache_events,
         decode_input_tokens=decode_input_tokens,
@@ -281,9 +291,8 @@ class EventLoop:
         per_rank_max_batch = server_args.max_num_seqs // max(mapping.attn.dp_size, 1)
         # The entire device side is built in here: model runners, attention
         # backends, KV pools and the executor are locals of the builder and
-        # never come back out. ``device`` is a local too — only ``.handle``
-        # outlives this constructor, so the running loop can neither name a
-        # device object nor call a startup hook.
+        # never come back out. The startup bundle is local; only its device
+        # handle and separate CPU capabilities survive construction.
         device = build_device_side(
             server_args=server_args,
             model_config=self.model_config,
@@ -297,6 +306,18 @@ class EventLoop:
             max_batch_size=per_rank_max_batch,
         )
         self._device = device.handle
+        self._l3 = create_l3_executor(
+            server_args,
+            self.model_config,
+            draft_model_config,
+            host_cache=device.host_cache,
+            world_cpu_group=(
+                pg_manager.get_process_group("gloo", mapping.world_group)
+                if mapping.world_size > 1
+                else None
+            ),
+        )
+        storage_config = self._l3.config.scheduler if self._l3 is not None else None
         specs = device.specs
         self.multimodal_encoder_dtype = specs.multimodal_encoder_dtype
         self.cache_storage = specs.cache_storage
@@ -309,7 +330,6 @@ class EventLoop:
         # Planning reads this every round; keep the value, not the handle.
         self._uses_eager_grammar = specs.uses_eager_grammar
         cache_groups = specs.cache_groups
-        # The builder may have lowered this to the cache-group checkpoint grain.
         max_scheduled_tokens = server_args.chunked_prefill_size
         # The forward token bound also caps each multimodal encoder call.
         self._max_encoder_tokens = max_scheduled_tokens
@@ -333,14 +353,14 @@ class EventLoop:
             self.world_cpu_group = pg_manager.get_process_group(
                 "gloo", mapping.world_group
             )
-            self._dp_local_info = torch.zeros(1, 3, dtype=torch.int32)
-            self._dp_global_info = torch.zeros(mapping.world_size, 3, dtype=torch.int32)
+            self._dp_local_info = torch.zeros(1, 4, dtype=torch.int32)
+            self._dp_global_info = torch.zeros(mapping.world_size, 4, dtype=torch.int32)
         # The cache hooks gather over the TP CPU group, so the gather is sized
         # by that group, which --emulate-rank-zero backs with this process alone.
         cache_replica_tp_size = self.attn_tp_cpu_group.size()
         # Cache-op accounting + rank-synced completion tracking (see
         # cache_hooks.py); a no-op shell when the engine cannot emit cache
-        # ops -- armed hooks cost a gloo all-reduce per round. The Host L2
+        # ops -- armed hooks cost a gloo all-reduce per cache-op round. The Host L2
         # tier arms them, and so does the retraction snapshot pool (its
         # stores and restores are cache ops too). The hooks get the handle,
         # not the executor: polling goes through it.
@@ -384,8 +404,6 @@ class EventLoop:
                 unsupported.append(
                     f"{server_args.speculative_algorithm} layerwise transfer"
                 )
-            if server_args.enable_memory_saver:
-                unsupported.append("memory saver/release")
             # Prefill is forced onto the non-overlap loop by
             # should_use_overlap_schedule(). Decode uses the ordinary overlap
             # loop and the scheduler's one-step protected cache reservation.
@@ -408,6 +426,7 @@ class EventLoop:
         scheduler_cfg = scheduler_config_from_args(
             server_args,
             specs,
+            storage_config=storage_config,
             max_scheduled_tokens=max_scheduled_tokens,
             max_batch_size=per_rank_max_batch,
             decode_input_tokens=decode_input_tokens,
@@ -436,11 +455,28 @@ class EventLoop:
         self.scheduler = Scheduler(scheduler_cfg)
         self._l3_hooks = L3CacheHooks(
             self.scheduler,
-            self._device if scheduler_cfg.enable_l3_storage else None,
+            self._l3,
+            config=storage_config,
             attn_tp_size=cache_replica_tp_size,
             attn_tp_cpu_group=self.attn_tp_cpu_group,
             pp_size=self.pp_size,
             pp_cpu_group=self.pp_cpu_group,
+            metrics=(
+                L3Metrics(
+                    labels={
+                        "model_name": server_args.served_model_name,
+                        "app_key": server_args.app_key or "",
+                        "dp_rank": str(dp_rank),
+                        "tp_rank": str(attn_tp_rank),
+                        "engine_role": server_args.disaggregation_mode,
+                    },
+                    enabled=server_args.enable_metrics,
+                    reporters=server_args.metrics_reporters,
+                    event_sink=metrics_service.get_event_sink(),
+                )
+                if scheduler_cfg.enable_l3_storage and server_args.enable_metrics
+                else None
+            ),
         )
         # Per-round batch logging lives on the control plane: it reports
         # scheduler quantities (queue depth, page usage) that the loop already
@@ -511,33 +547,37 @@ class EventLoop:
         )
 
         # GPU-memory data plane (release/resume_memory_occupation). Reuses the
-        # pause controller's drain machinery; frees memory via the memory-saver
-        # adapter once the scheduler drains. See memory_occupation.py.
+        # pause controller's drain machinery; frees the memory regions once the
+        # scheduler drains. See memory_occupation.py.
         # Releasing KV is only safe if any prefix cache it backs can be cleared:
         # either prefix caching is off, or the scheduler exposes a clear. Decide
         # once here (static config) and let the controller reject unsafe releases.
         # A release is refused while an expert rebalance is in progress, and a
-        # drained release waits while chunk ops still write the weights.
+        # drained release waits while chunk ops still write the weights and
+        # while a PD transfer can still touch the cache.
         kv_cache_release_allowed = (
             not self.server_args.enable_prefix_caching
             or callable(getattr(self.scheduler, "clear_l1_cache", None))
         )
+        rebalance_refusal = rebalance_release_refusal(self._eplb)
         self._memory = MemoryOccupationController(
             send_func=self.send_to_tokenizer,
             pause_controller=self._pause,
-            adapter=TorchMemorySaverAdapter.create(
-                enable=self.server_args.enable_memory_saver
+            regions=self._pause_hooks.memory_regions(
+                TorchMemorySaverAdapter.create(
+                    enable=self.server_args.enable_memory_saver
+                ),
+                nccl_suspendable=nccl_suspend_supported(),
             ),
             enabled=self.server_args.enable_memory_saver,
             reset_caches_fn=self._pause_hooks.reset_caches_for_release,
-            kv_repair_fn=self._pause_hooks.kv_repair_after_wake,
+            transfers_idle_fn=self._pause_hooks.transfers_idle_for_release,
             kv_cache_release_allowed=kv_cache_release_allowed,
-            weights_release_refusal_fn=rebalance_release_refusal(self._eplb),
-            weights_busy_fn=(
-                (lambda: False)
-                if self._eplb is None
-                else (lambda: self._eplb.is_applying)
+            release_refusal_fn=(
+                lambda: self._pause_hooks.memory_release_refusal()
+                or rebalance_refusal()
             ),
+            weights_busy_fn=self._pause_hooks.weights_busy_for_release,
         )
 
         self.metrics = EngineMetrics(
@@ -546,10 +586,10 @@ class EventLoop:
                 "app_key": server_args.app_key or "",
                 "dp_rank": str(dp_rank),
             },
-            enabled=(
-                server_args.enable_metrics
-                and attn_tp_rank == 0
-                and "prometheus" in (server_args.metrics_reporters or [])
+            enabled=server_args.enable_metrics and attn_tp_rank == 0,
+            reporters=server_args.metrics_reporters,
+            event_sink=(
+                metrics_service.get_event_sink() if attn_tp_rank == 0 else None
             ),
         )
 
@@ -567,6 +607,7 @@ class EventLoop:
             pause_controller=self._pause,
             memory_controller=self._memory,
             device=self._device,
+            l3=self._l3,
         )
 
         # The rebalance's loop-side glue: the controller's ops ride the request
@@ -583,6 +624,10 @@ class EventLoop:
             ),
             ep_group_ranks=tuple(mapping.moe.ep_group),
         )
+        # Full garbage collections: one every FULL_COLLECTION_INTERVAL
+        # forwarded rounds, in the same round on every rank, once
+        # freeze_startup_heap has taken them over (see gc_hooks.py).
+        self._gc_hooks = GcHooks(full_collection_interval=FULL_COLLECTION_INTERVAL)
 
         self.output_processor = OutputProcesser(
             send_to_tokenizer=self.send_to_tokenizer,
@@ -659,7 +704,17 @@ class EventLoop:
         )
 
     def _submit_scheduler_requests(self, specs) -> None:
-        self._l3_hooks.submit_requests(specs)
+        if self.metrics.enabled:
+            # Queue-time histogram anchor: the specs enter the scheduler's
+            # waiting queue here. EPD-staged and pause-withheld requests reach
+            # this same funnel only when finally submitted, so their stamp
+            # excludes the staged/withheld wait.
+            enqueue_time = time.time()
+            for spec in specs:
+                state = self.output_processor.rid_to_state.get(spec.request_id)
+                if state is not None:
+                    state.scheduler_enqueue_time = enqueue_time
+        self.scheduler.submit_requests(specs)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -783,11 +838,15 @@ class EventLoop:
     def _request_abort_or_mark(
         self, request_id: str, _reason: str, *, notify_client: bool = False
     ) -> None:
-        """Mark an abort; scheduler release follows the normal lifecycle event."""
+        """Mark output and return L3 cancellation through the next head advance."""
         if notify_client:
             self.output_processor.mark_abort(request_id, notify_client=True)
         else:
             self.output_processor.mark_abort(request_id)
+        if self._l3_hooks.cancel_request(request_id):
+            state = self.output_processor.rid_to_state.get(request_id)
+            if state is not None:
+                self.output_processor.reap_finished_orphan(request_id, state)
 
     def _process_new_requests(self):
         recv_reqs = self.request_handler.recv_reqs()
@@ -859,6 +918,20 @@ class EventLoop:
                 raise ValueError(
                     "Cache-transfer PD request is missing bootstrap information"
                 )
+            if self.kv_transfer is not None and self._memory.is_releasing_or_released:
+                # Registering the transfer now would name the KV memory a
+                # release is about to unmap (and the decode node re-registers
+                # it under a new transfer session on wake), so the request
+                # could never complete: refuse it instead of buffering it.
+                state.set_finish_with_abort(
+                    "PD engine is releasing or has released its GPU memory; "
+                    "retry after resume_memory_occupation",
+                    notify_client=True,
+                )
+                self.output_processor.publish_finished_at_admission(
+                    spec.request_id, state
+                )
+                continue
             if self._device.role is DeviceRole.PD_DECODE:
                 # The prompt was computed on the prefill node.
                 state.computed_length = state.input_length
@@ -870,7 +943,7 @@ class EventLoop:
             if self._epd_hooks.try_stage(spec, state, bootstrap):
                 continue
             if self.kv_transfer is not None:
-                self.kv_transfer.register(spec.request_id, bootstrap)
+                self._pause_hooks.register_pd_admission(spec.request_id, bootstrap)
             admitted_specs.append(spec)
 
         if self._pause_hooks.withhold_admissions(admitted_specs, pause_blocked_before):
@@ -1000,6 +1073,9 @@ class EventLoop:
         self._dp_local_info[0, 0] = num_tokens
         self._dp_local_info[0, 1] = batch_size
         self._dp_local_info[0, 2] = int(forward_mode)
+        self._dp_local_info[0, 3] = (
+            batch_size - forward_op.num_extends() if executes_model_forward else 0
+        )
         dist.all_gather_single(
             self._dp_global_info,
             self._dp_local_info,
@@ -1025,6 +1101,7 @@ class EventLoop:
         return DpForwardMetadata(
             global_num_tokens=global_num_tokens,
             global_batch_size=global_batch_size,
+            global_num_decodes=self._dp_global_info[:, 3].tolist(),
             global_forward_mode=global_forward_mode,
             all_decode_or_idle=all_decode_or_idle,
             all_extend=all_extend,
@@ -1134,18 +1211,18 @@ class EventLoop:
                 # rank-identical every cycle. A no-op without an EPD admission
                 # controller (every non-EPD deployment).
                 self._epd_hooks.drain_ready_embeddings()
-                # The in-flight L3 prefetches converge first (replica MIN of
-                # the landed prefix), so a finished one is acknowledged in
-                # this round's cache poll and its request is admissible in
-                # this round's plan.
-                self._l3_hooks.converge_prefetches()
-                cache_events = self._cache_hooks.poll_ready_events()
+                cache_events = self._l3_hooks.poll_ready_events(
+                    allow_forward=not self._pause.forward_blocked,
+                    allow_storage=not self._pause.forward_blocked,
+                )
+                cache_events.extend(self._cache_hooks.poll_ready_events())
                 if cache_events:
                     # Advanced at the HEAD of the round (not funneled into the
                     # tail advance) so completed cache ops are visible to this
                     # round's next_execution_plan — deferring them would delay
                     # cache-gated admissions by a full round.
                     advance_scheduler(self.scheduler, cache_events)
+                self._l3_hooks.record_metrics()
 
                 # Every path in this round appends its committed results here;
                 # they feed back into the scheduler through the single
@@ -1161,11 +1238,33 @@ class EventLoop:
                     # Freeze: dispatched forwards can't be un-launched; commit them
                     # all before idling.
                     request_changes.extend(self._drain_in_flight(in_flight))
+                    if self._l3 is not None:
+                        execution_plan = self.scheduler.next_execution_plan()
+                        cache_ops = cache_ops_from_plan(execution_plan)
+                        self._cache_hooks.count_ops(cache_ops.device)
+                        self._l3.submit_operations(cache_ops.storage)
+                        self._device.execute(
+                            execution_plan, None, cache_ops=cache_ops.device
+                        )
                     self._pause_hooks.paused_idle_step()
                     paused_round = True
                 else:
-                    execution_plan = self.scheduler.next_execution_plan()
-                    self._cache_hooks.count_plan_ops(execution_plan)
+                    with torch.profiler.record_function(
+                        "scheduler.next_execution_plan"
+                    ):
+                        execution_plan = self.scheduler.next_execution_plan()
+                    # One snapshot-store op per retraction victim: the plan
+                    # read that drives the in-flight accounting also yields
+                    # the round's preemption count (0 on rounds without
+                    # retraction, which are the overwhelming majority).
+                    cache_ops = cache_ops_from_plan(execution_plan)
+                    if cache_ops.storage and self._l3 is None:
+                        raise RuntimeError(
+                            "cache storage operations require an L3 executor"
+                        )
+                    num_retracted = self._cache_hooks.count_ops(cache_ops.device)
+                    if num_retracted:
+                        self.metrics.record_preemptions(num_retracted)
                     # A capacity retraction whose victim could not be imaged
                     # aborted that request inside the plan build; it is gone
                     # from the scheduler, so finish it toward the client here
@@ -1173,6 +1272,8 @@ class EventLoop:
                     self.output_processor.finish_scheduler_aborted_requests(
                         execution_plan.aborts
                     )
+                    if cache_ops.storage:
+                        self._l3.submit_operations(cache_ops.storage)
 
                     forward_op = self._get_forward_op(execution_plan)
                     stats = self._get_scheduler_stats()
@@ -1205,6 +1306,7 @@ class EventLoop:
                         # output_processor.rid_to_state, which would KeyError on
                         # rids still present in the current forward_op.
                         sampling_params_list = self._gather_sampling_params(forward_op)
+                        stop_criteria = self._gather_stop_criteria(forward_op)
                         grammar_inputs = self._gather_grammar_state(forward_op)
                         ngram_inputs = ngram_inputs_for_forward(
                             forward_op,
@@ -1229,6 +1331,7 @@ class EventLoop:
                             request_changes.extend(self._drain_in_flight(in_flight))
 
                         self._mark_stats_scheduled(forward_op)
+                        self._record_request_queue_time(forward_op)
                         planned = PlannedForward(
                             forward_op=forward_op,
                             sampling_params_list=sampling_params_list,
@@ -1237,6 +1340,10 @@ class EventLoop:
                             ngram_inputs=ngram_inputs,
                             request_history_seeds=request_history_seeds,
                             input_logprob_plan=input_logprob_plan,
+                            sampled_top_k=sampled_top_k_for_forward(
+                                forward_op, self.output_processor.rid_to_state
+                            ),
+                            stop_criteria=stop_criteria,
                             multimodal_context=(
                                 multimodal_context_for_forward(
                                     forward_op,
@@ -1258,7 +1365,9 @@ class EventLoop:
                     # transfers ride the FIFO first, then the batch the role
                     # routes. ``planned`` is None on idle/empty rounds — the
                     # plan hygiene still runs.
-                    pending = self._device.execute(execution_plan, planned)
+                    pending = self._device.execute(
+                        execution_plan, planned, cache_ops=cache_ops.device
+                    )
                     if need_idle_forward:
                         self._device.run_idle_forward(dp_metadata)
                     if pending is not None:
@@ -1266,9 +1375,11 @@ class EventLoop:
                     # Online expert rebalance: count this rank's forward (real
                     # or DP-idle, rank-identical) and enqueue the ops it makes
                     # due; they complete through the request handler's gate.
-                    self._eplb_hooks.note_round(
-                        forwarded=pending is not None or need_idle_forward
-                    )
+                    forwarded = pending is not None or need_idle_forward
+                    self._eplb_hooks.note_round(forwarded=forwarded)
+                    # The same count times the full garbage collections, so
+                    # every rank pauses for one in the same round.
+                    self._gc_hooks.note_round(forwarded=forwarded)
 
                 if not paused_round:
                     # Commit from the head once the queue exceeds the depth
@@ -1313,6 +1424,27 @@ class EventLoop:
             if st is not None:
                 st.stats.mark_scheduled(now)
 
+    def _record_request_queue_time(self, forward_op) -> None:
+        # Observe each request's waiting-queue wall time once, when its first
+        # forward dispatches. The enqueue stamp rides the RequestState from
+        # _submit_scheduler_requests; a retracted request re-enters the C++
+        # waiting queue without a new stamp, and the recorded flag keeps its
+        # re-dispatch from producing a second observation. --enable-metrics.
+        if not self.metrics.enabled:
+            return
+        now = time.time()
+        rid_to_state = self.output_processor.rid_to_state
+        for rid in forward_op.request_ids:
+            state = rid_to_state.get(rid)
+            if (
+                state is None
+                or state.queue_time_recorded
+                or state.scheduler_enqueue_time <= 0.0
+            ):
+                continue
+            state.queue_time_recorded = True
+            self.metrics.observe_request_queue_time(now - state.scheduler_enqueue_time)
+
     def _gather_sampling_params(self, forward_op) -> list[SamplingParams]:
         """Look up per-request SamplingParams from the output processor. The
         sampling backend does its own flip detection + RNG state management
@@ -1321,6 +1453,14 @@ class EventLoop:
             self.output_processor.rid_to_state[rid].sampling_params
             for rid in forward_op.request_ids
         ]
+
+    def _gather_stop_criteria(self, forward_op) -> tuple[StopCriteria, ...]:
+        """Per-request stop tokens and token limits the device cuts verify
+        rounds with, from the same state the finish check reads."""
+        return tuple(
+            self.output_processor.rid_to_state[rid].stop_criteria
+            for rid in forward_op.request_ids
+        )
 
     def _gather_grammar_state(self, forward_op) -> GrammarStepInputs | None:
         """Build ``GrammarStepInputs`` for the current batch, or ``None``.
@@ -1364,9 +1504,15 @@ class EventLoop:
         if callable(send_engine_dead):
             send_engine_dead()
         close_transfer = getattr(self.kv_transfer, "close", None)
-        if callable(close_transfer):
-            close_transfer()
-        self._device.shutdown_cache()
+        try:
+            if callable(close_transfer):
+                close_transfer()
+        finally:
+            try:
+                self._device.shutdown_cache()
+            finally:
+                if self._l3 is not None:
+                    self._l3.close(timeout_s=5.0)
 
 
 def run_event_loop(
@@ -1418,6 +1564,7 @@ def run_event_loop(
         shutdown_event.set()
 
     try:
+        metrics_service.connect(port_args.metrics_producer_configs)
         if server_args.disaggregation_mode == "encode":
             # The encode role is LM-free; run the lightweight vision-tower loop
             # instead of building the full EventLoop (KV/LM scheduler).
@@ -1473,6 +1620,10 @@ def run_event_loop(
         # compilation on the data plane is a stall.
         arm_data_plane_sync_debug(server_args.device)
         mark_jit_compile_serving()
+        # The same boundary for the garbage collector: startup's objects leave
+        # its generations, and full collections run only where the loop runs
+        # them (gc_hooks.py).
+        freeze_startup_heap()
         event_loop.event_loop()
 
     except Exception:  # noqa: BLE001 - process boundary; report and signal parent
@@ -1480,6 +1631,10 @@ def run_event_loop(
         logger.error(f"Scheduler hit an exception: {traceback!s}")
         parent_process.send_signal(signal.SIGUSR1)
     finally:
+        # Cleanup can outlive the process entry point (for example, a transport
+        # thread after a partial constructor). Report the closed ready channel
+        # before waiting for cleanup so the launcher can stop the other ranks.
+        pipe_writer.close()
         # SystemExit/KeyboardInterrupt bypass the Exception handler above;
         # report their traceback without swallowing or changing the exit status.
         exception_info = sys.exc_info()
@@ -1497,6 +1652,7 @@ def run_event_loop(
                     f"{get_exception_traceback()!s}",
                 )
                 parent_process.send_signal(signal.SIGUSR1)
+        metrics_service.close(timeout=2.0)
         if (
             previous_sigterm_handler is not None
             and threading.current_thread() is threading.main_thread()

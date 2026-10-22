@@ -43,6 +43,8 @@ from unittest.mock import Mock, call, patch
 import pytest
 import torch
 
+from tokenspeed.runtime.engine.scheduler_utils import cache_ops_from_plan
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ci_system.ci_register import register_cuda_ci  # noqa: E402
 
@@ -64,8 +66,6 @@ from tokenspeed.runtime.cache.transfer.layout import (  # noqa: E402
 from tokenspeed.runtime.cache.transfer.ops import (  # noqa: E402
     CacheTransfer,
     HostTier,
-    PrefetchOp,
-    PrefetchRow,
     RestoreOp,
     SnapshotOp,
 )
@@ -277,7 +277,6 @@ def _build(
         patch.object(
             executor_module, "compute_host_lcm_block_bytes", return_value=1_000_000
         ),
-        patch.object(executor_module, "check_host_memory"),
         patch.object(
             executor_module,
             "HostCacheStorage",
@@ -297,6 +296,11 @@ def _build(
         ),
         patch.object(
             executor_module, "new_cache_stream", side_effect=[write_stream, load_stream]
+        ),
+        patch.object(
+            executor_module.device_module,
+            "stream",
+            side_effect=lambda _stream: nullcontext(),
         ),
         patch.object(
             executor_module, "HostTransferLane", side_effect=list(lanes.values())
@@ -319,6 +323,8 @@ def _build(
             io_backend="direct",
             attn_tp_rank=0,
             kvp_rank=rank,
+            nprocs_per_node=1,
+            world_cpu_group=None,
         )
     return executor, slot_state, lanes
 
@@ -369,6 +375,8 @@ def test_constructor_requires_a_tier_and_resolves_the_pool_against_the_layout():
                 io_backend="direct",
                 attn_tp_rank=0,
                 kvp_rank=0,
+                nprocs_per_node=1,
+                world_cpu_group=None,
             )
         with pytest.raises(ValueError, match="slot-state rows"):
             HostCacheExecutor(
@@ -381,6 +389,8 @@ def test_constructor_requires_a_tier_and_resolves_the_pool_against_the_layout():
                 io_backend="direct",
                 attn_tp_rank=0,
                 kvp_rank=0,
+                nprocs_per_node=1,
+                world_cpu_group=None,
             )
     # Too small a size holds no whole block and is refused, not rounded to none.
     with pytest.raises(ValueError, match="no whole LCM block"):
@@ -437,8 +447,11 @@ def test_count_plan_ops_counts_each_request_of_a_snapshot_or_restore_batch():
             RestoreOp=_RestoreBatch,
         ),
     ):
-        hooks.count_plan_ops(plan)
+        num_retracted = hooks.count_ops(cache_ops_from_plan(plan).device)
     assert hooks._num_inflight == 3
+    # The return counts retraction victims only: one per snapshot-store
+    # request, restores excluded — it feeds the preemption counter.
+    assert num_retracted == 2
 
 
 # ----------------------------------------------------------------------
@@ -592,7 +605,7 @@ def test_slot_state_only_image_round_trips_through_empty_ops():
     fence_stream = Mock()
     with patch.object(executor_module.device_module, "Event", return_value=finish):
         executor.submit_write_backs(
-            [_snapshot_op(1, 0, [], pool_index=2)],
+            [_snapshot_op(1, 1, [], pool_index=2)],
             prerequisite_stream="x",
             fence_stream=fence_stream,
         )
@@ -600,7 +613,7 @@ def test_slot_state_only_image_round_trips_through_empty_ops():
     lanes["ordered"].start_d2h.assert_not_called()
     fence_stream.wait_event.assert_called_once_with(finish)
     assert [slot for slot, _, _, _ in slot_state.exports] == [2]
-    assert slot_state.exports[0][1].data_ptr() == executor.blob_arena[0].data_ptr()
+    assert slot_state.exports[0][1].data_ptr() == executor.blob_arena[1].data_ptr()
     assert _acks(executor.poll_results()) == _snapshot_done(1)
 
     tracker = executor._load_trackers[0][0]
@@ -609,14 +622,14 @@ def test_slot_state_only_image_round_trips_through_empty_ops():
         patch.object(executor_module.device_module, "Event", return_value=finish),
     ):
         executor.submit_load_backs(
-            [_restore_op(2, 0, [], pool_index=5)],
+            [_restore_op(2, 1, [], pool_index=5)],
             prerequisite_stream="default-stream",
         )
     lanes["restore_l2"].start_h2d.assert_not_called()
     lanes["restore_pool"].start_h2d.assert_not_called()
     executor.load_stream.wait_stream.assert_called_once_with("default-stream")
     assert [(slot, rid) for slot, _, _, rid in slot_state.imports] == [(5, "r2")]
-    assert slot_state.imports[0][1].data_ptr() == executor.blob_arena[0].data_ptr()
+    assert slot_state.imports[0][1].data_ptr() == executor.blob_arena[1].data_ptr()
     tracker.begin_load.assert_not_called()
     assert _acks(executor.poll_results()) == _restore_done(2)
 
@@ -742,7 +755,7 @@ def test_load_backs_start_before_restores_on_the_load_stream():
     ):
         executor.submit_load_backs(
             [
-                _restore_op(3, 0, [(HostTier.SNAPSHOT_POOL, _transfer(0, 1, 2))]),
+                _restore_op(3, 1, [(HostTier.SNAPSHOT_POOL, _transfer(0, 1, 2))]),
                 _LoadBackOp([4], [[0]], [[5]], [[3]]),
             ],
             prerequisite_stream="default-stream",
@@ -756,14 +769,14 @@ def test_restore_rows_need_their_tier_and_run_outside_capture():
     layout = _layout(2, [("full", 2)])
     # Without an L2 tier a restore naming L2 rows is a configuration error.
     executor, _, _ = _build(layout=layout, shard_counts=[1], l2_tier=False)
-    l2_row = _restore_op(1, 0, [(HostTier.L2, _transfer(0, 1, 2, key="h"))])
+    l2_row = _restore_op(1, 1, [(HostTier.L2, _transfer(0, 1, 2, key="h"))])
     with patch.object(executor_module, "get_is_capture_mode", return_value=False):
         with pytest.raises(RuntimeError, match="no L2 tier"):
             executor.submit_load_backs(
                 [l2_row],
                 prerequisite_stream="s",
             )
-    pool_row = _restore_op(2, 0, [(HostTier.SNAPSHOT_POOL, _transfer(0, 1, 2))])
+    pool_row = _restore_op(2, 1, [(HostTier.SNAPSHOT_POOL, _transfer(0, 1, 2))])
     with patch.object(executor_module, "get_is_capture_mode", return_value=True):
         with pytest.raises(RuntimeError, match="graph capture"):
             executor.submit_load_backs(
@@ -774,7 +787,7 @@ def test_restore_rows_need_their_tier_and_run_outside_capture():
     executor, _, _ = _build(layout=layout, shard_counts=[1], snapshot_host_gb=0)
     with pytest.raises(RuntimeError, match="retraction snapshot pool"):
         executor.submit_write_backs(
-            [_snapshot_op(3, 0, [])],
+            [_snapshot_op(3, 1, [])],
             prerequisite_stream="s",
             fence_stream=Mock(),
         )
@@ -794,27 +807,28 @@ def test_plan_level_checks_refuse_duplicates_bad_slots_and_ragged_tiers():
     with patch.object(executor_module.Cache, "WriteBackOp", _WriteBackOp, create=True):
         with pytest.raises(ValueError, match="duplicate snapshot op id"):
             executor.submit_write_backs(
-                [l2_leg, _snapshot_op(1, 0, []), _snapshot_op(1, 1, [])],
+                [l2_leg, _snapshot_op(1, 1, []), _snapshot_op(1, 2, [])],
                 prerequisite_stream="s",
                 fence_stream=fence,
             )
         with pytest.raises(ValueError, match="duplicate snapshot slot"):
             executor.submit_write_backs(
-                [l2_leg, _snapshot_op(1, 0, []), _snapshot_op(2, 0, [])],
+                [l2_leg, _snapshot_op(1, 1, []), _snapshot_op(2, 1, [])],
                 prerequisite_stream="s",
                 fence_stream=fence,
             )
-        with pytest.raises(IndexError, match="snapshot slot 2"):
-            executor.submit_write_backs(
-                [l2_leg, _snapshot_op(1, 2, [])],
-                prerequisite_stream="s",
-                fence_stream=fence,
-            )
+        for bad_slot in (0, 3):
+            with pytest.raises(IndexError, match=f"snapshot slot {bad_slot} "):
+                executor.submit_write_backs(
+                    [l2_leg, _snapshot_op(1, bad_slot, [])],
+                    prerequisite_stream="s",
+                    fence_stream=fence,
+                )
     ragged = RestoreOp(
         op_id=5,
         request_id="r",
         request_pool_index=1,
-        snapshot_slot=0,
+        snapshot_slot=1,
         transfers=(_transfer(0, 1, 1),),
         source_tier=(),
     )
@@ -860,7 +874,7 @@ def test_kvp_ranks_store_their_owned_subsets_on_both_legs():
             _WriteBackOp(l2_rows, [[0], [0]], [[1], [2]], [[3], [6]], [False, False]),
             _snapshot_op(
                 5,
-                0,
+                1,
                 [
                     _transfer(0, 5, 1),
                     _transfer(0, 6, 4),
@@ -899,63 +913,6 @@ def test_kvp_ranks_store_their_owned_subsets_on_both_legs():
     bad = _snapshot_op(6, 1, [_transfer(0, 1, 2)])
     with pytest.raises(ValueError, match="residue class"):
         executor.submit_write_backs([bad], prerequisite_stream="s", fence_stream=Mock())
-
-
-def test_kvp_rank_backs_up_and_prefetches_only_the_host_pages_it_owns():
-    """L3 sees the rows this rank owns, by local Host id: the L2 write's
-    backup list and a prefetch op's pages both pass the owner filter, so a
-    peer's page is neither put nor fetched from here."""
-    layout = _layout(2, [("full", 2)])
-    # Device 1 -> Host 3 is rank 0's (local Host 2); Device 2 -> Host 6 is
-    # rank 1's (local Host 3).
-    for rank, owned_page in ((0, (0, 2, "h3", 0)), (1, (0, 3, "h6", 1))):
-        executor, _, lanes = _build(layout=layout, shard_counts=[2], rank=rank)
-        store = _WriteBackOp([11], [[0, 0]], [[1, 2]], [[3, 6]], [True])
-        store.content_hashes = [["h3", "h6"]]
-        store.page_offsets = [[0, 1]]
-        finish = Mock()
-        finish.query.return_value = False
-        lanes["pinned"].start_d2h.return_value = finish
-        with patch.object(
-            executor_module.Cache, "WriteBackOp", _WriteBackOp, create=True
-        ):
-            executor.submit_write_backs(
-                [store],
-                prerequisite_stream="s",
-                fence_stream=Mock(),
-            )
-        ((pending_finish, ack),) = executor._completions._pending
-        assert pending_finish is finish
-        assert (ack.op_ids, ack.backup_pages) == ([11], [owned_page])
-        # The prefetch of the same two pages fetches only this rank's one; the
-        # peer's page counts as landed here so the replica MIN is the owners'.
-        executor.l3_store = Mock()
-        executor.l3_store.prefetch.return_value = [True]
-        executor._l3_prefetch_timeout_base_s = 10.0
-        executor._l3_prefetch_timeout_per_page_s = 0.0
-        executor._l3_prefetch_batch_pages = 4
-        executor.submit_prefetches(
-            [
-                PrefetchOp(
-                    op_id=12,
-                    request_id="r12",
-                    first_page=0,
-                    num_pages=2,
-                    rows=(
-                        PrefetchRow(0, 3, "h3", 0, 0),
-                        PrefetchRow(0, 6, "h6", 1, 1),
-                    ),
-                )
-            ]
-        )
-        for _ in range(200):
-            progress = executor.l3_prefetch_progress()
-            if progress[12][0]:
-                break
-            time.sleep(0.01)
-        assert progress[12] == (True, 2)
-        executor.l3_store.prefetch.assert_called_once_with([owned_page])
-        executor._l3_prefetch_lane.shutdown(wait=True)
 
 
 @pytest.mark.parametrize("backend", ["dma", "auto"])
@@ -1127,6 +1084,8 @@ def _round_trip_two_ranks(io_backend, executors):
                 io_backend=io_backend,
                 attn_tp_rank=0,
                 kvp_rank=rank,
+                nprocs_per_node=1,
+                world_cpu_group=None,
             )
     assert (executors[0].num_host_pages, executors[0].num_snapshot_pages) == (4, 4)
 
@@ -1147,9 +1106,9 @@ def _round_trip_two_ranks(io_backend, executors):
         [21], [[0, 0, 0, 0]], [[1, 2, 3, 4]], [[5, 6, 7, 8]], [False]
     )
     pool_store = _snapshot_op(
-        1, 0, [_transfer(0, v, v - 4) for v in range(5, 9)], pool_index=1
+        1, 1, [_transfer(0, v, v - 4) for v in range(5, 9)], pool_index=1
     )
-    empty_store = _snapshot_op(3, 1, [], pool_index=2)
+    empty_store = _snapshot_op(3, 2, [], pool_index=2)
     stream = torch.cuda.current_stream()
     with patch.object(executor_module.Cache, "WriteBackOp", _WriteBackOp, create=True):
         for executor in executors.values():
@@ -1171,12 +1130,12 @@ def _round_trip_two_ranks(io_backend, executors):
     torch.cuda.synchronize()
     restore = _restore_op(
         2,
-        0,
+        1,
         [(HostTier.L2, _transfer(0, v + 4, v, key=f"h{v}")) for v in range(1, 5)]
         + [(HostTier.SNAPSHOT_POOL, _transfer(0, v - 4, v)) for v in range(5, 9)],
         pool_index=3,
     )
-    empty_restore = _restore_op(4, 1, [], pool_index=0)
+    empty_restore = _restore_op(4, 2, [], pool_index=0)
     for executor in executors.values():
         executor.submit_load_backs(
             [restore, empty_restore],
