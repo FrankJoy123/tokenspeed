@@ -28,12 +28,8 @@ from functools import cache
 from weakref import WeakValueDictionary
 
 import torch
-from flashinfer.attention.prims_ts._q_token_kv_block_sparse_policy import (
-    SUPPORTED_GROUP_SIZES,
-)
 from flashinfer.attention.prims_ts.decode import (
     suggest_q_token_kv_block_sparse_group_size,
-    validate_q_token_kv_block_sparse_group_size,
 )
 from flashinfer.attention.prims_ts.q_token_kv_block_sparse_metadata import (
     QTokenKvBlockSparsePagedTSWrapper,
@@ -60,6 +56,14 @@ def _group_offsets(offsets: tuple[int, ...], group_size: int) -> tuple[int, ...]
 @cache
 def _warmup_group_sizes(q_heads: int, kv_heads: int, max_rows: int) -> tuple[int, ...]:
     """Cache native-legal groups for one head geometry and startup row budget."""
+    # Keep the private policy dependency inside startup group enumeration.
+    from flashinfer.attention.prims_ts._q_token_kv_block_sparse_policy import (
+        SUPPORTED_GROUP_SIZES,
+    )
+    from flashinfer.attention.prims_ts.decode import (
+        validate_q_token_kv_block_sparse_group_size,
+    )
+
     offsets = torch.tensor([0, max_rows], dtype=torch.int32, device="cpu")
     # Validate the geometry before filtering unsupported groups, so invalid
     # model heads or row budgets still raise instead of returning no groups.
@@ -67,8 +71,8 @@ def _warmup_group_sizes(q_heads: int, kv_heads: int, max_rows: int) -> tuple[int
         offsets, max_rows, q_heads, kv_heads, group_size=1
     )
     groups = []
-    # PrimTS keeps its candidates in a private policy module. Its public
-    # validator owns the membership and head-tile limits; do not copy them.
+    # The public validator owns the membership and head-tile limits; do not
+    # copy them into the adapter.
     for group in SUPPORTED_GROUP_SIZES:
         if group > max_rows:
             continue

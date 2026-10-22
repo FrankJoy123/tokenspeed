@@ -503,7 +503,9 @@ legal query groups and static/persistent scheduler variants. The FlashInfer
 adapter reads the upstream policy's finite candidate groups and uses the public
 group validator to enforce head tiling and membership limits. It caches the
 legal set per head geometry and startup row budget, without copying native
-limits or scanning every possible token count. Runtime retains PrimTS's native
+limits or scanning every possible token count. Candidate policy imports occur
+inside this startup enumeration, keeping ordinary plan/run on the public
+FlashInfer interface. Runtime retains PrimTS's native
 group-selection heuristic; startup prepares kernels without profiling tactics.
 Scratch queries, KV and metadata keep these preparations independent of model
 cache contents and graph-owned plans. Packed row counts are dynamic in the
