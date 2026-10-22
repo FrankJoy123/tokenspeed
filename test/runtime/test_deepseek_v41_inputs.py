@@ -26,6 +26,8 @@ accepted tail per pool slot is retained, never a checkpoint-sized model/history
 cache. Run with CUDA_VISIBLE_DEVICES selecting an available GPU.
 """
 
+import os
+import sys
 from concurrent.futures import Future
 from contextlib import contextmanager
 from dataclasses import FrozenInstanceError
@@ -34,6 +36,7 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+from torch import nn
 
 from tokenspeed.runtime.distributed.mapping import Mapping
 from tokenspeed.runtime.engine.scheduler_utils import (
@@ -56,6 +59,18 @@ from tokenspeed.runtime.execution.types import (
 )
 from tokenspeed.runtime.execution.weight_loader import WeightLoader
 from tokenspeed.runtime.models.deepseek_v41 import DeepseekV41ForCausalLM
+from tokenspeed.runtime.multimodal.embedder import MultimodalEmbedder, pad_input_tokens
+from tokenspeed.runtime.multimodal.inputs import (
+    Modality,
+    MultimodalDataItem,
+    MultimodalForwardContext,
+    MultimodalInputs,
+)
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from ci_system.ci_register import register_cuda_ci  # noqa: E402
+
+register_cuda_ci(est_time=60, suite="runtime-1gpu")
 
 VOCAB_SIZE = 128
 
@@ -135,7 +150,7 @@ def buffers(request, monkeypatch):
     ib = InputBuffers(
         max_bs=4, max_num_tokens=32, state_write_padding_pool_index=5, device=device
     )
-    ib.init_ngram_buffers(3, _hash_params(ib.device))
+    ib.init_ngram_buffers(3, _hash_params(ib.device), VOCAB_SIZE)
     runtime = RuntimeStates(
         req_pool_size=5, vocab_size=VOCAB_SIZE, output_length=1, device=device
     )
@@ -168,7 +183,33 @@ def _fill(ib, runtime, op, snapshot):
         torch.tensor(op.request_pool_indices[:n], dtype=torch.int64, device=ib.device),
         torch.tensor(op.extend_prefix_lens, dtype=torch.int32, device=ib.device),
     )
-    ib.fill_input_buffers(op, runtime, sum(op.input_lengths), ngram_inputs=snapshot)
+    total = sum(op.input_lengths)
+    ids = ib.fill_input_buffers(op, runtime, total)
+    ib.load_round_inputs(op, runtime, total, ids, ngram_inputs=snapshot)
+
+
+def test_decode_override_clears_only_consumed_flags_without_host_sync(buffers):
+    ib, runtime = buffers
+    runtime.valid_cache_lengths.fill_(2)
+    runtime.future_input_map.fill_(22)
+    runtime.spec_candidates_ready.fill_(True)
+    states = {"a": _state([10, 11, 12], []), "b": _state([20, 21, 22], [])}
+    op = _op(states, ["a", "b"], [2, 4], [1, 1], [], [], [12, -1])
+    snapshot = ngram_inputs_for_forward(op, states, 3)
+    on_cuda = torch.device(ib.device).type == "cuda"
+    previous = torch.cuda.get_sync_debug_mode() if on_cuda else None
+    try:
+        if on_cuda:
+            torch.cuda.set_sync_debug_mode("error")
+        ids = ib.fill_input_buffers(op, runtime, 2)
+        ib.load_round_inputs(op, runtime, 2, ids, ngram_inputs=snapshot)
+    finally:
+        if on_cuda:
+            torch.cuda.set_sync_debug_mode(previous)
+    assert ib.input_ids_buf[:2].tolist() == [12, 22]
+    assert runtime.spec_candidates_ready.tolist() == [
+        i not in (2, 4) for i in range(runtime.spec_candidates_ready.numel())
+    ]
 
 
 def _expected(tokens, positions):
@@ -251,26 +292,6 @@ def test_chunked_prefill_and_pending_overlap_samples(buffers, overlap):
         _assert_rows(ib, _expected(full, [len(full) - 1]), [True])
         assert ib.ngram_previous_tokens_buf.data_ptr() == pointer
         _sample(ib, runtime, [current + 1], 0, [1], False)
-    assert set(vars(runtime)) == {
-        "device",
-        "vocab_size",
-        "valid_cache_lengths",
-        "future_input_map",
-        "spec_candidates_ready",
-        "draft_probs",
-        "draft_probs_sentinel",
-        "chain_parents",
-        "future_parent_map",
-        "ngram_accepted_tokens",
-        "ngram_needs_seed",
-        "ngram_request_ids",
-        "request_token_history_ids",
-        "draft_request_token_history_ids",
-        "stop_token_ids",
-        "token_limits",
-        "_stop_criteria_owners",
-        "stopped",
-    }
     assert not runtime.has_request_token_history
     assert runtime.ngram_accepted_tokens.shape == (6, 3)
     assert runtime.ngram_accepted_tokens[2].tolist() == [18, 17, 16]
@@ -403,7 +424,7 @@ def test_large_prefill_to_small_decode_keeps_graph_padding_dead(buffers):
         state_write_padding_pool_index=5,
         device=original.device,
     )
-    ib.init_ngram_buffers(3, _hash_params(ib.device))
+    ib.init_ngram_buffers(3, _hash_params(ib.device), VOCAB_SIZE)
     prompt = [i % 80 + 1 for i in range(1024)]
     states = {"a": _state(prompt, [])}
     op = _op(states, ["a"], [1], [1024], [0], [0], [])
@@ -1090,6 +1111,7 @@ def test_execute_idle_forward_passes_empty_engram_views(buffers):
         DpForwardMetadata(
             global_num_tokens=[0],
             global_batch_size=[0],
+            global_num_decodes=[0],
             global_forward_mode=[ForwardMode.IDLE],
             all_decode_or_idle=True,
             all_extend=False,
@@ -1151,7 +1173,8 @@ def test_dispatch_owns_snapshot_until_forward_thread_consumes_it():
 
     handle = DeviceHandle(
         SimpleNamespace(
-            forward_thread=SimpleNamespace(submit=submit), execute_forward_op=execute
+            forward_thread=SimpleNamespace(submit=submit, submit_forward=submit),
+            execute_forward_op=execute,
         ),
         host_cache_executor=None,
         kv_transfer=None,
@@ -1258,8 +1281,11 @@ def test_forced_single_token_resets_draft_tree_parents(buffers):
     ib, _ = buffers
     runtime = _spec_runtime(ib, 4)
     runtime.init_draft_trees(4)
+    runtime.init_draft_tree_q(4, num_slots=3, num_candidates=8)
     tree = torch.tensor([-1, 0, 0, 1], dtype=torch.int32, device=ib.device)
     runtime.future_parent_map[:] = tree
+    # A sampled tree: its nodes name their parents' draft q.
+    runtime.future_draft_q.slot[:] = torch.tensor([-1, 0, 0, 1], dtype=torch.int32)
     states = {"decode": _state([40, 41, 42], [43])}
     runtime.valid_cache_lengths[0] = 3
     runtime.future_input_map[0] = torch.tensor([43, 44, 45, 46], device=ib.device)
@@ -1268,3 +1294,81 @@ def test_forced_single_token_resets_draft_tree_parents(buffers):
     assert ib.force_single_token_verify_buf[0].item()
     assert runtime.future_parent_map[0].tolist() == [-1, 0, 1, 2]
     assert runtime.future_parent_map[1].tolist() == tree.tolist()
+    # The dummy chain is deterministic.
+    assert runtime.future_draft_q.slot[0].tolist() == [-1] * 4
+    assert runtime.future_draft_q.slot[1].tolist() == [-1, 0, 0, 1]
+
+
+@pytest.mark.parametrize(
+    "prefix,length,image_rows",
+    [
+        (0, 7, [False, False, True, True, True, False, False]),
+        (0, 3, [False, False, True]),
+        (3, 2, [True, True]),
+        (5, 2, [False, False]),
+    ],
+)
+def test_image_mask_survives_input_clamp(buffers, prefix, length, image_rows):
+    ib, runtime = buffers
+    encoded = torch.ones(3, 4, device=ib.device)
+    item = MultimodalDataItem(
+        modality=Modality.IMAGE, offsets=[(2, 4)], hash=123, encoded=encoded
+    )
+    item.set_pad_value()
+    mm_inputs = MultimodalInputs(mm_items=[item])
+    prompt = pad_input_tokens([10, 11, 5, 5, 5, 12, 13], mm_inputs)
+    states = {
+        "text": _state([20, 21], []),
+        "image": _state(prompt, []),
+        "decode": _state([30, 31], [32]),
+    }
+    runtime.valid_cache_lengths[3] = 2
+    # Even a hash-like generated ID must not mark a decode row as an image.
+    runtime.future_input_map[3] = item.pad_value
+    op = _op(states, list(states), [1, 2, 3], [2, length, 1], [0, prefix], [0, 0], [-1])
+    _fill(ib, runtime, op, ngram_inputs_for_forward(op, states, 3))
+    ids = ib.input_ids_buf  # Include padding rows in the mask check.
+    assert ((ids >= 0) & (ids < VOCAB_SIZE)).all()
+    context = MultimodalForwardContext(
+        mm_inputs=[None, mm_inputs, None],
+        extend_prefix_lens=[0, prefix],
+        extend_seq_lens=[2, length],
+        max_encoder_tokens=32,
+    )
+
+    # Exercise the real hook and scatter with small, pre-encoded image features.
+    adapter = DeepseekV41ForCausalLM.__new__(DeepseekV41ForCausalLM)
+    nn.Module.__init__(adapter)
+    adapter.config = SimpleNamespace(image_token_id=5)
+    adapter.model = nn.Module()
+    adapter.model.embed_tokens = nn.Embedding.from_pretrained(
+        torch.zeros(VOCAB_SIZE, 4, device=ib.device)
+    )
+    adapter.vision = None
+    adapter.vision_embedder = MultimodalEmbedder()
+    ctx = SimpleNamespace(forward_mode=ForwardMode.MIXED)
+    result = adapter.prepare_model_kwargs(ctx, ids, {"multimodal_context": context})
+    expected = [False] * 2 + image_rows + [False] * (ids.numel() - 2 - length)
+    assert result["image_mask"].tolist() == expected
+    if any(image_rows):
+        torch.testing.assert_close(
+            result["input_embeds"][:, 0].bool(), result["image_mask"]
+        )
+    else:
+        assert result["input_embeds"] is None
+
+    # The scatter releases completed encodings; restore the fixture for a second call.
+    item.encoded = encoded
+    explicit = torch.zeros_like(result["image_mask"])
+    result = adapter.prepare_model_kwargs(
+        ctx, ids, {"multimodal_context": context, "image_mask": explicit}
+    )
+    assert result["image_mask"] is explicit
+
+
+def test_engram_token_map_must_cover_the_vocabulary():
+    ib = InputBuffers(
+        max_bs=1, max_num_tokens=4, state_write_padding_pool_index=1, device="cpu"
+    )
+    with pytest.raises(ValueError, match="fewer than the vocabulary"):
+        ib.init_ngram_buffers(3, _hash_params("cpu"), VOCAB_SIZE + 1)

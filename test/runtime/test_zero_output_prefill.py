@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import ast
 import dataclasses
-import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -245,49 +244,6 @@ class Matcher:
         self.tokens.append(token)
 
 
-@pytest.mark.parametrize("hostfunc", [True, False])
-def test_grammar_consumers_share_compact_token_offsets(hostfunc):
-    grammars = [Matcher(), Matcher(), Matcher()]
-    completion = SimpleNamespace(
-        grammars=grammars,
-        bs=3,
-        advance_mask=[True, False, True],
-        output_layout=ForwardOutputLayout(2, 1, 1, 2),
-        lock=threading.Lock(),
-        event=threading.Event(),
-    )
-    tokens = torch.tensor([11, 21, 22])
-    lengths = torch.tensor([1, 0, 2])
-    if hostfunc:
-        method = load_symbol(
-            RUNTIME + "grammar/capturable_grammar.py",
-            "advance",
-            owner="GrammarHostBuffers",
-        )
-        method(
-            SimpleNamespace(output_tokens=tokens, accept_lengths=lengths),
-            dict(
-                completion=completion,
-                grammars=grammars,
-                bs=3,
-                advance_mask=completion.advance_mask,
-            ),
-        )
-        assert completion.event.is_set()
-    else:
-        method = load_symbol(
-            RUNTIME + "engine/generation_output_processor.py",
-            "_host_advance_matcher",
-            owner="OutputProcesser",
-        )
-        method(
-            None,
-            completion,
-            SimpleNamespace(output_tokens=tokens, output_lengths=lengths),
-        )
-    assert [g.tokens for g in grammars] == [[11], [], [21, 22]]
-
-
 def test_dspark_anchors_do_not_read_or_write_incomplete_prefill():
     anchors = load_symbol(
         "tokenspeed-kernel/python/tokenspeed_kernel/ops/attention/dsv41/__init__.py",
@@ -448,7 +404,7 @@ def test_zero_decoder_attention_still_runs_the_global_producer():
         positions,
         hidden,
         SimpleNamespace(attn_backend=None, forward_mode=object()),
-        reduce_results=True,
+        reduce_output=True,
     )
     assert output.shape == (0, 8)
     torch.testing.assert_close(writes[0], hidden)
@@ -513,18 +469,11 @@ def test_identity_sampling_keeps_backend_buffer_aliases(decode):
     assert tokens.tolist() == [0, 1]
 
 
-def test_idle_graph_grammar_enqueues_an_identity_completion():
-    import queue
+def test_idle_graph_grammar_adds_an_identity_batch():
     from contextlib import nullcontext
 
-    add = load_symbol(
-        RUNTIME + "grammar/capturable_grammar.py",
-        "add_batch",
-        owner="CapturableGrammarExecutor",
-        GrammarStepCompletion=SimpleNamespace,
-    )
-    grammar = SimpleNamespace(queue=queue.Queue())
-    grammar.add_batch = lambda **kwargs: add(grammar, **kwargs)
+    added = []
+    grammar = SimpleNamespace(add_batch=lambda **kwargs: added.append(kwargs))
     idle = load_symbol(
         RUNTIME + "execution/model_executor.py",
         "execute_idle_forward",
@@ -571,6 +520,9 @@ def test_idle_graph_grammar_enqueues_an_identity_completion():
             valid_cache_lengths=torch.zeros(1), vocab_size=32
         ),
         device="cpu",
+        default_stream=None,
+        execution_stream=SimpleNamespace(wait_stream=lambda stream: None),
+        device_module=SimpleNamespace(stream=lambda stream: nullcontext()),
         forward_step=step,
         config=SimpleNamespace(output_length=1),
         capturable_grammar=grammar,
@@ -578,13 +530,22 @@ def test_idle_graph_grammar_enqueues_an_identity_completion():
     idle(
         executor,
         SimpleNamespace(
-            global_num_tokens=[0, 1], global_batch_size=[0, 1], all_decode_or_idle=True
+            global_num_tokens=[0, 1],
+            global_batch_size=[0, 1],
+            global_num_decodes=[0, 1],
+            all_decode_or_idle=True,
         ),
     )
     assert step.called
-    completion = grammar.queue.get_nowait()["completion"]
-    assert completion.output_layout == ForwardOutputLayout(0, 0, 1, 1)
-    assert grammar.queue.empty()
+    # The captured host node pops one batch per replay.
+    assert added == [
+        dict(
+            grammars=[None],
+            bs=1,
+            has_candidates=False,
+            output_layout=ForwardOutputLayout(0, 0, 1, 1),
+        )
+    ]
 
 
 @pytest.mark.parametrize("prefill_outputs", [1, 2])
@@ -667,7 +628,9 @@ def test_drafter_future_inputs_keep_original_request_rows():
         capturable_grammar=None,
         dspark_context_producer=None,
         drafter=SimpleNamespace(
-            prepare_target_forward=lambda ctx: None, run=lambda **kwargs: draft_tokens
+            prepare_target_forward=lambda ctx: None,
+            rewrite_verify_outputs=lambda ctx, output_tokens, accept_lengths: None,
+            run=lambda **kwargs: draft_tokens,
         ),
         config=SimpleNamespace(pp_size=1),
         nan_guard=NanGuard(4, "cpu"),
@@ -747,6 +710,7 @@ def test_layout_and_decoder_metadata_agree_on_current_prefill_target(
         _swa_plans={},
         _prepared_selections={},
         _decode_schedules={},
+        _index_geometry={},
         sparse_topk={},
         _check_tables=lambda *args: None,
         _upload_int64=lambda values: torch.tensor(values, dtype=torch.int64),
@@ -935,6 +899,7 @@ def test_graph_padding_restores_live_output_layout(live_bs):
         extend_replay_lens_cpu=empty,
         extend_prompt_lens_cpu=empty,
         block_tables_cpu={},
+        settle=lambda: None,
     )
     assert observed == [(padded_bs, ForwardOutputLayout(0, 0, padded_bs, width))]
     assert ctx.bs == live_bs

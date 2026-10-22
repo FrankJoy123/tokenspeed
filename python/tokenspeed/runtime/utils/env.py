@@ -28,6 +28,7 @@ from tokenspeed_kernel.platform import pdl_enabled
 from tokenspeed.runtime.utils.server_args import ServerArgs
 
 global_server_args_dict: dict = {
+    "disaggregation_mode": ServerArgs.disaggregation_mode,
     "attention_backend": ServerArgs.attention_backend,
     "sampling_backend": ServerArgs.sampling_backend,
     "attention_use_fp4_indexer_cache": ServerArgs.attention_use_fp4_indexer_cache,
@@ -87,6 +88,7 @@ def global_server_args_dict_update(server_args: ServerArgs):
     pdl_enabled(not server_args.disable_pdl)
     global_server_args_dict.update(
         {
+            "disaggregation_mode": server_args.disaggregation_mode,
             "attention_backend": server_args.attention_backend,
             "sampling_backend": server_args.sampling_backend,
             "attention_use_fp4_indexer_cache": server_args.attention_use_fp4_indexer_cache,
@@ -269,6 +271,8 @@ class Envs:
     TOKENSPEED_CUPTI_GRAPH_WARMUP = EnvBool(False)
     TOKENSPEED_TEST_REQUEST_TIME_STATS = EnvBool(False)
     TOKENSPEED_LOG_SPEC_ACCEPT_LENGTHS = EnvBool(False)
+    # Rank 0 logs EAGLE-Harness rounds per batch bucket and verify width every N rounds (0: off).
+    TOKENSPEED_EAGLE_HARNESS_ROUND_STATS = EnvInt(0)
     TOKENSPEED_PROFILER_DIR = EnvStr("/tmp")
     # torch.cuda sync-debug mode armed once serving starts (after capture and
     # tuning, which synchronize legitimately): "warn" reports every host

@@ -176,7 +176,7 @@ def _resolve_mxfp4_activation(
 # batch size and whether the caller supplied precomputed top-k:
 #   M <= _DIRECT_DECODE_MAX_M                       -> direct top-k MXFP4 MFMA decode
 #   _PRECOMPUTED_MFMA_MIN_M <= M <= _DECODE_MAX_M   -> precomputed-activation MFMA decode
-#   (no precomputed top-k) M <= _ROUTE_OWNED_DECODE_MAX_M -> route-owned direct decode
+#   (no precomputed top-k) M <= _DECODE_MAX_M       -> route-owned direct decode
 # These replace the former GLUON_MXFP4_* environment overrides.
 _DECODE_MAX_M = 8
 
@@ -188,9 +188,6 @@ _DEFERRED_DIRECT_DECODE_MAX_M = 16
 
 
 _PRECOMPUTED_MFMA_MIN_M = 4
-
-
-_ROUTE_OWNED_DECODE_MAX_M = 2
 
 
 # Widest activation the precomputed-SiTU entry point serves with the
@@ -212,6 +209,12 @@ _ROUTE_OWNED_MIN_M = 1
 
 _DIRECT_STAGE2_BLOCK_N = 16
 _DIRECT_STAGE2_BLOCK_K = 128
+
+
+# Key: hidden width, intermediate width, global experts, top-k. Finalized
+# decode up to this many rows takes the direct path with the slot-parallel
+# stage 2, whose short K keeps the per-token top-k chain latency bound.
+_SLOT_PARALLEL_DIRECT_DECODE_MAX_M = {(5120, 576, 384, 6): 32}
 
 
 def _select_direct_stage2_tiles(
@@ -901,6 +904,8 @@ def _maybe_precomputed_mxfp4_direct_mfma_decode(
     n_tokens, hidden_dim, device, input_dtype = _mxfp4_input_metadata(hidden_states)
     direct_max_m = _DIRECT_DECODE_MAX_M if do_finalize else max_m
     probe_max_m = max(min(max_m, direct_max_m), route_tile_max_m)
+    if do_finalize:
+        probe_max_m = max(probe_max_m, max(_SLOT_PARALLEL_DIRECT_DECODE_MAX_M.values()))
     if (
         precomputed_topk_weights is None
         or precomputed_topk_ids is None
@@ -996,7 +1001,14 @@ def _maybe_precomputed_mxfp4_direct_mfma_decode(
         and swiglu_beta == 0.0
         and precomputed_topk_ids.is_contiguous()
     )
-    if n_tokens > min(max_m, direct_max_m) and not use_route_tiles:
+    slot_parallel = do_finalize and n_tokens <= _SLOT_PARALLEL_DIRECT_DECODE_MAX_M.get(
+        (hidden_dim, inter_dim, global_num_experts, top_k), 0
+    )
+    if (
+        n_tokens > min(max_m, direct_max_m)
+        and not use_route_tiles
+        and not slot_parallel
+    ):
         return None
 
     topk_ids = (
@@ -1181,6 +1193,8 @@ def _maybe_precomputed_mxfp4_direct_mfma_decode(
         n_tokens,
         ep_deferred=is_ep_deferred,
     )
+    if slot_parallel:
+        stage2_block_n = 32 if n_tokens >= 12 else 16
     stage2_pipeline_k = not is_ep_deferred
     expanded_idx = (
         None
@@ -1202,6 +1216,7 @@ def _maybe_precomputed_mxfp4_direct_mfma_decode(
         BLOCK_N=stage2_block_n,
         BLOCK_K=stage2_block_k,
         PIPELINE_K=stage2_pipeline_k,
+        SLOT_PARALLEL=slot_parallel,
     )
     if not do_finalize:
         assert expanded_idx is not None

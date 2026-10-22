@@ -188,6 +188,18 @@ def _profile_rank_tag(attn_mapping) -> str:
     return "-".join(parts)
 
 
+def _all_thread_profile_config():
+    # The process-global flag also covers workers created before profiling.
+    if not isinstance(
+        getattr(torch.autograd.profiler, "_is_profiler_enabled", None), bool
+    ):
+        raise RuntimeError("missing process-global profiler state")
+    try:
+        return torch.profiler._ExperimentalConfig(profile_all_threads=True)
+    except (AttributeError, TypeError) as exc:
+        raise RuntimeError(str(exc)) from exc
+
+
 class RequestHandler:
     """
     1. Recv Reqs from ZMQ
@@ -207,6 +219,7 @@ class RequestHandler:
         architectures: list[str] | None = None,
         *,
         tokenizer_kwargs: Mapping[str, object],
+        l3,
         pause_controller=None,
         memory_controller=None,
         device=None,
@@ -223,6 +236,7 @@ class RequestHandler:
         # data plane so it is ordered against forwards. The scheduler worker
         # passes the handle in; None elsewhere (e.g. unit tests).
         self._device = device
+        self._l3 = l3
 
         mapping = server_args.mapping
         self.attn_tp_size = mapping.attn.tp_size
@@ -429,7 +443,14 @@ class RequestHandler:
                 # rendezvous blocks this thread too.
                 self._pending_weight_ops.append(recv_req)
             elif isinstance(recv_req, _WEIGHT_LOAD_OPS):
-                ok, msg = self._require_weight_version_for_l3_flush(recv_req)
+                refusal = (
+                    self.memory_controller.refuse_weight_load()
+                    if self.memory_controller is not None
+                    else None
+                )
+                ok, msg = (False, refusal) if refusal is not None else (True, "")
+                if ok:
+                    ok, msg = self._require_weight_version_for_l3_flush(recv_req)
                 if ok:
                     ok, msg = self._require_flush_for_l3_version_switch(recv_req)
                 if not ok:
@@ -464,6 +485,11 @@ class RequestHandler:
     # ------------------------------------------------------------------
     # Internal control ops (online expert rebalance)
     # ------------------------------------------------------------------
+
+    @property
+    def has_pending_weight_ops(self) -> bool:
+        """Whether a queued frontend/internal op can still touch model memory."""
+        return bool(self._pending_weight_ops or self._pending_internal_ops)
 
     def set_internal_op_completer(self, completer: InternalOpCompleter) -> None:
         """Install the owner of the internal ops (once, at startup)."""
@@ -514,7 +540,7 @@ class RequestHandler:
 
         Device/Host still hold KV from the previous checkpoint until a
         successful ``flush_cache``. Switching the Mooncake prefix first
-        lets later D2H copies (not yet in ``_backup_futures``) land under
+        lets later D2H copies (not yet submitted to storage) land under
         the new namespace, and lets Admit reuse the stale local indexes
         as if they belonged to the new weights.
         """
@@ -522,12 +548,7 @@ class RequestHandler:
         storage_backend = self.server_args.kvstore_storage_backend
         if storage_backend is None or recv_req.flush_cache:
             return True, ""
-        version = resolve_l3_weight_version(
-            self.server_args.weight_version,
-            _requested_weight_version(recv_req),
-            flush_cache=False,
-            storage_backend=storage_backend,
-        )
+        version = resolve_l3_weight_version(_requested_weight_version(recv_req))
         if version is None or str(version) == str(self.server_args.weight_version):
             return True, ""
         return (
@@ -699,16 +720,13 @@ class RequestHandler:
         return self.clear_cache_fn is not None and self.clear_cache_fn()
 
     def _delete_l3_namespace(self) -> bool:
-        device = self._device
-        if device is None:
-            return True
-        return bool(device.delete_l3_namespace())
+        return self._l3 is None or self._l3.delete_namespace()
 
     def _converge_replica_decision(self, local_ok: bool) -> bool:
         """MIN-reduce a yes/no across every rank that shares this flush.
 
-        Attention TP, then PP (same order as
-        ``EventLoop._converge_l3_exists``), then attention DP. Exists and
+        Attention TP, then PP (the cache hooks' replica order), then
+        attention DP. Storage completions and
         WriteBackDone omit DP because those ranks hold different sequences.
         Flush includes DP: ``storage_object_key`` has no DP rank, so a
         replica that is clearable must not ``remove_by_prefix`` while
@@ -746,7 +764,9 @@ class RequestHandler:
         land in a peer still serving the previous ``weight_version``.
         Flushed L3 updates require an explicit ``weight_version``. An
         explicit new version with ``flush_cache=False`` is rejected
-        before the GPU load.
+        before the GPU load. Re-sending the current version is a no-op:
+        the namespace already names it, and ``set_weight_version`` would
+        raise on a serving executor that still has unretired operations.
         """
 
         ok, err = self._require_weight_version_for_l3_flush(recv_req)
@@ -755,16 +775,12 @@ class RequestHandler:
         ok, err = self._require_flush_for_l3_version_switch(recv_req)
         if not ok:
             return False, err
-        version = resolve_l3_weight_version(
-            self.server_args.weight_version,
-            _requested_weight_version(recv_req),
-            flush_cache=recv_req.flush_cache,
-            storage_backend=self.server_args.kvstore_storage_backend,
-        )
-        if version is None:
+        version = resolve_l3_weight_version(_requested_weight_version(recv_req))
+        if version is None or str(version) == str(self.server_args.weight_version):
             return True, msg
+        if self._l3 is not None:
+            self._l3.set_weight_version(str(version))
         self.server_args.weight_version = str(version)
-        self._device.set_l3_weight_version(str(version))
         return True, msg
 
     def handle_generate_request(
@@ -984,6 +1000,15 @@ class RequestHandler:
                     "the server with --expert-distribution-recorder-mode stat.",
                 )
 
+        if {"CPU", "GPU"} & set(activities):
+            try:
+                _all_thread_profile_config()
+            except RuntimeError as exc:
+                return ProfileReqOutput(
+                    success=False,
+                    message=f"This PyTorch runtime cannot provide all-thread phase profiling: {exc}",
+                )
+
         self.profile_by_stage = profile_by_stage
         self.profiler_output_dir = output_dir
         self.torch_profiler_with_stack = with_stack
@@ -1031,10 +1056,18 @@ class RequestHandler:
         ]
 
         if torchprof_activities:
+            try:
+                experimental_config = _all_thread_profile_config()
+            except RuntimeError as exc:
+                return ProfileReqOutput(
+                    success=False,
+                    message=f"This PyTorch runtime cannot provide all-thread phase profiling: {exc}",
+                )
             self.torch_profiler = torch.profiler.profile(
                 activities=torchprof_activities,
                 with_stack=with_stack if with_stack is not None else True,
                 record_shapes=record_shapes if record_shapes is not None else False,
+                experimental_config=experimental_config,
             )
             self.torch_profiler.start()
 

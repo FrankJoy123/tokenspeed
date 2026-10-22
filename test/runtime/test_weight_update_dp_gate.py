@@ -153,8 +153,10 @@ def _handler(*, dp_size: int = 1):
     handler._pending_internal_ops = deque()
     handler._internal_op_completer = None
     handler._device = mock.Mock()
-    handler._device.delete_l3_namespace.return_value = True
+    handler._l3 = mock.Mock()
+    handler._l3.delete_namespace.return_value = True
     handler._device.update_weights.return_value = (True, "ok")
+    handler.memory_controller = None
     return handler
 
 
@@ -194,7 +196,7 @@ class TestSameRoundGate:
         handler.can_clear_cache_fn.assert_called_once_with()
         handler.clear_cache_fn.assert_called_once_with()
         handler._device.update_weights.assert_called_once_with(req)
-        handler._device.set_l3_weight_version.assert_called_once_with("v2")
+        handler._l3.set_weight_version.assert_called_once_with("v2")
         replies = _replies(handler)
         assert (len(replies)) == (1)
         assert isinstance((replies[0]), (UpdateWeightsFromDistributedReqOutput))
@@ -231,7 +233,7 @@ class TestSameRoundGate:
 
         handler.clear_cache_fn.assert_called_once_with()
         handler._device.update_weights.assert_called_once_with(req)
-        handler._device.set_l3_weight_version.assert_called_once_with("v2")
+        handler._l3.set_weight_version.assert_called_once_with("v2")
         (reply,) = _replies(handler)
         assert isinstance((reply), (UpdateWeightFromDiskReqOutput))
         assert reply.success
@@ -278,8 +280,8 @@ class TestSameRoundGate:
             handler.process_requests([req])
 
         handler._device.update_weights.assert_called_once_with(req)
-        handler._device.set_l3_weight_version.assert_not_called()
-        assert (handler.server_args.weight_version) == ("v1")
+        handler._l3.set_weight_version.assert_not_called()
+        assert handler.server_args.weight_version == "v1"
         reply = _replies(handler)[0]
         assert not (reply.success)
         assert ("another rank") in (reply.message)
@@ -542,8 +544,8 @@ class TestMooncakeOp:
 
         handler.clear_cache_fn.assert_called_once_with()
         handler._device.update_weights.assert_called_once_with(req)
-        handler._device.set_l3_weight_version.assert_called_once_with("12")
-        assert (handler.server_args.weight_version) == ("12")
+        handler._l3.set_weight_version.assert_called_once_with("12")
+        assert handler.server_args.weight_version == "12"
         # The default is resolved at the point of use; the request is not
         # rewritten on its way to the device.
         assert (req.weight_version) is None
@@ -559,8 +561,8 @@ class TestMooncakeOp:
         handler.process_requests([req])
 
         handler._device.update_weights.assert_called_once_with(req)
-        handler._device.set_l3_weight_version.assert_called_once_with("12")
-        assert (req.weight_version) is None
+        handler._l3.set_weight_version.assert_called_once_with("12")
+        assert req.weight_version is None
 
     def test_explicit_weight_version_wins(self):
         handler = _handler()
@@ -568,7 +570,7 @@ class TestMooncakeOp:
 
         handler.process_requests([req])
 
-        handler._device.set_l3_weight_version.assert_called_once_with("ckpt-12")
+        handler._l3.set_weight_version.assert_called_once_with("ckpt-12")
 
     def test_unflushed_load_keeps_the_namespace(self):
         handler = _handler()
@@ -578,8 +580,8 @@ class TestMooncakeOp:
 
         handler.clear_cache_fn.assert_not_called()
         handler._device.update_weights.assert_called_once_with(req)
-        handler._device.set_l3_weight_version.assert_not_called()
-        assert (handler.server_args.weight_version) == ("v1")
+        handler._l3.set_weight_version.assert_not_called()
+        assert handler.server_args.weight_version == "v1"
 
     def test_l3_rejects_unflushed_version_switch(self):
         handler = _handler()
@@ -604,6 +606,154 @@ class TestMooncakeOp:
         reply = _replies(handler)[0]
         assert not (reply.success)
         assert ("cache flush failed") in (reply.message)
+
+
+class TestReleasedMemory:
+    """A load must not write unmapped weights or run on suspended NCCL."""
+
+    @staticmethod
+    def _released(tags):
+        from tokenspeed.runtime.engine.io_struct import (
+            ReleaseMemoryOccupationReqInput,
+            ResumeMemoryOccupationReqInput,
+        )
+        from tokenspeed.runtime.engine.memory_occupation import (
+            VALID_TAGS,
+            MemoryOccupationController,
+            MemoryRegion,
+        )
+        from tokenspeed.runtime.engine.pause import PauseController
+
+        class _Drained:
+            def waiting_size(self):
+                return 0
+
+            def decoding_size(self):
+                return 0
+
+            def prefilling_size(self):
+                return 0
+
+        sender = mock.Mock()
+        pause = PauseController(sender)
+        controller = MemoryOccupationController(
+            send_func=sender,
+            pause_controller=pause,
+            regions={
+                tag: MemoryRegion(release=lambda: None, resume=lambda: None)
+                for tag in VALID_TAGS
+            },
+            enabled=True,
+            reset_caches_fn=lambda: True,
+            transfers_idle_fn=lambda: True,
+            release_refusal_fn=lambda: None,
+            weights_busy_fn=lambda: False,
+        )
+        controller.handle_release(ReleaseMemoryOccupationReqInput(tags=None))
+        pause.maybe_finish_drain(_Drained())
+        resumed = [tag for tag in VALID_TAGS if tag not in tags]
+        controller.handle_resume(ResumeMemoryOccupationReqInput(tags=resumed))
+        return controller
+
+    def test_release_waits_for_every_queued_dp_weight_update(self):
+        from tokenspeed.runtime.engine.io_struct import ReleaseMemoryOccupationReqInput
+        from tokenspeed.runtime.engine.memory_occupation import (
+            MemoryOccupationController,
+            MemoryRegion,
+        )
+        from tokenspeed.runtime.engine.pause import PauseController, PauseHooks
+
+        class DrainedLoop:
+            def __init__(self, handler):
+                self.request_handler = handler
+                self._eplb = None
+                self.kv_transfer = None
+                self.scheduler = self
+
+            def waiting_size(self):
+                return 0
+
+            def decoding_size(self):
+                return 0
+
+            def prefilling_size(self):
+                return 0
+
+            def bootstrapping_size(self):
+                return 0
+
+            def pd_transfer_size(self):
+                return 0
+
+        handler = _handler(dp_size=2)
+        trace = []
+
+        def update(_request):
+            assert "release" not in trace
+            trace.append("update")
+            return True, "applied"
+
+        handler._device.update_weights.side_effect = update
+        pause = PauseController(handler.send_func)
+        loop = DrainedLoop(handler)
+        hooks = PauseHooks(loop, pause, handler._device)
+        memory = MemoryOccupationController(
+            send_func=handler.send_func,
+            pause_controller=pause,
+            regions={
+                "weights": MemoryRegion(
+                    release=lambda: trace.append("release"), resume=lambda: None
+                )
+            },
+            enabled=True,
+            reset_caches_fn=lambda: True,
+            transfers_idle_fn=hooks.transfers_idle_for_release,
+            release_refusal_fn=hooks.memory_release_refusal,
+            weights_busy_fn=hooks.weights_busy_for_release,
+        )
+        handler.memory_controller = memory
+        req = _distributed(flush_cache=False, weight_version=None)
+        waiting = _DpPeer(head=None)
+        with mock.patch.object(torch.distributed, "all_reduce", waiting.all_reduce):
+            handler.process_requests([req, req])
+        memory.handle_release(ReleaseMemoryOccupationReqInput(tags=["weights"]))
+        pause.maybe_finish_drain(loop.scheduler)
+        assert pause.is_drain_pending and trace == []
+
+        arrived = _DpPeer(head=type(req))
+        with mock.patch.object(torch.distributed, "all_reduce", arrived.all_reduce):
+            handler.process_requests([])
+            pause.maybe_finish_drain(loop.scheduler)
+            assert pause.is_drain_pending and trace == ["update"]
+            handler.process_requests([])
+            pause.maybe_finish_drain(loop.scheduler)
+        assert trace == ["update", "update", "release"]
+        assert pause.released and not pause.is_drain_pending
+        assert all(reply.success for reply in _replies(handler))
+
+    @pytest.mark.parametrize("released", [["weights"], ["nccl"]])
+    def test_load_is_refused_before_the_gate(self, released):
+        handler = _handler()
+        handler.memory_controller = self._released(released)
+
+        handler.process_requests([_mooncake(version=12)])
+
+        handler._device.update_weights.assert_not_called()
+        handler.clear_cache_fn.assert_not_called()
+        reply = _replies(handler)[0]
+        assert isinstance(reply, UpdateWeightsFromMooncakeReqOutput)
+        assert not reply.success
+        assert released[0] in reply.message
+
+    def test_load_runs_while_only_the_cache_and_graphs_are_released(self):
+        handler = _handler()
+        handler.memory_controller = self._released(["kv_cache", "cuda_graph"])
+        handler._device.update_weights.return_value = (True, "applied")
+
+        handler.process_requests([_mooncake(version=12)])
+
+        handler._device.update_weights.assert_called_once()
+        assert _replies(handler)[0].success
 
 
 class TestCombinedWeightUpdateOutput:
