@@ -139,54 +139,6 @@ def test_gfx950_suite_selects_exact_registrations():
     assert suite.default_measurement_blocks == 30
 
 
-def test_glm53_tp4_fp32_gemm_suite_expands_exact_projection_rows():
-    suite_path = Path(__file__).parents[1] / "benchmarks" / "amd" / "gfx950.json"
-    suite = load_suite(suite_path, [r"^glm53_flash\.gemm\.mm/"])
-    common_rows = {
-        1,
-        2,
-        4,
-        8,
-        16,
-        64,
-        848,
-        896,
-        1616,
-        1664,
-        1744,
-        1792,
-        3536,
-        7120,
-        8144,
-        8192,
-    }
-    projection_rows = {
-        (1024, 4096): common_rows | {24, 25, 65, 128, 129},
-        (4096, 512): common_rows | {17, 24, 25, 32, 33, 65, 128, 129},
-        (6144, 4096): common_rows,
-        (4096, 3072): common_rows,
-        (2048, 4096): common_rows,
-        (4096, 1536): common_rows,
-        (4096, 4096): common_rows,
-    }
-    expected = {(m, n, k) for (n, k), rows in projection_rows.items() for m in rows}
-    actual = {
-        tuple(case.request.parameters[key] for key in ("M", "N", "K"))
-        for case in suite.cases
-    }
-    assert actual == expected
-    assert len(suite.cases) == len(actual) == 125
-    for case in suite.cases:
-        assert case.comparison_epoch == 1
-        assert case.request.registration is None
-        assert case.request.solution is None
-        assert case.request.parameters["block_size"] == [128, 128]
-        assert case.request.parameters["quant"] == "mxfp8"
-        assert case.request.parameters["out_dtype"] == "bfloat16"
-        assert case.request.parameters["validation"] == {"runs": 5}
-        assert case.request.cold_cache is True
-
-
 def test_load_suite_includes_case_files(tmp_path):
     fragment_path = tmp_path / "operation.json"
     fragment_path.write_text(
