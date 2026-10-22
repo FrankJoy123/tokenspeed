@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -30,13 +31,17 @@ import torch
 pytest.importorskip("tokenspeed_kernel_amd")
 
 from tokenspeed_kernel_amd.ops.gfx950.attention.dsa import attention
+from tokenspeed_kernel_amd.ops.gfx950.attention.dsa.attention import (
+    launch_gluon_dsa_decode_gfx950,
+    launch_gluon_dsa_prefill_gfx950,
+)
 
 
 @pytest.mark.parametrize(
-    ("entrypoint", "tokens"),
+    ("launch", "tokens"),
     (
-        ("launch_gluon_dsa_decode_gfx950", 8),
-        ("launch_gluon_dsa_prefill_gfx950", 16),
+        pytest.param(launch_gluon_dsa_decode_gfx950, 8, id="decode"),
+        pytest.param(launch_gluon_dsa_prefill_gfx950, 16, id="prefill"),
     ),
 )
 @pytest.mark.parametrize(
@@ -48,7 +53,7 @@ from tokenspeed_kernel_amd.ops.gfx950.attention.dsa import attention
 @pytest.mark.parametrize("rope_dim", (0, 64))
 def test_dense_launch_parameters_ignore_live_length(
     monkeypatch: pytest.MonkeyPatch,
-    entrypoint: str,
+    launch: Callable[..., torch.Tensor],
     tokens: int,
     q_dtype: torch.dtype,
     kv_dtype: torch.dtype,
@@ -81,7 +86,6 @@ def test_dense_launch_parameters_ignore_live_length(
     kv = torch.empty((2051, 512 + rope_dim), dtype=kv_dtype)
     slots = torch.zeros((tokens, 2051), dtype=torch.int32)
     lengths = torch.empty((tokens,), dtype=torch.int32)
-    launch = getattr(attention, entrypoint)
 
     for live_length, max_seqlen_k in (
         (0, 0),
