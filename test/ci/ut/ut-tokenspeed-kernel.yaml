@@ -28,29 +28,30 @@ ut:
       import pytest
       import torch
 
-      activities = [torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
-      with torch.profiler.profile(activities=activities):
-          torch.cuda.synchronize()
-      original_exit = torch.profiler.profile.__exit__
-      def record_events(self, *args):
-          result = original_exit(self, *args)
-          counts = collections.Counter(
-              event.name for event in self.events()
+      traces = []
+      original_events = torch.profiler.profile.events
+      def record_events(self):
+          events = original_events(self)
+          traces.append(collections.Counter(
+              event.name for event in events
               if event.device_type == torch.autograd.DeviceType.CUDA
-          )
-          print("DEVICE_EVENTS", json.dumps(counts, sort_keys=True), flush=True)
-          return result
-      torch.profiler.profile.__exit__ = record_events
-      raise SystemExit(pytest.main([
+          ))
+          return events
+      torch.profiler.profile.events = record_events
+      result = pytest.main([
           "tokenspeed-kernel/test/ops/test_attention_dsv41_index_scan.py::test_index_scan_capacity_launches_and_scratch",
           "-vv", "-s",
-      ]))
+      ])
+      for counts in traces:
+          print("DEVICE_EVENTS", json.dumps(counts, sort_keys=True), flush=True)
+      raise SystemExit(result)
       '''
       print("BASELINE_SOURCE", hashlib.sha256(test_file.read_bytes()).hexdigest(), flush=True)
       baseline = subprocess.run([sys.executable, "-c", probe], text=True, capture_output=True)
       print(baseline.stdout, flush=True)
       print(baseline.stderr, flush=True)
-      assert baseline.returncode == 1 and "assert launches[0]" in baseline.stdout, "baseline did not reproduce launch-count mismatch"
+      reproduced = baseline.returncode == 1 and "assert launches[0]" in baseline.stdout
+      print("BASELINE_REPRODUCED", reproduced, flush=True)
       source = test_file.read_text()
       marker = "        with torch.profiler.profile(\n"
       assert source.count(marker) == 1
@@ -58,6 +59,7 @@ ut:
       print("CANDIDATE_SOURCE", hashlib.sha256(test_file.read_bytes()).hexdigest(), flush=True)
       subprocess.run([sys.executable, "-c", probe], check=True)
       subprocess.run([sys.executable, "-m", "pytest", str(test_file), "-v"], check=True)
+      assert reproduced, "baseline did not reproduce launch-count mismatch"
       PY
 report:
   github_step_summary: true
