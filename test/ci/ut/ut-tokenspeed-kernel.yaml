@@ -39,21 +39,19 @@ ut:
           ))
           runtime_traces.append(collections.Counter(
               event.name for event in events
-              if "launch" in event.name.lower()
+              if event.device_type == torch.autograd.DeviceType.CPU
+              and "LaunchKernel" in event.name
           ))
           return events
       torch.profiler.profile.events = record_events
-      class RepeatCapacityTest:
-          def pytest_pyfunc_call(self, pyfuncitem):
-              if pyfuncitem.name == "test_index_scan_capacity_launches_and_scratch":
-                  for _ in range(20):
-                      pyfuncitem.obj(pyfuncitem.funcargs["device"])
-                  return True
+      class CapacityPrefix:
+          def pytest_collection_modifyitems(self, items):
+              index = next(i for i, item in enumerate(items)
+                  if item.name == "test_index_scan_capacity_launches_and_scratch")
+              del items[index + 1:]
       result = pytest.main([
-          "tokenspeed-kernel/test/ops/test_attention_dsv41_dcp.py",
-          "tokenspeed-kernel/test/ops/test_attention_dsv41_index_scan.py::test_index_scan_capacity_launches_and_scratch",
-          "-vv", "-s",
-      ], plugins=[RepeatCapacityTest()])
+          "tokenspeed-kernel/test/ops/", "-v",
+      ], plugins=[CapacityPrefix()])
       for index, (counts, runtime) in enumerate(zip(traces, runtime_traces)):
           print("TRACE", index, "DEVICE_EVENTS", json.dumps(counts, sort_keys=True), flush=True)
           print("TRACE", index, "RUNTIME_EVENTS", json.dumps(runtime, sort_keys=True), flush=True)
@@ -66,9 +64,11 @@ ut:
       reproduced = baseline.returncode == 1 and "assert launches[0]" in baseline.stdout
       print("BASELINE_REPRODUCED", reproduced, flush=True)
       source = test_file.read_text()
-      marker = "        with torch.profiler.profile(\n"
+      marker = "                event.device_type == torch.autograd.DeviceType.CUDA\n"
       assert source.count(marker) == 1
-      test_file.write_text(source.replace(marker, "        torch.cuda.synchronize()\n" + marker))
+      test_file.write_text(source.replace(marker,
+          "                event.device_type == torch.autograd.DeviceType.CPU\n"
+          '                and "LaunchKernel" in event.name\n'))
       print("CANDIDATE_SOURCE", hashlib.sha256(test_file.read_bytes()).hexdigest(), flush=True)
       subprocess.run([sys.executable, "-c", probe], check=True)
       subprocess.run([sys.executable, "-m", "pytest", str(test_file), "-v"], check=True)
