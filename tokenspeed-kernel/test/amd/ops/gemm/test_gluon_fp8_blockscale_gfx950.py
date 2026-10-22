@@ -35,6 +35,7 @@ from tokenspeed_kernel.ops.gemm import mm as kernel_mm
 from tokenspeed_kernel.ops.gemm.gluon import gluon_mm_fp8_blockscale_gfx950
 from tokenspeed_kernel.ops.quantization import quantize_fp8
 from tokenspeed_kernel.profiling import ShapeCapture
+from tokenspeed_kernel.workspace import capture_session
 
 amd_mm = importlib.import_module("tokenspeed_kernel_amd.ops.gfx950.gemm.mxfp8.mm")
 amd_decode = importlib.import_module(
@@ -356,3 +357,114 @@ def test_same_tile_row_counts_reuse_compiled_kernels(rows, n, k):
         amd_decode.gluon_mm_mxfp8_decode_gfx950,
     ):
         execute(rows[1])
+
+
+def _fp32_operands(m: int, n: int, k: int):
+    a = (torch.randint(-4, 5, (m, k), device="cuda").float() * 0.25).to(
+        torch.float8_e4m3fn
+    )
+    b = (torch.randint(-4, 5, (n, k), device="cuda").float() * 0.25).to(
+        torch.float8_e4m3fn
+    )
+
+    def scales(rows):
+        value = torch.exp2(
+            torch.randint(-3, 2, (rows, (k + 127) // 128), device="cuda").float()
+        )
+        return strided_copy(value)
+
+    return a, b, scales(m), scales((n + 127) // 128)
+
+
+def _run_fp32(a, b, sa, sb, out, counters):
+    return amd_decode.launch_gluon_mm_mxfp8_decode_gfx950(
+        a,
+        b,
+        sa,
+        sb,
+        torch.bfloat16,
+        alpha=None,
+        block_size=[128, 128],
+        counters=counters,
+        out=out,
+    )
+
+
+def _unaligned_copy(value):
+    k = value.shape[1]
+    backing = torch.empty((value.shape[0], k + 3), device="cuda", dtype=value.dtype)
+    view = backing[:, 1 : k + 1]
+    view.copy_(value)
+    return view
+
+
+@pytest.mark.parametrize(
+    "m,n,k,unaligned",
+    [
+        (1, 17, 128, False),
+        (16, 130, 256, False),
+        (17, 130, 288, False),
+        (128, 17, 480, False),
+        (129, 130, 256, False),
+        (256, 130, 480, False),
+        (17, 130, 288, True),
+    ],
+)
+def test_fp32_block_scales_decode_boundaries_and_canaries(m, n, k, unaligned):
+    torch.manual_seed(7)
+    a, b, sa, sb = _fp32_operands(m, n, k)
+    if unaligned:
+        # Unit inner stride remains supported when both the pointer and the
+        # row stride prevent 16-byte value loads, alongside strided scales/out.
+        a, b = _unaligned_copy(a), _unaligned_copy(b)
+    # Quarter-integer values and power-of-two scales make the independent
+    # dense dequantization oracle exact, including partial K128/N128 groups.
+    expected = reference(a, b, sa, sb, torch.bfloat16)
+    backing = torch.full((m + 2, n + 32), -7, device="cuda", dtype=torch.bfloat16)
+    out = backing[1 : m + 1, 16 : n + 16]
+    counters = torch.zeros(
+        amd_decode.gluon_mm_mxfp8_decode_num_counters_gfx950(m, n, k),
+        device="cuda",
+        dtype=torch.int32,
+    )
+    saved = (sa.clone(), sb.clone())
+    actual = _run_fp32(a, b, sa, sb, out, counters)
+    assert actual is out and torch.count_nonzero(expected) > 0
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    assert torch.all(backing[[0, -1], :] == -7)
+    assert torch.all(backing[1 : m + 1, :16] == -7)
+    assert torch.all(backing[1 : m + 1, n + 16 :] == -7)
+    assert torch.equal(sa, saved[0]) and torch.equal(sb, saved[1])
+    assert torch.count_nonzero(counters) == 0
+
+
+def test_fp32_split_graph_replay_rereads_scales_and_resets_counters():
+    torch.manual_seed(7)
+    # Eight K tiles per split exceed the six-slot ring, exercising ordinary
+    # shared stores through a refill as well as split arrivals and replay.
+    m, n, k = 17, 130, 8192
+    a, b, sa, sb = _fp32_operands(m, n, k)
+    a, b = _unaligned_copy(a), _unaligned_copy(b)
+    counters = torch.zeros(
+        amd_decode.gluon_mm_mxfp8_decode_num_counters_gfx950(m, n, k),
+        device="cuda",
+        dtype=torch.int32,
+    )
+    assert counters.numel() > 0, "This fixture must exercise split-K arrivals"
+    out = torch.empty((m, n), device="cuda", dtype=torch.bfloat16)
+    stream = torch.cuda.Stream()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.stream(stream):
+        _run_fp32(a, b, sa, sb, out, counters)
+        with capture_session(graph), torch.cuda.graph(graph, stream=stream):
+            _run_fp32(a, b, sa, sb, out, counters)
+    stream.synchronize()
+    for activation_scale, weight_scale in ((1.25, 0.5), (0.5, 2.0), (2.0, 0.75)):
+        sa.fill_(activation_scale)
+        sb.fill_(weight_scale)
+        graph.replay()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(
+            out, reference(a, b, sa, sb, torch.bfloat16), atol=0, rtol=0
+        )
+        assert torch.count_nonzero(counters) == 0
