@@ -896,7 +896,8 @@ def launch_gluon_mm_mxfp8_decode_gfx950(
                 triton.cdiv(K, 128),
             ):
                 raise ValueError(
-                    f"{name} must be FP32 with shape {(rows, triton.cdiv(K, 128))}"
+                    f"{name} must be FP32 with shape {(rows, triton.cdiv(K, 128))}, "
+                    f"got dtype={scale.dtype}, shape={tuple(scale.shape)}"
                 )
     else:
         _validate_scale("A_scales", A_scales, M, K)

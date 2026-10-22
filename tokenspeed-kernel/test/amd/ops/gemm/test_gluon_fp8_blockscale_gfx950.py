@@ -31,6 +31,7 @@ if not is_cdna4():
     pytest.skip("AMD CDNA4 is required", allow_module_level=True)
 
 from tokenspeed_kernel.ops.gemm import mm as kernel_mm
+from tokenspeed_kernel.ops.gemm.gluon import gluon_mm_fp8_blockscale_gfx950
 from tokenspeed_kernel.ops.quantization import quantize_fp8
 from tokenspeed_kernel.profiling import ShapeCapture
 
@@ -109,7 +110,11 @@ def run(a, b, sa, sb, out):
     "shape,online,unaligned",
     [(s, False, False) for s in SHAPES]
     + [(s, True, False) for s in ONLINE]
-    + [((300, 384, 4096), False, True), ((65, 1024, 4096), False, True)],
+    + [
+        ((300, 384, 4096), False, True),
+        ((65, 1024, 4096), False, True),
+        pytest.param((17, 130, 3072), False, True, id="decode-unaligned"),
+    ],
 )
 def test_public_fp32_scales_arbitrary_strides_and_canaries(shape, online, unaligned):
     m, n, k = shape
@@ -156,6 +161,33 @@ def test_public_fp32_scales_arbitrary_strides_and_canaries(shape, online, unalig
     assert torch.all(backing[1 : m + 1, :16] == -7)
     assert torch.all(backing[1 : m + 1, n + 16 :] == -7)
     assert torch.equal(actual_sa, saved[0]) and torch.equal(sb, saved[1])
+
+
+@pytest.mark.parametrize("shape", [(17, 130, 3072), (300, 384, 4096)])
+@pytest.mark.parametrize("scale_name", ["A_scales", "B_scales"])
+@pytest.mark.parametrize("invalid", ["dtype", "shape"])
+def test_invalid_fp32_scale_reports_expected_and_received(shape, scale_name, invalid):
+    m, n, k = shape
+    a, b, sa, sb = values(m, n, k)
+    expected = (m if scale_name == "A_scales" else (n + 127) // 128, (k + 127) // 128)
+    received = (expected[0] + 1, expected[1]) if invalid == "shape" else expected
+    dtype = torch.float16 if invalid == "dtype" else torch.float32
+    bad_scale = torch.empty(received, device="cuda", dtype=dtype)
+    with pytest.raises(ValueError) as raised:
+        gluon_mm_fp8_blockscale_gfx950(
+            a.to(torch.float8_e4m3fn),
+            b,
+            bad_scale if scale_name == "A_scales" else sa,
+            bad_scale if scale_name == "B_scales" else sb,
+            torch.bfloat16,
+            alpha=None,
+            block_size=[128, 128],
+            out=None,
+        )
+    assert str(raised.value) == (
+        f"{scale_name} must be FP32 with shape {expected}, "
+        f"got dtype={dtype}, shape={received}"
+    )
 
 
 @pytest.mark.parametrize("scaled", [False, True])

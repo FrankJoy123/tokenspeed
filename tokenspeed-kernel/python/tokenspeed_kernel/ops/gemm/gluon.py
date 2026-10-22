@@ -564,7 +564,7 @@ if platform.is_amd:
         supports_gluon_mm_mxfp8_decode_gfx950 as _supports_mxfp8_decode_problem,
     )
     from tokenspeed_kernel_amd.ops.gfx950.gemm.mxfp8.mm import (
-        _is_fp32_blockscale_decode_problem,
+        is_fp32_blockscale_decode_problem as _is_fp32_blockscale_decode_problem,
     )
     from tokenspeed_kernel_amd.ops.gfx950.gemm.mxfp8.mm import (
         launch_gluon_mm_fp8_blockscale_gfx950 as _mm_fp8_blockscale_impl,
@@ -753,6 +753,11 @@ else:
 
     def gluon_mm_mxfp8_gfx950(**kwargs):
         raise ImportError("gluon_mm_mxfp8_gfx950 requires tokenspeed-kernel-amd")
+
+    def gluon_mm_fp8_blockscale_gfx950(**kwargs):
+        raise ImportError(
+            "gluon_mm_fp8_blockscale_gfx950 requires tokenspeed-kernel-amd"
+        )
 
     def gluon_mm_mxfp8_decode_gfx950(**kwargs):
         raise ImportError("gluon_mm_mxfp8_decode_gfx950 requires tokenspeed-kernel-amd")

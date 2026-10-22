@@ -2125,7 +2125,10 @@ def _validate_scale(name: str, scale: torch.Tensor, rows: int, k: int) -> None:
 def _validate_fp32_scale(name: str, scale: torch.Tensor, rows: int, k: int) -> None:
     expected = (rows, triton.cdiv(k, 128))
     if scale.dtype != torch.float32 or tuple(scale.shape) != expected:
-        raise ValueError(f"{name} must be FP32 with shape {expected}")
+        raise ValueError(
+            f"{name} must be FP32 with shape {expected}, "
+            f"got dtype={scale.dtype}, shape={tuple(scale.shape)}"
+        )
 
 
 def _uniform_fp32_weight_block(n: int, block_n: int) -> bool:
@@ -2444,7 +2447,8 @@ def _launch_pipeline_fp32_or_native(
     )
 
 
-def _is_fp32_blockscale_decode_problem(m: int, n: int, k: int) -> bool:
+def is_fp32_blockscale_decode_problem(m: int, n: int, k: int) -> bool:
+    """Return whether an M-row, N-output, K-reduction GEMM selects FP32 decode."""
     # Measured FP32 decode wins cover short/moderate reductions; longer
     # reductions retain existing GEMM selection, not a decoder limitation.
     return (
@@ -2484,7 +2488,7 @@ def launch_gluon_mm_fp8_blockscale_gfx950(
         raise ValueError(
             "gfx950 FP32 block-scale GEMM requires both scales and block_size=[128, 128]"
         )
-    if _is_fp32_blockscale_decode_problem(A.shape[0], B.shape[0], A.shape[1]):
+    if is_fp32_blockscale_decode_problem(A.shape[0], B.shape[0], A.shape[1]):
         counters = allocate_zeroed(
             gluon_mm_mxfp8_decode_num_counters_gfx950(
                 A.shape[0], B.shape[0], A.shape[1]
@@ -2516,6 +2520,7 @@ def launch_gluon_mm_fp8_blockscale_gfx950(
 
 
 __all__ = [
+    "is_fp32_blockscale_decode_problem",
     "launch_gluon_mm_fp8_blockscale_gfx950",
     "launch_gluon_mm_mxfp8_gfx950",
     "supports_mxfp8_gemm_shape",
