@@ -272,6 +272,7 @@ def prepare_gdn_chunk_prefill(
         "num_v_gte_num_q": profile.num_v_heads >= profile.num_q_heads,
         "output_h": False,
         "qk_l2norm": True,
+        "state_checkpoints": False,
     }
     spec = _select_registration(request, platform, traits)
     generator = torch.Generator(device="cuda").manual_seed(request.seed)
