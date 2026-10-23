@@ -1128,6 +1128,7 @@ def test_shifted_mhc_gpu_layer_matches_fallback(
     class Attention:
         def __init__(self):
             self.mapping = mapping
+            self.wq_a_wkv = SimpleNamespace(quant_method=None)
 
         @v41.break_point
         def __call__(
@@ -1498,7 +1499,7 @@ def test_cross_layer_chain_preserves_engram_taps_and_stage_handoffs(
     positions = torch.arange(6)
 
     class Backend(_Backend):
-        def prepare_global_selection(self, *args):
+        def prepare_global_selection(self, *args, **kwargs):
             # The backbone fixture returns synthetic attention output in all
             # modes; decode still performs the real projection/selection call.
             return None
