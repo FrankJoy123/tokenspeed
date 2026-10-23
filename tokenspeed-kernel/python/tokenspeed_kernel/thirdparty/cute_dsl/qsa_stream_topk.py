@@ -265,10 +265,11 @@ def warmup(
         capacity *= 2
     configurations = {}
     # Cover _configuration's row policies: singleton, both ends of 2..8,
-    # the first row above 8, the small-grid limit 128, and its next multiple
-    # of eight. Try ragged and whole-request ownership for each row count.
+    # the first row above 8, and the small-grid limit 128. Above that limit,
+    # cover both aligned and partial query groups. Try ragged and
+    # whole-request ownership for each row count.
     for capacity in sorted(capacities):
-        for rows in (1, 2, 8, 9, 128, 136):
+        for rows in (1, 2, 8, 9, 128, 135, 136):
             for width in (None, rows):
                 config = _configuration(rows, capacity, width, max_partial_bytes)
                 if config is not None:

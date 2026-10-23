@@ -498,7 +498,8 @@ FlashInfer tactic profiling. Pipeline parallelism skips this traversal.
 
 CuTe QSA keeps query rows and selected-slot row strides dynamic; model
 geometry, selection budgets and launch configurations stay static. Warmup
-covers encountered static signatures; other variants compile on demand.
+covers encountered static signatures, including aligned and partial stream
+top-k query groups; other variants compile on demand.
 
 PrimTS prepares native group/scheduler variants only during FlashInfer
 autotuning, retaining its runtime heuristic. Preparation uses scratch state

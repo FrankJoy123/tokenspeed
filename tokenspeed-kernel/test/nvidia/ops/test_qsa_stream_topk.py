@@ -937,15 +937,23 @@ def test_stream_topk_startup_warms_algorithm_and_capacity_buckets(
     monkeypatch.setattr(stream_topk, "_WARMED", set())
     torch.manual_seed(157)
     keys = torch.randn(260 * 64, 1, 128, device=device, dtype=torch.bfloat16)
-    table_storage = torch.arange(260, device=device, dtype=torch.int32)[None]
+    table_storage = (
+        torch.arange(260, device=device, dtype=torch.int32)[None]
+        + torch.arange(256, device=device, dtype=torch.int32)[:, None]
+    ) % 260
 
-    def inputs(rows, pages):
+    def inputs(rows, pages, width):
         query = torch.randn(rows, 4, 128, device=device, dtype=torch.bfloat16)
-        requests = torch.zeros(rows, device=device, dtype=torch.int32)
+        if width is None:
+            requests = torch.zeros(rows, device=device, dtype=torch.int32)
+            request_count = 1
+        else:
+            requests = torch.arange(rows, device=device, dtype=torch.int32) // width
+            request_count = rows // width
         complete = torch.linspace(0, pages * 64, rows, device=device).int()
         if rows == 1:
             complete.fill_(pages * 64)
-        return query, table_storage[:, :pages], requests, complete
+        return query, table_storage[:request_count, :pages], requests, complete
 
     def forward(values, width, *, path, solution):
         query, table, requests, complete = values
@@ -974,7 +982,7 @@ def test_stream_topk_startup_warms_algorithm_and_capacity_buckets(
         kernel_override("attention", "qsa_block_topk_select", "triton"),
     ):
         forward(
-            inputs(startup_rows, 16),
+            inputs(startup_rows, 16, startup_rows),
             startup_rows,
             path=startup_path,
             solution=None if startup_path == "auto" else "cute_dsl",
@@ -995,7 +1003,7 @@ def test_stream_topk_startup_warms_algorithm_and_capacity_buckets(
             if config is not None:
                 configurations.setdefault(config, (rows, pages, width))
     for rows, pages, width in configurations.values():
-        values = inputs(rows, pages)
+        values = inputs(rows, pages, width)
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             selected = forward(values, width, path="stream", solution="cute_dsl")
@@ -1003,6 +1011,8 @@ def test_stream_topk_startup_warms_algorithm_and_capacity_buckets(
         graph.replay()
         query, table, requests, complete = values
         row_ids = [0, rows // 2, rows - 1]
+        if width is not None and rows > width:
+            row_ids.extend((width - 1, width))
         _assert_matches_reference(
             query[row_ids],
             keys,

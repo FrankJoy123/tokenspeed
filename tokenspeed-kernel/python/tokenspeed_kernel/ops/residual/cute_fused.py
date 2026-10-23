@@ -183,19 +183,19 @@ def _tactic(rows: int, projection_rows: int):
 
 
 def warmup(
-    normalized,
-    projection_weight,
-    up_weight,
-    hc_count,
-    hidden_size,
-    lowrank,
+    normalized: torch.Tensor,
+    projection_weight: torch.Tensor,
+    up_weight: torch.Tensor,
+    hc_count: int,
+    hidden_size: int,
+    lowrank: int,
     *,
-    projection_rows,
-    projection_scale,
-    weights_independent,
-    override,
-    solution,
-):
+    projection_rows: int,
+    projection_scale: float,
+    weights_independent: bool,
+    override: str | None,
+    solution: str | None,
+) -> None:
     """Warm eligible fused mix tactics, including tails and scheduling rounds.
 
     Args:
