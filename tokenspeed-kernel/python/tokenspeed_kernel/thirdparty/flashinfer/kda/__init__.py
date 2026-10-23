@@ -128,9 +128,9 @@ def flashinfer_kda_producer_decode(
     head_dim: int,
     cu_seqlens: torch.Tensor,
     lower_bound: float | None,
-    output_gate: torch.Tensor | None,
-    norm_weight: torch.Tensor | None,
-    norm_eps: float | None,
+    output_gate: torch.Tensor | None = None,
+    norm_weight: torch.Tensor | None = None,
+    norm_eps: float | None = None,
 ) -> torch.Tensor:
     """Prepare T=1 inputs, update indexed state, and optionally apply output norm."""
     batch = mixed_qkv.shape[0]

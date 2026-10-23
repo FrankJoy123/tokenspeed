@@ -1052,6 +1052,9 @@ class TestKimiK3RegistrationTests:
                 ) as fused,
                 mock.patch.object(kimi_k3, "mm", return_value=output) as direct,
                 mock.patch.object(
+                    kimi_k3, "rmsnorm_gated_sigmoid", return_value=hidden
+                ),
+                mock.patch.object(
                     layer.o_proj, "forward", return_value=(output, None)
                 ) as projection,
             ):

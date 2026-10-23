@@ -159,14 +159,12 @@ def test_registered_paths_and_refreshed_graph_indices(
     torch.manual_seed(4709 + 17 * batch + tokens)
     rows, pages = batch * tokens, batch * 2 + 8
     data = rnd(rows, 4 * P + 256)
-    raw, out_gate, fa, beta = (
+    raw, fa, beta = (
         data[:, : 3 * P],
-        data[:, 3 * P : 4 * P],
         data[:, 4 * P : 4 * P + D],
         data[:, 4 * P + D : 4 * P + D + H],
     )
     fb, weights = rnd(P, D), rnd(3 * P, 4)
-    norm = torch.ones(D, device="cuda", dtype=torch.bfloat16)
     a = torch.nn.Parameter(torch.zeros(H, device="cuda"))
     bias = torch.nn.Parameter(torch.zeros(P, device="cuda"))
     conv = torch.empty_strided(
@@ -218,14 +216,11 @@ def test_registered_paths_and_refreshed_graph_indices(
                 head_dim=D,
                 cu_seqlens=boundaries,
                 lower_bound=-5.0,
-                output_gate=out_gate,
-                norm_weight=norm,
-                norm_eps=1e-5,
                 recurrent_layout="v_major",
                 solution=solution,
             )
-            assert result is not None and result.output_norm_applied
-            return result.out
+            assert result is not None
+            return result
         extra = {}
         if solution == "triton":
             extra = dict(
