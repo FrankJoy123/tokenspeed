@@ -165,9 +165,15 @@ class Qwen3_5ForConditionalGenerationNextN(nn.Module):
         )
 
         if config.tie_word_embeddings:
+            if mapping.attn.tp_group != mapping.lm_head.tp_group:
+                raise ValueError(
+                    "A tied Qwen NextN head requires matching embedding and "
+                    "LM-head TP groups; attention DP with distinct head "
+                    "sharding needs tie_word_embeddings=False."
+                )
             self.lm_head = self.model.embed_tokens
         else:
-            if self.mapping.attn.has_dp:
+            if self.mapping.attn.has_dp and not self.mapping.lm_head.has_tp:
                 self.lm_head = ReplicatedLinear(
                     config.hidden_size,
                     config.vocab_size,
@@ -180,20 +186,20 @@ class Qwen3_5ForConditionalGenerationNextN(nn.Module):
                     config.vocab_size,
                     config.hidden_size,
                     quant_config=quant_config,
-                    tp_rank=self.mapping.attn.tp_rank,
-                    tp_size=self.mapping.attn.tp_size,
-                    tp_group=self.mapping.attn.tp_group,
+                    tp_rank=self.mapping.lm_head.tp_rank,
+                    tp_size=self.mapping.lm_head.tp_size,
+                    tp_group=self.mapping.lm_head.tp_group,
                     prefix=add_prefix("lm_head", prefix),
                 )
 
         self.logits_processor = LogitsProcessor(
             config,
             skip_all_gather=self.mapping.attn.has_dp,
-            tp_rank=self.mapping.attn.tp_rank,
-            tp_size=self.mapping.attn.tp_size,
-            tp_group=self.mapping.attn.tp_group,
+            tp_rank=self.mapping.lm_head.tp_rank,
+            tp_size=self.mapping.lm_head.tp_size,
+            tp_group=self.mapping.lm_head.tp_group,
             do_argmax=True,
-            dp_lm_head_tp=False,
+            dp_lm_head_tp=self.mapping.attn.has_dp and self.mapping.lm_head.has_tp,
         )
 
     def get_hot_token_id(self):

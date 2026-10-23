@@ -1021,11 +1021,13 @@ class EventLoop:
         self._dp_local_info[0, 0] = num_tokens
         self._dp_local_info[0, 1] = batch_size
         self._dp_local_info[0, 2] = int(forward_mode)
-        dist.all_gather_single(
-            self._dp_global_info,
-            self._dp_local_info,
-            group=self.world_cpu_group,
-        )
+        # Include Work.wait(), not only C10d's enqueue, in the timeline.
+        with torch.profiler.record_function("scheduler.dp_metadata_all_gather"):
+            dist.all_gather_single(
+                self._dp_global_info,
+                self._dp_local_info,
+                group=self.world_cpu_group,
+            )
         global_num_tokens = self._dp_global_info[:, 0].tolist()
         global_batch_size = self._dp_global_info[:, 1].tolist()
         global_forward_mode = self._dp_global_info[:, 2].tolist()

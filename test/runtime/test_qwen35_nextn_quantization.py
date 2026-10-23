@@ -6,6 +6,7 @@ import torch
 from torch import nn
 
 import tokenspeed.runtime.models.qwen3_5_nextn as nextn_module
+from tokenspeed.runtime.distributed.mapping import Mapping
 from tokenspeed.runtime.execution.forward_batch_info import ForwardMode
 from tokenspeed.runtime.layers.dense.nvfp4 import Nvfp4W4A16LinearMethod
 from tokenspeed.runtime.layers.logits_processor import (
@@ -49,14 +50,7 @@ def test_attention_dp_draft_lm_head_receives_quant_config(monkeypatch):
     monkeypatch.setattr(
         nextn_module, "LogitsProcessor", mock.Mock(return_value=nn.Module())
     )
-    mapping = SimpleNamespace(
-        attn=SimpleNamespace(
-            has_dp=True,
-            tp_rank=0,
-            tp_size=1,
-            tp_group=None,
-        )
-    )
+    mapping = Mapping(rank=0, world_size=2, attn_tp_size=1, attn_dp_size=2)
     config = SimpleNamespace(
         hidden_size=4,
         vocab_size=8,

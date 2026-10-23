@@ -175,6 +175,11 @@ if platform.is_nvidia:
         do_finalize: bool = True,
         enable_pdl: bool = False,
     ):
+        # Attention-DP idle groups can reach this local expert kernel with
+        # no gathered rows. CUTLASS rejects a null input pointer even when
+        # num_tokens is zero. Communication remains in the caller.
+        if x.shape[0] == 0:
+            return x.new_empty((0, w.w2_weight.shape[1]))
         if enable_pdl:
             # Not silently: a caller enabling PDL globally would otherwise
             # misread its perf measurements with nothing in the logs.
