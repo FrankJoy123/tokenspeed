@@ -124,6 +124,7 @@ def _warmup_qsa_stream_topk(
     max_partial_bytes,
     enable_pdl,
 ):
+    """Compile every stream top-k tactic these tensors and the scratch budget allow."""
     # A single-row tactic needs scratch even when grouped prefill needs none.
     # Warmup checks the shared tensor contract, then enumerates valid tactics
     # with the caller's actual budget.
@@ -149,6 +150,7 @@ def _warmup_qsa_stream_topk(
 
 
 def _warmup_qsa_sparse_attention(q, k, v, selected, *, max_rows):
+    """Warm the CuTe sparse-attention configurations these tensors legally select."""
     if (
         not _IS_NVIDIA_BLACKWELL
         or q.ndim != 3
