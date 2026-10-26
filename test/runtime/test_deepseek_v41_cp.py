@@ -188,10 +188,14 @@ def test_encoder_cache_cp_role_is_explicit_and_keeps_kv_replicated():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("with_rope", [False, True])
 @torch.inference_mode()
 def test_gpu_query_slices_read_the_same_full_current_swa_and_protect_prefix(
     monkeypatch,
+    with_rope,
 ):
+    from test.runtime.test_deepseek_v41_cache import _global_rope_table
+
     torch.manual_seed(91)
     reference = _backend("cuda", 2)
     tables = _tables("cuda")
@@ -202,6 +206,10 @@ def test_gpu_query_slices_read_the_same_full_current_swa_and_protect_prefix(
     q = torch.randn(count, 2, 512, device="cuda", dtype=torch.bfloat16)
     swa = torch.randn(count, 512, device="cuda", dtype=torch.bfloat16)
     sink = torch.zeros(2, device="cuda", dtype=torch.float32)
+    rope = _global_rope_table() if with_rope else None
+    norm = (
+        torch.rand(512, device="cuda", dtype=torch.bfloat16) + 1 if with_rope else None
+    )
     reference.cache_pool.arena.buffer.zero_()
 
     def attend(backend, query, keys, meta):
@@ -217,9 +225,9 @@ def test_gpu_query_slices_read_the_same_full_current_swa_and_protect_prefix(
             attn_sink=sink,
             softmax_scale=512**-0.5,
             index_process_group=None,
-            swa_rope_cache=None,
-            swa_norm_weight=None,
-            swa_norm_eps=0.0,
+            swa_rope_cache=rope,
+            swa_norm_weight=norm,
+            swa_norm_eps=1e-6 if with_rope else 0.0,
         )
 
     initial = _extend(reference, tables, [prefix], [0], [0], [prefix + count])
@@ -425,3 +433,98 @@ def test_replicated_kv_query_owners_do_not_allocate_sharded_history_workspace():
         expected_bytes=_recipe("cpu").workspace_bytes(),
     )
     assert backend.history_gather_workspace() is None
+
+
+@pytest.mark.parametrize("rank", range(8))
+def test_model_entry_consumes_executor_local_ids_positions_and_global_hash_views(rank):
+    from types import SimpleNamespace
+
+    from torch import nn
+
+    from tokenspeed.runtime.models.deepseek_v41 import DeepseekV41Model
+
+    # The executor owns the split. Isolate the real model entry, embedding,
+    # and mHC initialization before any transformer layer.
+    model = DeepseekV41Model.__new__(DeepseekV41Model)
+    nn.Module.__init__(model)
+    model.config = SimpleNamespace(
+        hidden_size=3,
+        hc_mult=4,
+        engram_layer_ids=(0,),
+        engram_max_ngram_size=4,
+        engram_n_heads=1,
+    )
+    model.embed_tokens = nn.Embedding(100, 3)
+    model.layers = nn.ModuleList()
+    model.pp_start_layer = model.pp_end_layer = 0
+    model.ced_decoder_start = 1
+    plan = QueryShardPlan.from_forward(
+        total_tokens=65, input_lengths=[19, 46], size=8, rank=rank
+    )
+    ids = torch.arange(65)[plan.local_slice]
+    positions = torch.arange(100, 165)[plan.local_slice]
+    hashes = torch.arange(65 * 3).reshape(65, 1, 3)[plan.local_slice]
+    mask = torch.ones(plan.local_rows, dtype=torch.bool)
+    ctx = SimpleNamespace(
+        query_shard=plan, attn_backend=SimpleNamespace(begin_indexer_stage=lambda: None)
+    )
+    state = model.encoder_forward(
+        ids,
+        positions,
+        ctx,
+        None,
+        None,
+        engram_hash_ids=hashes,
+        engram_token_mask=mask,
+        image_mask=None,
+    )
+    assert state.rows == plan.local_rows
+    torch.testing.assert_close(
+        state.hidden[:, 0], model.embed_tokens(ids), rtol=0, atol=0
+    )
+    assert torch.equal(state.positions, positions)
+    assert state.hashes is hashes and state.engram_token_mask is mask
+
+
+@pytest.mark.parametrize("rank", range(8))
+def test_model_constructs_replicated_vocabulary_for_different_query_rows(
+    monkeypatch, rank
+):
+    from test.runtime.test_deepseek_v41_model import (
+        _config,
+        _mock_loader_hardware,
+        _quant,
+    )
+
+    from tokenspeed.runtime.models.deepseek_v41 import DeepseekV41Model
+
+    config = _config()
+    config.num_hidden_layers = 3
+    config.compress_ratios = [0, 0, 2]
+    config.kv_source_layer_ids = config.index_source_layer_ids = [2]
+    config.candidate_source_layer_id = 2
+    config.engram_layer_ids, config.engram_num_embeddings = [1], [72]
+    config.num_attention_heads = config.o_groups = config.index_n_heads = 8
+    config.n_routed_experts = 8
+    mapping = Mapping(
+        rank=rank,
+        world_size=8,
+        attn_tp_size=8,
+        attn_dp_size=1,
+        attn_qcp_size=8,
+        attn_kvp_size=1,
+        dense_tp_size=1,
+        moe_tp_size=1,
+        moe_ep_size=8,
+    )
+    # Construct real loader targets on meta; only unavailable MoE hardware
+    # planning is replaced, as in the existing checkpoint tests.
+    _mock_loader_hardware(monkeypatch, mapping)
+    with torch.device("meta"):
+        model = DeepseekV41Model(
+            config, mapping, _quant(), "", host_table=False, host_layout="gpu"
+        )
+    assert model.embed_tokens.tp_size == 1
+    assert model.embed_tokens.weight.shape[0] >= config.vocab_size
+    assert model.layers[0].attn.mapping.attn.tp_size == 1
+    assert model.mapping is mapping and model.mapping.moe.ep_size == 8

@@ -2076,6 +2076,7 @@ class DeepseekV41Model(nn.Module):
                     "the final stage owns the boundary cache producer"
                 )
         if mapping.is_first_pp_rank:
+            embedding_mapping = projection_mapping(mapping)
             self.embed_tokens = VocabParallelEmbedding(
                 num_embeddings=config.vocab_size,
                 embedding_dim=config.hidden_size,
@@ -2084,9 +2085,9 @@ class DeepseekV41Model(nn.Module):
                 padding_size=64,
                 quant_config=None,
                 prefix=add_prefix("embed_tokens", prefix),
-                tp_rank=mapping.attn.tp_rank,
-                tp_size=mapping.attn.tp_size,
-                tp_group=mapping.attn.tp_group,
+                tp_rank=embedding_mapping.attn.tp_rank,
+                tp_size=embedding_mapping.attn.tp_size,
+                tp_group=embedding_mapping.attn.tp_group,
                 use_presharded_weights=False,
             )
         else:
@@ -2520,19 +2521,15 @@ class DeepseekV41Model(nn.Module):
         h = self.embed_tokens(input_ids) if input_embeds is None else input_embeds
         if h.shape != (input_ids.numel(), self.config.hidden_size):
             raise ValueError("V4.1 input embeddings have the wrong shape")
-        if ctx.query_shard is not None:
-            local = ctx.query_shard.local_slice
-            # Vocabulary TP still embeds the complete packed input collectively.
-            # Slice prepared global hashes; never restart n-gram history at a shard.
-            h = h[local].contiguous()
-            positions = positions[local].contiguous()
-            image_mask = None if image_mask is None else image_mask[local].contiguous()
-            hashes = None if hashes is None else hashes[local].contiguous()
-            engram_token_mask = (
-                None
-                if engram_token_mask is None
-                else engram_token_mask[local].contiguous()
+        if (
+            ctx.query_shard is not None
+            and input_ids.numel() != ctx.query_shard.local_rows
+        ):
+            raise ValueError(
+                "V4.1 CP model inputs must already contain this query owner's rows"
             )
+        # Executor slices ids, positions, and prepared global n-gram hashes
+        # together. Vocabulary weights are replicated across query owners.
         if h.is_cuda:
             from tokenspeed_kernel.ops.residual import mhc_init
 

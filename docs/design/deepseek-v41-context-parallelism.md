@@ -127,8 +127,11 @@ Every scheduled forward must have at least one query per rank; metadata rejects
 empty shards on all ranks before any collective. This is an experimental
 contract, not a performance or general serving claim.
 
-Vocabulary TP embeds the complete packed input before the model slices rows.
-Prepared Engram hashes and masks are sliced in the same global row order;
+The executor slices token IDs, positions, prepared global Engram hashes and
+masks together before model entry; the model must not slice them again.
+Vocabulary weights are replicated over query owners so different local token
+IDs never enter a vocabulary-TP all-reduce. Prepared hashes keep their global
+ngram history at shard boundaries;
 Engram table/head projections follow each query owner with replicated heads.
 Attention projections and mHC run only local rows. Expert communication consumes
 those rows directly, without applying replicated-input TP ownership a second time.
