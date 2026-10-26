@@ -155,6 +155,7 @@ class TestPrefillCaptureArgsTest:
             max_cudagraph_capture_size=4,
             model_is_mrope=False,
             autotune_cache_key=None,
+            cache_only_prefill=False,
             prefill_only=False,
             input_logprob_chunk_tokens=1024,
             enable_speculative_sampling=False,

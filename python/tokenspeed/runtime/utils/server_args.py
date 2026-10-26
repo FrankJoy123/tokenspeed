@@ -728,6 +728,8 @@ class ServerArgs:
     mm_encoder_tp_mode: Literal["weights", "data"] = "weights"
 
     # For PD/EPD disaggregation: "null", "prefill", "decode", or "encode" (vision-tower-only).
+    # A local cache producer: no sampling, decoder, PD peer, or KV transfer.
+    prefill_only_mode: str | None = None
     disaggregation_mode: str = "null"
     disaggregation_bootstrap_port: int = 8998
     disaggregation_transfer_backend: str = "mooncake"
@@ -1876,6 +1878,24 @@ class ServerArgs:
             )
 
     def resolve_disaggregation(self):
+        if self.prefill_only_mode is not None:
+            if self.prefill_only_mode != "encoder-cache":
+                raise ValueError("prefill_only_mode must be encoder-cache")
+            if (
+                self.disaggregation_mode != "null"
+                or self.speculative_algorithm is not None
+            ):
+                raise ValueError(
+                    "encoder-cache Prefill runs locally without speculation or PD"
+                )
+            if self.mapping.has_attn_dp or self.enable_mixed_batch:
+                raise ValueError(
+                    "encoder-cache Prefill requires attention DP1 and no mixed batches"
+                )
+            self.disable_overlap_schedule = True
+            self.enforce_eager = True
+            self.disable_prefill_graph = True
+
         # Pipeline parallelism is a prefill-node-only capability: the chunk
         # pipeline needs the P role's structural guarantees (no decode token
         # feedback, non-overlap loop).
@@ -1884,7 +1904,11 @@ class ServerArgs:
             # pipeline numerically (prefill + first token only — decode
             # autoregression is NOT correct with in-flight depth > 0).
             pp_debug = os.environ.get("TS_PP_DEBUG_ALLOW_NON_PREFILL") == "1"
-            if self.disaggregation_mode != "prefill" and not pp_debug:
+            if (
+                self.disaggregation_mode != "prefill"
+                and self.prefill_only_mode is None
+                and not pp_debug
+            ):
                 raise ValueError(
                     "--pipeline-parallel-size > 1 requires "
                     "--disaggregation-mode prefill; PP is a prefill-node "
@@ -3993,6 +4017,11 @@ class ServerArgs:
             ),
         )
         # Disaggregation
+        parser.add_argument(
+            "--prefill-only-mode",
+            choices=["encoder-cache"],
+            help="Compute V4.1 encoder cache locally; requires zero output tokens.",
+        )
         parser.add_argument(
             "--disaggregation-mode",
             type=str,

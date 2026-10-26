@@ -68,6 +68,8 @@ class DeepseekV41Config(SoftmaxAttnConfig):
             raise NotImplementedError(
                 "V4.1 FlatKV config describes target attention only"
             )
+        if server_args.mapping.has_pp and server_args.mapping.attn.kvp_size > 1:
+            raise NotImplementedError("V4.1 PP transport requires KVP1")
         if server_args.mapping.attn.kvp_size > 1:
             if server_args.disaggregation_mode not in ("null", "prefill"):
                 raise ValueError("V4.1 KVP supports aggregate or prefill roles only")

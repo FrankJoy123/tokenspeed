@@ -47,6 +47,7 @@ class All2AllBackend(Enum):
 
     NONE = "none"
     AGRS = "agrs"
+    NCCL = "nccl"
     DEEPEP = "deepep"
     FLASHINFER = "flashinfer"
     GLUON_PETIT = "gluon_petit"

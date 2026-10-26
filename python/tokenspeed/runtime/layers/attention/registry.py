@@ -1149,7 +1149,12 @@ def _narrow_spec_for_pp(
         plan_cache_storage,
     )
 
-    memory_plan = spec.memory_plan.narrow_to_layers(stage_start, stage_end)
+    # V4.1 fields share one FlatKV plane, including owners consumed by later stages.
+    memory_plan = (
+        spec.memory_plan
+        if spec.family == "deepseek_v41"
+        else spec.memory_plan.narrow_to_layers(stage_start, stage_end)
+    )
     offload = None if spec.storage_plan is None else spec.storage_plan.offload
     return dataclasses.replace(
         spec,

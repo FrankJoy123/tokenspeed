@@ -22,8 +22,8 @@
 
 A pipeline stage's forward either consumes a :class:`PPStageState` received
 from the upstream stage (mid-pipeline) or produces one for the downstream
-stage. The tensor geometry is fully derivable from the token count plus model
-config on both sides — every PP rank runs the same deterministic scheduler —
+stage. Tensor geometry derives from model config and the prepared forward
+metadata on both sides — every PP rank runs the same deterministic scheduler —
 so the wire protocol is a fixed-order sequence of raw tensor sends with no
 metadata exchange.
 """
@@ -182,6 +182,17 @@ class PPStageState:
     # Sum of projected target taps, [num_tokens, draft_hidden], in float32.
     # The final stage normalizes it once and materializes draft context KV.
     projected_context: torch.Tensor | None = None
+
+    # V4.1 keeps HC input mixes beside its residual stream. Shared owner
+    # pages use logical (request row, raw position) descriptors: every stage
+    # resolves them through its own scheduler-owned LCM tables.
+    v41_pre_mix: torch.Tensor | None = None
+    v41_cache_positions: torch.Tensor | None = None
+    v41_cache_pages: torch.Tensor | None = None
+    v41_topk_rows: torch.Tensor | None = None
+    v41_topk_lengths: torch.Tensor | None = None
+    v41_candidate_blocks: torch.Tensor | None = None
+    v41_candidate_lengths: torch.Tensor | None = None
 
     def tensors(self) -> list[torch.Tensor]:
         out = []

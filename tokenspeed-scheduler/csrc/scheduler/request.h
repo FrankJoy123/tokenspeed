@@ -44,7 +44,7 @@ namespace tokenspeed {
 
 class Request {
 public:
-    Request(const RequestSpec& spec, std::int32_t prefix_granularity, Role role);
+    Request(const RequestSpec& spec, std::int32_t prefix_granularity, Role role, bool cache_only_prefill);
 
     const std::string& Id() const { return id_; }
 
@@ -323,6 +323,7 @@ private:
     std::int32_t generated_tokens_at_admission_{0};
     std::vector<std::int32_t> spec_candidate_ids_;
     std::int32_t prefix_granularity_{};
+    bool cache_only_prefill_{};
     fsm::State state_;
 };
 

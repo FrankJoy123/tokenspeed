@@ -47,7 +47,10 @@ from tokenspeed.runtime.configs.utils import get_rope_parameters
 from tokenspeed.runtime.distributed.process_group_manager import (
     process_group_manager as pg_manager,
 )
-from tokenspeed.runtime.engine.scheduler_utils import engram_context_len
+from tokenspeed.runtime.engine.scheduler_utils import (
+    engram_context_len,
+    validate_engram_inflight,
+)
 from tokenspeed.runtime.execution.accept_simulation import (
     ACCEPT_LENGTH_SCALE,
     parse_simulated_accept_length,
@@ -385,6 +388,7 @@ class ModelExecutorConfig:
     # The prefill role of a disaggregated deployment computes prompts only:
     # it never runs a decode/verify step of its own, so the decode graph is
     # never captured there while the prefill graph keeps its ordinary gating.
+    cache_only_prefill: bool
     prefill_only: bool
     # The mirror image: an attention layout that serves decode rows only
     # (head TP under attention DP), so startup never runs an extend-shaped
@@ -520,7 +524,9 @@ class ModelExecutorConfig:
             prefill_graph_capture_batch_sizes=server_args.prefill_graph_capture_batch_sizes,
             state_checkpoint_in_forward=server_args.writes_state_checkpoints_in_forward,
             model_is_mrope=model_is_mrope,
-            prefill_only=server_args.disaggregation_mode == "prefill",
+            cache_only_prefill=server_args.prefill_only_mode == "encoder-cache",
+            prefill_only=server_args.prefill_only_mode is not None
+            or server_args.disaggregation_mode == "prefill",
             input_logprob_chunk_tokens=server_args.input_logprob_chunk_tokens,
             decode_only_attention=server_args.mapping.attn.head_tp_serves_decode_only,
             query_shard_size=server_args.mapping.attn.qcp_size,
@@ -614,10 +620,12 @@ class ModelExecutor:
         # rank's position in the KVP group selects the pages it owns.
         self._cache_kvp_rank = model_runner.mapping.attn.kvp_rank
         ngram_context = engram_context_len(model_runner.model_config.hf_text_config)
-        if ngram_context and (config.pp_size != 1 or config.overlap_schedule_depth > 1):
-            raise NotImplementedError(
-                "Engram input history requires PP=1 and in-flight depth <= 1"
-            )
+        validate_engram_inflight(
+            enabled=bool(ngram_context),
+            pp_size=config.pp_size,
+            in_flight_depth=config.overlap_schedule_depth,
+            prefill_only=config.cache_only_prefill,
+        )
         self.input_buffers.init_ngram_buffers(
             ngram_context,
             model_runner.model.get_ngram_hash_parameters() if ngram_context else None,
@@ -1259,7 +1267,7 @@ class ModelExecutor:
             else None
         )
 
-    def _pp_recv_stage_state(self, num_tokens: int):
+    def _pp_recv_stage_state(self, num_tokens: int, ctx: ForwardContext):
         """Receive the upstream stage's boundary bundle (mid-pipeline ranks).
 
         Geometry comes from the model's wire spec — both sides derive it from
@@ -1271,7 +1279,7 @@ class ModelExecutor:
         from tokenspeed.runtime.distributed.pp_stage import PPStageState
 
         spec = self.model_runner.model.model.pp_stage_state_spec(
-            num_tokens, torch.device(self.device)
+            num_tokens, torch.device(self.device), ctx
         )
         if not self._pp_wire_logged:
             self._pp_wire_logged = True
@@ -1349,7 +1357,7 @@ class ModelExecutor:
         # below can be active alongside PP.
         if self.config.pp_size > 1 and not self._pp_is_first_stage:
             # The boundary bundle carries the rows this stage computes.
-            pp_inbound = self._pp_recv_stage_state(rows.stop - rows.start)
+            pp_inbound = self._pp_recv_stage_state(rows.stop - rows.start, ctx)
             output = self.model_runner.forward(
                 ctx,
                 input_ids,
@@ -1742,6 +1750,16 @@ class ModelExecutor:
             accept_lengths = torch.ones(bs, dtype=torch.int32, device=self.device)
             return output_tokens, accept_lengths, None, None
 
+        if self.config.cache_only_prefill:
+            if not ctx.forward_mode.is_extend():
+                raise RuntimeError("encoder-cache cannot execute decode")
+            return (
+                torch.zeros(bs, dtype=torch.int32, device=self.device),
+                torch.zeros(bs, dtype=torch.int32, device=self.device),
+                None,
+                None,
+            )
+
         # Flag NaN per request and sanitize in place, before any sampling kernel.
         self.nan_guard.audit_logits(logits_output, ctx)
         if logits_output.input_token_logprobs is not None:
@@ -1840,7 +1858,7 @@ class ModelExecutor:
         are tensor-only, including padding masks, so recording this update has
         the same semantics. Callers must pass the state-write pool indices.
         """
-        if self.drafter is None:
+        if self.drafter is None and not self.config.cache_only_prefill:
             prefill = output_layout.prefill_slice
             if output_layout.num_prefill_outputs:
                 self.runtime_states.future_input_map[req_pool_indices[prefill], :1] = (

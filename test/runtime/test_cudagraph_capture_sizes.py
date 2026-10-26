@@ -62,6 +62,7 @@ def _config(sizes: list[int], *, max_num_seqs: int, max_capture: int):
         max_cudagraph_capture_size=max_capture,
         model_is_mrope=False,
         autotune_cache_key=None,
+        cache_only_prefill=False,
         prefill_only=False,
         input_logprob_chunk_tokens=1024,
         decode_only_attention=False,

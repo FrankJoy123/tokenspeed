@@ -94,8 +94,10 @@ from tokenspeed.runtime.layers.attention.query_partition import InterleavedQuery
 from tokenspeed.runtime.layers.attention.registry import register_backend
 from tokenspeed.runtime.utils.host_sync import allow_host_sync
 
-# Initial long-prefill thresholds; tune with query count and visible history.
-_INDEXER_PARTITION_MIN_QUERIES = 4096
+# Amortize query exchange by each rank's work, not a fixed global batch.
+# This retains the original 4096-row threshold for TP8 while allowing PP
+# microchunks with the same local work on narrower stage groups.
+_INDEXER_PARTITION_MIN_QUERIES_PER_RANK = 512
 _INDEXER_PARTITION_MIN_HISTORY = 8192
 
 
@@ -1259,7 +1261,7 @@ class DeepseekV41AttentionBackend(AttentionBackend):
             or layer_id != source
             or layer_id >= self.spec.candidate_source
             or len(group) <= 1
-            or total < max(_INDEXER_PARTITION_MIN_QUERIES, len(group))
+            or total < _INDEXER_PARTITION_MIN_QUERIES_PER_RANK * len(group)
         ):
             return None
         window = self._window(positions, requests, forward_mode)

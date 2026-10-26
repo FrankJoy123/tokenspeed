@@ -118,7 +118,7 @@ def moe_input_row_segments(
         """``(padded, live, tp_rank)`` of ``rank``'s attention-DP group."""
         dp_rank, tp_rank = divmod(attn.scatter_index(rank), attn.tp_size)
         # The count table is indexed by global rank with the DP stride.
-        first = dp_rank * attn.tp_size
+        first = mapping.pp_rank * mapping.stage_world_size + dp_rank * attn.tp_size
         padded = int(padded_global_num_tokens[first])
         live = int(live_global_num_tokens[first])
         if not 0 <= live <= padded:
@@ -374,7 +374,10 @@ class CommManager:
             for attn_dp_rank in range(self.mapping.attn.dp_size):
                 # global_counts is indexed by global rank with dp stride
                 # tp_size.
-                num_tokens = global_counts[attn_dp_rank * self.mapping.attn.tp_size]
+                num_tokens = global_counts[
+                    self.mapping.pp_rank * self.mapping.stage_world_size
+                    + attn_dp_rank * self.mapping.attn.tp_size
+                ]
                 scattered.extend(scatter_count(num_tokens, self.mapping.attn.tp_size))
             return scattered
         num_tokens = (

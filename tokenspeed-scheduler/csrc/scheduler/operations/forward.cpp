@@ -615,6 +615,9 @@ std::optional<fsm::SchedulePrefillEvent> Scheduler::schedulePrefill(
 
 std::optional<fsm::ScheduleDecodeEvent> Scheduler::scheduleDecode(ExecutionPlan& plan, AdmissionFeedback& feedback,
                                                                   Request* request) {
+    if (config_.cache_only_prefill) {
+        return std::nullopt;
+    }
     std::vector<BlockTable>& tables = request->BlockTablesRef();
     fsm::CacheProgress cache_progress = request->CacheProgress();
     const std::int32_t num_computed_tokens = request->NumComputedTokens();

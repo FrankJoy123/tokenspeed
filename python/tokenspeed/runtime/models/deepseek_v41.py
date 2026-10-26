@@ -45,7 +45,8 @@ the candidate source on) runs on the rows the backend's ``decoder_view()``
 keeps -- each prompt's last window (one row for a chunk that leaves its prompt
 open) plus every decode row -- after the candidate source has written the
 decoder's global KV for all rows. DSpark captures the kept rows and the model
-reports them as ``ctx.captured_rows``. PP and CP are not implemented.
+reports them as ``ctx.captured_rows``. The explicit encoder-cache producer supports PP;
+its final stage writes the candidate source cache without running decoder layers.
 Attention and MoE TPxEP widths match, or fused EP keeps attention/dense/MoE
 TP1 rows local. Its dispatch exchanges actual counts after CED narrowing.
 
@@ -75,6 +76,7 @@ from dataclasses import dataclass
 from weakref import WeakValueDictionary
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from tokenspeed_kernel.ops.attention.dsv41 import (
     IndexKeyInput,
@@ -116,7 +118,7 @@ from tokenspeed.runtime.distributed.comm_ops import (
     can_acquire_all_reduce_outputs,
     supports_all_reduce_mhc_norm,
 )
-from tokenspeed.runtime.distributed.pp_stage import PPStageState
+from tokenspeed.runtime.distributed.pp_stage import PPStageState, pp_layer_window
 from tokenspeed.runtime.execution.breakable_cuda_graph import (
     break_point,
     current_forward_ctx,
@@ -870,6 +872,84 @@ def _row_plan(layer_id: int, ced_decoder_start: int, ctx: ForwardContext) -> V41
     return V41RowPlan(view.metadata, view.metadata, None)
 
 
+def _write_v41_global_kv(owner, hidden_states, positions, requests, backend, mode):
+    if owner.compressor is None:
+        return
+    latent, row_positions, row_requests = owner.compressor(
+        hidden_states, owner.layer_id, positions, requests, backend, mode
+    )
+    index_k = owner.indexer.key(latent, row_positions, owner.rotary_emb)
+    main_rope_cache = None
+    if (
+        latent.is_cuda
+        and current_platform().is_blackwell
+        and latent.dtype == torch.bfloat16
+        and latent.shape[-1] == 512
+        and owner.rotary_emb.dim == 64
+        and backend.global_format == "global"
+    ):
+        owner.rotary_emb._prepare_cache(latent.device)
+        main_k = latent
+        main_rope_cache = owner.rotary_emb.cos_sin_cache
+    else:
+        main_k = owner.rotary_emb.apply_owned(latent, row_positions, False)
+    backend.write_global(
+        owner.layer_id,
+        main_k,
+        index_k,
+        row_positions,
+        row_requests,
+        mode,
+        main_rope_cache=main_rope_cache,
+    )
+
+
+class DeepseekV41GlobalCacheWriter(nn.Module):
+    def __init__(self, config, mapping, layer_id, quant_config, prefix):
+        super().__init__()
+        self.layer_id = layer_id
+        self.compressor = DeepseekV41Compressor(
+            config, layer_id, add_prefix("compressor", prefix)
+        )
+        self.indexer = DeepseekV41Indexer(
+            config,
+            mapping,
+            True,
+            v41_mxfp8_config(quant_config),
+            add_prefix("indexer", prefix),
+        )
+        self.rotary_emb = DeepseekV41RotaryEmbedding(
+            config, config.compress_ratios[layer_id]
+        )
+
+
+class DeepseekV41EncoderBoundary(nn.Module):
+    """Only the canonical global-cache producer at the CED cut."""
+
+    def __init__(self, config, mapping, layer_id, quant_config, prefix):
+        super().__init__()
+        self.layer_id = layer_id
+        self.engram = None
+        self.attn_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.attn = DeepseekV41GlobalCacheWriter(
+            config, mapping, layer_id, quant_config, add_prefix("attn", prefix)
+        )
+
+    @torch.profiler.record_function("tokenspeed.v41.encoder-boundary")
+    def forward(self, hidden, pre_mix, ctx):
+        backend = ctx.attn_backend
+        meta = backend.query_metadata(ctx.forward_mode)
+        x = _v41_hc_input(hidden, pre_mix, self.attn_norm)
+        _write_v41_global_kv(
+            self.attn,
+            x,
+            meta.positions,
+            meta.request_indices,
+            backend,
+            ctx.forward_mode,
+        )
+
+
 class DeepseekV41Attention(nn.Module):
     def __init__(
         self,
@@ -984,35 +1064,7 @@ class DeepseekV41Attention(nn.Module):
         return self._padded_attn_sink
 
     def _write_global_kv(self, hidden_states, positions, requests, backend, mode):
-        if self.compressor is None:
-            return
-        latent, row_positions, row_requests = self.compressor(
-            hidden_states, self.layer_id, positions, requests, backend, mode
-        )
-        index_k = self.indexer.key(latent, row_positions, self.rotary_emb)
-        main_rope_cache = None
-        if (
-            latent.is_cuda
-            and current_platform().is_blackwell
-            and latent.dtype == torch.bfloat16
-            and latent.shape[-1] == 512
-            and self.rotary_emb.dim == 64
-            and backend.global_format == "global"
-        ):
-            self.rotary_emb._prepare_cache(latent.device)
-            main_k = latent
-            main_rope_cache = self.rotary_emb.cos_sin_cache
-        else:
-            main_k = self.rotary_emb.apply_owned(latent, row_positions, False)
-        backend.write_global(
-            self.layer_id,
-            main_k,
-            index_k,
-            row_positions,
-            row_requests,
-            mode,
-            main_rope_cache=main_rope_cache,
-        )
+        _write_v41_global_kv(self, hidden_states, positions, requests, backend, mode)
 
     @break_point
     def forward(
@@ -1319,6 +1371,7 @@ class DeepseekV41MoE(DeepseekV4MoE):
                     swiglu_limit=config.swiglu_limit,
                     reduce_results=False,
                     is_shared_expert=False,
+                    replicated=False,
                 )
 
     def _renormalize_routing_weights(self) -> bool:
@@ -1559,7 +1612,7 @@ class DeepseekV41DecoderLayer(nn.Module):
             captured = residual.mean(dim=1) if capture_input else None
             x = _v41_hc_input(residual, pre_mix, self.attn_norm)
             self.attn(positions, x, ctx, reduce_output=True)
-            if self.ffn.owns_ep_communication:
+            if self.ffn.owns_ep_communication or ctx.global_num_tokens is not None:
                 self._forward_ffn(
                     x[:0],
                     None if image_mask is None else image_mask[:0],
@@ -1760,6 +1813,32 @@ class DeepseekV41DecoderLayer(nn.Module):
         return x
 
 
+def _decoder_collective_rows(
+    mapping: Mapping, ctx: ForwardContext, rows: int
+) -> list[int] | None:
+    """Exchange host-known CED rows once; pure decode keeps its prepared table."""
+    if ctx.global_num_tokens is None:
+        return None
+    if ctx.all_decode_or_idle:
+        return ctx.global_num_tokens
+    from tokenspeed.runtime.distributed.process_group_manager import (
+        process_group_manager as pg_manager,
+    )
+
+    # TP1 attention lanes own different requests. The CED backend already knows
+    # their retained row counts on the host; never download an activation count.
+    count = torch.tensor([rows], dtype=torch.int64)
+    counts = [torch.empty_like(count) for _ in mapping.world_group]
+    dist.all_gather(
+        counts,
+        count,
+        group=pg_manager.get_process_group(
+            "gloo", mapping.world_group, name="v41-decoder-rows"
+        ),
+    )
+    return [int(value.item()) for value in counts]
+
+
 def _ced_decoder_start(config) -> int:
     """First decoder layer of the causal encoder-decoder split.
 
@@ -1806,6 +1885,7 @@ class V41RowState:
     hashes: torch.Tensor | None
     engram_token_mask: torch.Tensor | None
     captured: list[torch.Tensor]
+    collective_rows: list[int] | None = None
 
     @property
     def rows(self) -> int:
@@ -1832,6 +1912,7 @@ class V41RowState:
             hashes,
             mask,
             list(captured),
+            self.collective_rows,
         )
 
     def leading(self, rows: int) -> V41RowState:
@@ -1872,18 +1953,54 @@ class DeepseekV41Model(nn.Module):
         host_layout: str,
     ):
         super().__init__()
-        if mapping.pp_size != 1:
-            raise NotImplementedError("V4.1 full-prompt baseline requires PP=1")
-        local_fused_ep = (
-            (get_moe_backend().is_gluon_petit() or get_moe_backend().is_mega_moe())
+        local_owned_ep = (
+            (
+                get_moe_backend().is_gluon_petit()
+                or get_moe_backend().is_mega_moe()
+                or global_server_args_dict.get("all2all_backend") == "nccl"
+            )
             and mapping.attn.tp_size
             == mapping.dense.tp_size
             == mapping.moe.tp_size
             == 1
         )
-        if mapping.attn.tp_size != mapping.moe.tp_ep_size and not local_fused_ep:
+        normal_dp_ep = (
+            get_moe_backend().is_marlin()
+            and not mapping.has_pp
+            and mapping.attn.tp_size == mapping.moe.tp_size == 1
+            and mapping.attn.dp_size == mapping.moe.ep_size
+            and mapping.attn.dp_size > 1
+        )
+        if (
+            normal_dp_ep
+            and not local_owned_ep
+            and not global_server_args_dict.get("disable_prefill_graph", False)
+        ):
             raise NotImplementedError(
-                "V4.1 requires attention TP == MoE TPxEP or fused EP with attention/dense/MoE TP1"
+                "V4.1 attention DP with ordinary EP requires prefill graphs disabled"
+            )
+        if (
+            mapping.attn.tp_size != mapping.moe.tp_ep_size
+            and not local_owned_ep
+            and not normal_dp_ep
+        ):
+            raise NotImplementedError(
+                "V4.1 requires attention TP == MoE TPxEP or owned EP with attention/dense/MoE TP1"
+            )
+        if (
+            mapping.attn.has_dp
+            and not get_moe_backend().is_gluon_petit()
+            and not get_moe_backend().is_mega_moe()
+            and global_server_args_dict.get("all2all_backend") != "nccl"
+        ):
+            from tokenspeed.runtime.distributed.process_group_manager import (
+                process_group_manager as pg_manager,
+            )
+
+            # Forward threads must not share CPU collective order with the
+            # event loop's request/replica rendezvous on the control group.
+            pg_manager.init_process_group(
+                mapping.world_group, backend="gloo", name="v41-decoder-rows"
             )
         if config.hc_mult != 4 or config.hc_sinkhorn_iters < 1:
             raise ValueError(
@@ -1910,25 +2027,54 @@ class DeepseekV41Model(nn.Module):
             or len(config.compress_ratios) < config.num_hidden_layers
         ):
             raise ValueError("V4.1 layer count and compression ratios disagree")
+        if (
+            mapping.has_pp
+            and global_server_args_dict.get("speculative_algorithm") is not None
+        ):
+            raise NotImplementedError(
+                "V4.1 PP does not yet carry speculative target taps"
+            )
         self.config, self.mapping = config, mapping
-        self.pp_start_layer, self.pp_end_layer = 0, config.num_hidden_layers
+        self.pp_start_layer, self.pp_end_layer = pp_layer_window(
+            config.num_hidden_layers, mapping
+        )
         self.engram_hash = None
         self.dspark_capture_layers = ()
         self.ced_decoder_start = _ced_decoder_start(config)
-        self.embed_tokens = VocabParallelEmbedding(
-            num_embeddings=config.vocab_size,
-            embedding_dim=config.hidden_size,
-            params_dtype=torch.bfloat16,
-            org_num_embeddings=None,
-            padding_size=64,
-            quant_config=None,
-            prefix=add_prefix("embed_tokens", prefix),
-            tp_rank=mapping.attn.tp_rank,
-            tp_size=mapping.attn.tp_size,
-            tp_group=mapping.attn.tp_group,
-            use_presharded_weights=False,
+        self.cache_only_prefill = (
+            global_server_args_dict.get("prefill_only_mode") == "encoder-cache"
         )
-        device = self.embed_tokens.weight.device
+        if self.cache_only_prefill and mapping.has_pp:
+            if mapping.pp_layer_partition is None:
+                raise ValueError("Encoder-only PP requires an explicit layer partition")
+            if (
+                mapping.is_last_pp_rank and self.pp_start_layer > self.ced_decoder_start
+            ) or (
+                not mapping.is_last_pp_rank
+                and self.pp_end_layer > self.ced_decoder_start
+            ):
+                raise ValueError(
+                    "Encoder-only PP boundaries must split encoder layers; "
+                    "the final stage owns the boundary cache producer"
+                )
+        if mapping.is_first_pp_rank:
+            self.embed_tokens = VocabParallelEmbedding(
+                num_embeddings=config.vocab_size,
+                embedding_dim=config.hidden_size,
+                params_dtype=torch.bfloat16,
+                org_num_embeddings=None,
+                padding_size=64,
+                quant_config=None,
+                prefix=add_prefix("embed_tokens", prefix),
+                tp_rank=mapping.attn.tp_rank,
+                tp_size=mapping.attn.tp_size,
+                tp_group=mapping.attn.tp_group,
+                use_presharded_weights=False,
+            )
+        else:
+            self.embed_tokens = None
+        self._device = torch.empty(0).device
+        device = self._device
         self.aux_stream = (
             torch.cuda.Stream(device=device) if device.type == "cuda" else None
         )
@@ -1938,28 +2084,52 @@ class DeepseekV41Model(nn.Module):
         )
         self.layers = nn.ModuleList(
             [
-                DeepseekV41DecoderLayer(
-                    config,
-                    mapping,
-                    layer_id,
-                    self.ced_decoder_start,
-                    quant_config,
-                    add_prefix(f"layers.{layer_id}", prefix),
-                    self.aux_stream,
-                    self.hc_stream,
-                    host_table,
-                    host_layout,
+                (
+                    DeepseekV41DecoderLayer(
+                        config,
+                        mapping,
+                        layer_id,
+                        self.ced_decoder_start,
+                        quant_config,
+                        add_prefix(f"layers.{layer_id}", prefix),
+                        self.aux_stream,
+                        self.hc_stream,
+                        host_table,
+                        host_layout,
+                    )
+                    if self.pp_start_layer <= layer_id < self.pp_end_layer
+                    else nn.Identity()
                 )
-                for layer_id in range(config.num_hidden_layers)
+                for layer_id in range(
+                    self.ced_decoder_start
+                    if self.cache_only_prefill
+                    else config.num_hidden_layers
+                )
             ]
         )
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = (
+            RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            if mapping.is_last_pp_rank and not self.cache_only_prefill
+            else None
+        )
         # The decoder view keeps at most a prompt's last window per extend
         # request (and one row per decode request), which bounds the rows the
         # decoder stage can see for a given request count.
         self.max_decoder_rows_per_request = int(config.sliding_window)
         # Engram history only travels past the narrowing while a decoder
         # layer still reads it.
+        if self.cache_only_prefill:
+            self.layers.append(
+                DeepseekV41EncoderBoundary(
+                    config,
+                    mapping,
+                    self.ced_decoder_start,
+                    quant_config,
+                    add_prefix(f"layers.{self.ced_decoder_start}", prefix),
+                )
+                if mapping.is_last_pp_rank
+                else nn.Identity()
+            )
         self.decoder_uses_engram = any(
             layer_id > self.ced_decoder_start for layer_id in config.engram_layer_ids
         )
@@ -1969,9 +2139,7 @@ class DeepseekV41Model(nn.Module):
         if self.engram_hash is not None:
             raise RuntimeError("Engram tokenizer is already initialized")
         if self.config.engram_layer_ids:
-            self.engram_hash = EngramHashState(
-                self.config, tokenizer, self.embed_tokens.weight.device
-            )
+            self.engram_hash = EngramHashState(self.config, tokenizer, self._device)
 
     def forward(
         self,
@@ -1993,6 +2161,17 @@ class DeepseekV41Model(nn.Module):
         invocations are unsupported. The four stages below are the whole
         forward; the prefill graph calls them individually.
         """
+        if self.mapping.has_pp:
+            return self.pipeline_forward(
+                input_ids,
+                positions,
+                ctx,
+                input_embeds,
+                pp_inbound,
+                engram_hash_ids=engram_hash_ids,
+                engram_token_mask=engram_token_mask,
+                image_mask=image_mask,
+            )
         if input_ids.numel() == 0:
             if self.mapping.attn.has_dp:
                 hidden = self.embed_tokens.weight.new_empty(
@@ -2001,6 +2180,7 @@ class DeepseekV41Model(nn.Module):
                 pre_mix = torch.empty(
                     (0, self.config.hc_mult), dtype=torch.float32, device=hidden.device
                 )
+                counts = None
                 for layer in self.layers:
                     hidden, pre_mix, _, _ = layer(
                         hidden,
@@ -2028,11 +2208,208 @@ class DeepseekV41Model(nn.Module):
             engram_token_mask=engram_token_mask,
             image_mask=image_mask,
         )
+        if self.cache_only_prefill:
+            self.layers[self.ced_decoder_start](state.hidden, state.pre_mix, ctx)
+            backend.end_indexer_forward()
+            return state.hidden[:0, 0, :], None
         state = self.narrowing_forward(state, ctx)
         hidden, captured = self.decoder_forward(state, ctx)
         output = self.finish_forward(hidden, captured, ctx)
         backend.end_indexer_forward()
         return output
+
+    def pp_stage_state_spec(
+        self, num_tokens: int, device: torch.device, ctx: ForwardContext
+    ):
+        """Wire geometry from the full cache span and the prepared CED query view."""
+        del device
+        from tokenspeed.runtime.models.deepseek_v41_pp import (
+            logical_page_descriptors,
+        )
+
+        known = [i for i in self.config.kv_source_layer_ids if i < self.pp_start_layer]
+        owners = int(bool(known))
+        backend = ctx.attn_backend
+        capacity = (
+            len(
+                logical_page_descriptors(
+                    backend._prefill_spans,
+                    ratio=backend.spec.compress_ratios[known[-1]],
+                )
+            )
+            if known
+            else 0
+        )
+        row_layout = backend.spec.row_layout()
+        wire_bytes = row_layout.global_row_bytes + row_layout.index_row_bytes
+        narrowed = self.pp_start_layer > self.ced_decoder_start
+        queries = (
+            ctx.attn_backend.decoder_view().metadata.positions.numel()
+            if narrowed
+            else num_tokens
+        )
+        spec = [
+            (
+                "hidden_states",
+                (queries, self.config.hc_mult, self.config.hidden_size),
+                torch.bfloat16,
+            ),
+            ("v41_pre_mix", (queries, self.config.hc_mult), torch.float32),
+            ("v41_cache_positions", (owners, capacity, 2), torch.int64),
+            ("v41_cache_pages", (owners, capacity, 64, wire_bytes), torch.uint8),
+            ("v41_topk_rows", (queries, self.config.index_topk), torch.int32),
+            ("v41_topk_lengths", (queries,), torch.int32),
+        ]
+        if narrowed:
+            spec.extend(
+                [
+                    (
+                        "v41_candidate_blocks",
+                        (queries, self.config.candidate_topk_blocks),
+                        torch.int32,
+                    ),
+                    ("v41_candidate_lengths", (queries,), torch.int32),
+                ]
+            )
+        return spec
+
+    def pipeline_forward(
+        self,
+        input_ids,
+        positions,
+        ctx,
+        input_embeds,
+        pp_inbound,
+        *,
+        engram_hash_ids,
+        engram_token_mask,
+        image_mask,
+    ):
+        """Run this layer window, preserving the candidate source's CED cut."""
+        from tokenspeed.runtime.models.deepseek_v41_pp import restore, snapshot
+
+        if not ctx.forward_mode.is_extend():
+            raise ValueError("V4.1 pipeline execution supports prefill only")
+        backend = ctx.attn_backend
+        backend.begin_indexer_forward()
+        try:
+            if self.mapping.is_first_pp_rank:
+                if pp_inbound is not None:
+                    raise ValueError(
+                        "First PP stage must not receive an inbound bundle"
+                    )
+                state = self.encoder_forward(
+                    input_ids,
+                    positions,
+                    ctx,
+                    input_embeds,
+                    None,
+                    engram_hash_ids=engram_hash_ids,
+                    engram_token_mask=engram_token_mask,
+                    image_mask=image_mask,
+                )
+            else:
+                if pp_inbound is None:
+                    raise ValueError("V4.1 PP stage requires its upstream bundle")
+                restore(
+                    backend,
+                    pp_inbound,
+                    layer_start=self.pp_start_layer,
+                    mode=ctx.forward_mode,
+                )
+                keep = None
+                if self.pp_start_layer > self.ced_decoder_start:
+                    keep = backend.decoder_view().keep_rows
+
+                def selected(t):
+                    return t if t is None or keep is None else t.index_select(0, keep)
+
+                row_positions = (
+                    backend.decoder_view().metadata.positions
+                    if self.pp_start_layer > self.ced_decoder_start
+                    else positions
+                )
+                state = V41RowState(
+                    pp_inbound.hidden_states,
+                    pp_inbound.v41_pre_mix,
+                    row_positions,
+                    selected(image_mask),
+                    selected(engram_hash_ids),
+                    selected(engram_token_mask),
+                    [],
+                )
+                h, pre = state.hidden, state.pre_mix
+                pending_post = None
+                stage_end = min(self.pp_end_layer, self.ced_decoder_start)
+                for layer in self.layers[self.pp_start_layer : stage_end]:
+                    h, pre, pending_post = self._run_layer(
+                        layer,
+                        h,
+                        pre,
+                        state,
+                        ctx,
+                        state.captured,
+                        pending_post,
+                        stage_end=stage_end,
+                    )
+                if pending_post is not None:
+                    h = pending_post.finish(h)
+                state.hidden, state.pre_mix = h, pre
+            if self.cache_only_prefill:
+                if self.mapping.is_last_pp_rank:
+                    self.layers[self.ced_decoder_start](
+                        state.hidden, state.pre_mix, ctx
+                    )
+                    return state.hidden[:0, 0, :], None
+                payload = snapshot(
+                    backend,
+                    num_tokens=input_ids.numel(),
+                    max_requests=global_server_args_dict["max_num_seqs"],
+                    layer_end=self.pp_end_layer,
+                    mode=ctx.forward_mode,
+                )
+                return (
+                    PPStageState(
+                        hidden_states=state.hidden, v41_pre_mix=state.pre_mix, **payload
+                    ),
+                    None,
+                )
+            if self.pp_start_layer <= self.ced_decoder_start < self.pp_end_layer:
+                state = self.narrowing_forward(state, ctx)
+            h, pre = state.hidden, state.pre_mix
+            pending_post = None
+            if state.rows or self.mapping.attn.has_dp:
+                for layer in self.layers[
+                    max(
+                        self.pp_start_layer, self.ced_decoder_start + 1
+                    ) : self.pp_end_layer
+                ]:
+                    h, pre, pending_post = self._run_layer(
+                        layer,
+                        h,
+                        pre,
+                        state,
+                        ctx,
+                        state.captured,
+                        pending_post,
+                        stage_end=self.pp_end_layer,
+                    )
+            if pending_post is not None:
+                h = pending_post.finish(h)
+            state.hidden, state.pre_mix = h, pre
+            if self.mapping.is_last_pp_rank:
+                hidden = _norm(v41_hc_pre(h, pre), self.norm)
+                return self.finish_forward(hidden, state.captured, ctx)
+            payload = snapshot(
+                backend,
+                num_tokens=input_ids.numel(),
+                max_requests=global_server_args_dict["max_num_seqs"],
+                layer_end=self.pp_end_layer,
+                mode=ctx.forward_mode,
+            )
+            return PPStageState(hidden_states=h, v41_pre_mix=pre, **payload), None
+        finally:
+            backend.end_indexer_forward()
 
     def _run_layer(
         self,
@@ -2047,31 +2424,32 @@ class DeepseekV41Model(nn.Module):
         stage_end: int,
     ) -> tuple[torch.Tensor, torch.Tensor, V41HCPost | None]:
         """Finish an incoming post before Engram; capture the input after it."""
-        if layer.engram is not None:
-            if pending_post is not None:
-                hidden = pending_post.finish(hidden)
-                pending_post = None
-            hidden = layer.engram(
+        with torch.profiler.record_function(f"tokenspeed.v41.layer.{layer.layer_id}"):
+            if layer.engram is not None:
+                if pending_post is not None:
+                    hidden = pending_post.finish(hidden)
+                    pending_post = None
+                hidden = layer.engram(
+                    hidden,
+                    state.hashes[:, layer.engram.layer_hash_index],
+                    state.engram_token_mask,
+                )
+            hidden, pre_mix, pending_post, tap = layer(
                 hidden,
-                state.hashes[:, layer.engram.layer_hash_index],
-                state.engram_token_mask,
+                pre_mix,
+                state.positions,
+                state.image_mask,
+                ctx,
+                pending_post=pending_post,
+                # Stage handoffs and Engram require a complete HC stream. Admit
+                # deferred reduction only when the next input can consume it fused.
+                allow_ffn_reduce_fusion=layer.layer_id + 1 < stage_end
+                and self.layers[layer.layer_id + 1].engram is None,
+                capture_input=layer.layer_id in self.dspark_capture_layers,
             )
-        hidden, pre_mix, pending_post, tap = layer(
-            hidden,
-            pre_mix,
-            state.positions,
-            state.image_mask,
-            ctx,
-            pending_post=pending_post,
-            # Stage handoffs and Engram require a complete HC stream. Admit
-            # deferred reduction only when the next input can consume it fused.
-            allow_ffn_reduce_fusion=layer.layer_id + 1 < stage_end
-            and self.layers[layer.layer_id + 1].engram is None,
-            capture_input=layer.layer_id in self.dspark_capture_layers,
-        )
-        if tap is not None:
-            captured.append(tap)
-        return hidden, pre_mix, pending_post
+            if tap is not None:
+                captured.append(tap)
+            return hidden, pre_mix, pending_post
 
     def encoder_forward(
         self,
@@ -2128,7 +2506,9 @@ class DeepseekV41Model(nn.Module):
             h, pre_mix, positions, image_mask, hashes, engram_token_mask, []
         )
         pending_post = None
-        for layer in self.layers[: self.ced_decoder_start]:
+        for layer in self.layers[
+            self.pp_start_layer : min(self.pp_end_layer, self.ced_decoder_start)
+        ]:
             h, pre_mix, pending_post = self._run_layer(
                 layer,
                 h,
@@ -2137,7 +2517,7 @@ class DeepseekV41Model(nn.Module):
                 ctx,
                 state.captured,
                 pending_post,
-                stage_end=self.ced_decoder_start,
+                stage_end=min(self.pp_end_layer, self.ced_decoder_start),
             )
         if pending_post is not None:
             h = pending_post.finish(h)
@@ -2164,17 +2544,11 @@ class DeepseekV41Model(nn.Module):
         if state.rows > rows:
             state = state.leading(rows)
         view = backend.decoder_view()
-        # Checked here, in the stage that always runs eagerly: a replayed
-        # encoder graph would skip a check placed before it.
-        if (
-            view.keep_rows is not None
-            and ctx.global_num_tokens is not None
-            and not self.layers[start].ffn.owns_ep_communication
-        ):
-            raise NotImplementedError(
-                "V4.1 CED narrowing under attention data parallelism needs the "
-                "narrowed row counts exchanged across ranks"
-            )
+        counts = (
+            _decoder_collective_rows(self.mapping, ctx, view.metadata.positions.numel())
+            if not self.layers[start].ffn.owns_ep_communication
+            else None
+        )
         captured = list(state.captured)
         # Fused EP exchanges actual local row counts inside its dispatch. The
         # original DP counts remain valid capacity bounds after CED narrowing;
@@ -2212,6 +2586,7 @@ class DeepseekV41Model(nn.Module):
             kept(hashes),
             kept(mask),
             [kept(tap) for tap in captured],
+            counts,
         )
 
     def decoder_forward(
@@ -2236,7 +2611,7 @@ class DeepseekV41Model(nn.Module):
         pending_post = None
         layers = self.layers[start + 1 :]
         if layers:
-            with report_collective_sizing(ctx, state.rows, None):
+            with report_collective_sizing(ctx, state.rows, state.collective_rows):
                 for layer in layers:
                     h, pre_mix, pending_post = self._run_layer(
                         layer,
@@ -2368,6 +2743,10 @@ class DeepseekV41ForCausalLM(BaseCausalLM):
         is_multimodal_active: bool,
         mm_attention_backend: str | None,
     ) -> None:
+        if mapping.has_pp and is_multimodal_active:
+            raise NotImplementedError(
+                "V4.1 PP currently requires --language-model-only"
+            )
         super().__init__(
             config=config,
             mapping=mapping,
@@ -2451,10 +2830,21 @@ class DeepseekV41ForCausalLM(BaseCausalLM):
                 "image_end",
                 "image_newline",
             )
-        return not is_engram_embed_checkpoint_name(self._checkpoint_name(name))
+        raw = self._checkpoint_name(name)
+        if is_engram_embed_checkpoint_name(raw):
+            return False
+        # Filter before the CPU iterator materializes a remote stage's tensor.
+        return self._skip_checkpoint_weight(raw) not in (
+            "remote_pipeline_layer",
+            "remote_pipeline_embedding",
+            "remote_pipeline_head",
+            "encoder_only_unused",
+        )
 
     def resolve_lm_head(self, config, quant_config, prefix):
         """Keep the checkpoint head unquantized in the model loading dtype."""
+        if self.model.cache_only_prefill:
+            return None
         config = config.text_config
         params_dtype = torch.get_default_dtype()
         # Same layout rule as BaseCausalLM.resolve_lm_head: replicated under
@@ -2485,7 +2875,18 @@ class DeepseekV41ForCausalLM(BaseCausalLM):
         )
 
     def resolve_logits_processor(self, config):
+        if self.model.cache_only_prefill:
+            return None
         return super().resolve_logits_processor(config.text_config)
+
+    def exit_logits(self, input_ids, hidden_states, aux_hidden_states, ctx):
+        if self.model.cache_only_prefill:
+            from tokenspeed.runtime.layers.logits_processor import LogitsProcessorOutput
+
+            return LogitsProcessorOutput(
+                next_token_logits=hidden_states.new_empty((0, 0))
+            )
+        return super().exit_logits(input_ids, hidden_states, aux_hidden_states, ctx)
 
     def prepare_model_kwargs(
         self, ctx: ForwardContext, input_ids: torch.Tensor, kwargs: dict
@@ -2589,6 +2990,23 @@ class DeepseekV41ForCausalLM(BaseCausalLM):
         return targets
 
     def _skip_checkpoint_weight(self, name: str) -> str | None:
+        if self.model.cache_only_prefill:
+            layer = re.match(r"layers\.(\d+)\.", name)
+            cut = self.model.ced_decoder_start
+            if name.startswith(("head.", "norm.")) or (layer and int(layer[1]) > cut):
+                return "encoder_only_unused"
+            if (
+                layer
+                and int(layer[1]) == cut
+                and not name.startswith(
+                    (
+                        f"layers.{cut}.attn_norm.",
+                        f"layers.{cut}.attn.compressor.",
+                        f"layers.{cut}.attn.indexer.",
+                    )
+                )
+            ):
+                return "encoder_only_unused"
         if name.startswith(("vision.", "aligner.")) or name in (
             "image_start",
             "image_end",
@@ -2597,6 +3015,17 @@ class DeepseekV41ForCausalLM(BaseCausalLM):
             return "vision"
         if name.startswith("mtp."):
             return "draft"
+        layer = re.match(r"layers\.(\d+)\.", name)
+        if (
+            layer
+            and int(layer[1]) < self.model.config.num_hidden_layers
+            and not self.model.pp_start_layer <= int(layer[1]) < self.model.pp_end_layer
+        ):
+            return "remote_pipeline_layer"
+        if name.startswith("embed.") and not self.mapping.is_first_pp_rank:
+            return "remote_pipeline_embedding"
+        if name.startswith(("head.", "norm.")) and not self.mapping.is_last_pp_rank:
+            return "remote_pipeline_head"
         match = re.fullmatch(r"layers\.(\d+)\.ffn\.gate\.bias_vl", name)
         if (
             match
@@ -2819,6 +3248,9 @@ class DeepseekV41ForCausalLM(BaseCausalLM):
                 raise ValueError(f"Unexpected V4.1 checkpoint tensor: {raw_name}")
             loaded.add(name)
         self._load_missing_engram_tables(loaded)
+        # Ranks without an Engram layer must join the same load fence.
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
         missing = set(targets) - loaded
         for key, pair in pending.items():
             if "weight" not in pair:
@@ -2874,8 +3306,6 @@ class DeepseekV41ForCausalLM(BaseCausalLM):
             with safe_open(shard, framework="pt", device="cpu") as handle:
                 embed.load_sharded(field, handle.get_slice(mapped), 65536)
             loaded.add(raw)
-        if torch.distributed.is_initialized():
-            torch.distributed.barrier()
 
     def post_load_weights(self) -> None:
         for module in self.modules():

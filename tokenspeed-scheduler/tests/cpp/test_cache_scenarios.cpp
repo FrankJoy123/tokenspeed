@@ -3004,7 +3004,7 @@ TEST(ExtendResultEvent, AwaitingResultAbsorbsEmptyIntermediateResults) {
     ReqPoolAllocator req_pool{4};
 
     RequestSpec spec{.request_id = "r", .tokens = MakeAlignedTokens(/*num_pages=*/2, /*granularity=*/2)};
-    Request request{spec, /*prefix_granularity=*/2, Role::kFused};
+    Request request{spec, /*prefix_granularity=*/2, Role::kFused, /*cache_only_prefill=*/false};
     std::vector<BlockTable> tables(coordinator.NumGroups());
     ASSERT_TRUE(AdmitForTest(coordinator, tables, /*num_tokens=*/4));
     request.Apply(fsm::SchedulePrefillFirstChunkEvent{/*tokens_this_round=*/4,
@@ -3041,7 +3041,7 @@ TEST(ExtendResultEvent, AwaitingResultCarriesForwardsInFlightIntoPrefillDone) {
     ReqPoolAllocator req_pool{4};
 
     RequestSpec spec{.request_id = "r", .tokens = MakeAlignedTokens(/*num_pages=*/2, /*granularity=*/2)};
-    Request request{spec, /*prefix_granularity=*/2, Role::kFused};
+    Request request{spec, /*prefix_granularity=*/2, Role::kFused, /*cache_only_prefill=*/false};
     std::vector<BlockTable> tables(coordinator.NumGroups());
     ASSERT_TRUE(AdmitForTest(coordinator, tables, /*num_tokens=*/4));
     request.Apply(fsm::SchedulePrefillFirstChunkEvent{/*tokens_this_round=*/2,
@@ -3087,7 +3087,7 @@ TEST(SnapshotRetractEvent, StampsResumePriorityAndKeepsTheResumePoint) {
     SnapshotSlotAllocator slots{4};
 
     RequestSpec spec{.request_id = "r1", .tokens = MakeAlignedTokens(/*num_pages=*/2, /*granularity=*/2)};
-    Request request{spec, /*prefix_granularity=*/2, Role::kFused};
+    Request request{spec, /*prefix_granularity=*/2, Role::kFused, /*cache_only_prefill=*/false};
     std::vector<BlockTable> tables(coordinator.NumGroups());
     ASSERT_TRUE(AdmitForTest(coordinator, tables, /*num_tokens=*/4));
     request.Apply(fsm::SchedulePrefillFirstChunkEvent{/*tokens_this_round=*/2,
@@ -3124,7 +3124,7 @@ TEST(RetractionHeadroom, EscalatesPerRetractionAndStopsAtTheGenerationBudget) {
     spec.request_id = "r";
     spec.tokens = {1, 2, 3, 4};
     spec.max_new_tokens = 6000;
-    Request request{spec, /*prefix_granularity=*/2, Role::kFused};
+    Request request{spec, /*prefix_granularity=*/2, Role::kFused, /*cache_only_prefill=*/false};
 
     constexpr std::int32_t kSafeSteps = 4096;
     EXPECT_EQ(request.AdmissionHeadroom(kSafeSteps), 4096) << "a fresh request secures one window";
@@ -3156,7 +3156,7 @@ TEST(RetractionHeadroom, ReservesOnlyTheRemainingGenerationBudget) {
 
     RequestSpec spec{.request_id = "r", .tokens = MakeAlignedTokens(/*num_pages=*/2, /*granularity=*/2)};
     spec.max_new_tokens = 6000;
-    Request request{spec, /*prefix_granularity=*/2, Role::kFused};
+    Request request{spec, /*prefix_granularity=*/2, Role::kFused, /*cache_only_prefill=*/false};
     std::vector<BlockTable> tables(coordinator.NumGroups());
     ASSERT_TRUE(AdmitForTest(coordinator, tables, /*num_tokens=*/4));
     request.Apply(fsm::SchedulePrefillFirstChunkEvent{/*tokens_this_round=*/4,
@@ -3216,7 +3216,7 @@ TEST(RetractionHeadroom, SpendingTheWindowNeverMakesItCoverTheRemainder) {
 
     RequestSpec spec{.request_id = "r", .tokens = MakeAlignedTokens(/*num_pages=*/2, /*granularity=*/2)};
     spec.max_new_tokens = 6000;
-    Request request{spec, /*prefix_granularity=*/2, Role::kFused};
+    Request request{spec, /*prefix_granularity=*/2, Role::kFused, /*cache_only_prefill=*/false};
     std::vector<BlockTable> tables(coordinator.NumGroups());
     ASSERT_TRUE(AdmitForTest(coordinator, tables, /*num_tokens=*/4));
     request.Apply(fsm::SchedulePrefillFirstChunkEvent{/*tokens_this_round=*/4,
@@ -3244,7 +3244,7 @@ TEST(RetractionHeadroom, AnUndeclaredGenerationBudgetDemandsNone) {
     RequestSpec spec;
     spec.request_id = "r";
     spec.tokens = {1, 2, 3, 4};
-    Request request{spec, /*prefix_granularity=*/2, Role::kFused};
+    Request request{spec, /*prefix_granularity=*/2, Role::kFused, /*cache_only_prefill=*/false};
 
     constexpr std::int32_t kSafeSteps = 4096;
     EXPECT_EQ(request.AdmissionHeadroom(kSafeSteps), 0);
@@ -3693,7 +3693,7 @@ TEST(CacheProgressTest, JunctionSurvivesPrefillRounds) {
     ReqPoolAllocator req_pool{4};
 
     RequestSpec spec{.request_id = "r1", .tokens = MakeAlignedTokens(/*num_pages=*/6, /*granularity=*/2)};
-    Request request{spec, /*prefix_granularity=*/2, Role::kFused};
+    Request request{spec, /*prefix_granularity=*/2, Role::kFused, /*cache_only_prefill=*/false};
     std::vector<BlockTable> tables(coordinator.NumGroups());
     const std::optional<CacheCoordinator::AdmissionResult> admission =
         AdmitForTest(coordinator, tables, /*num_tokens=*/4);
@@ -3833,7 +3833,7 @@ TEST(CacheProgressTest, RemotePrefillPreservesDecodeReserve) {
     ReqPoolAllocator req_pool{4};
 
     RequestSpec spec{.request_id = "r1", .tokens = MakeAlignedTokens(/*num_pages=*/2, /*granularity=*/2)};
-    Request request{spec, /*prefix_granularity=*/2, Role::kD};
+    Request request{spec, /*prefix_granularity=*/2, Role::kD, /*cache_only_prefill=*/false};
     request.Apply(fsm::BootstrappedEvent{});
     std::vector<BlockTable> tables(coordinator.NumGroups());
     const std::optional<CacheCoordinator::AdmissionResult> admission =
@@ -3867,7 +3867,7 @@ TEST(RetractionStateFsmTest, ADecodingVictimSuspendsAndResumesDecodingWithTheSam
     ReqPoolAllocator req_pool{4};
     SnapshotSlotAllocator slots{4};
     RequestSpec spec{.request_id = "r1", .tokens = MakeAlignedTokens(/*num_pages=*/2, /*granularity=*/2)};
-    Request request{spec, /*prefix_granularity=*/2, Role::kD};
+    Request request{spec, /*prefix_granularity=*/2, Role::kD, /*cache_only_prefill=*/false};
     request.Apply(fsm::BootstrappedEvent{});
     std::vector<BlockTable> tables(coordinator.NumGroups());
     auto admission = AdmitForTest(coordinator, tables, GroupDemand{.extent = DenseGrowth{4}, .reserve_tokens = 1});
@@ -3949,7 +3949,7 @@ TEST(SnapshotRetractEvent, APrefillDoneVictimResumesAsPrefillDone) {
     SnapshotSlotAllocator slots{4};
 
     RequestSpec spec{.request_id = "r1", .tokens = MakeAlignedTokens(/*num_pages=*/2, /*granularity=*/2)};
-    Request request{spec, /*prefix_granularity=*/2, Role::kFused};
+    Request request{spec, /*prefix_granularity=*/2, Role::kFused, /*cache_only_prefill=*/false};
     std::vector<BlockTable> tables(coordinator.NumGroups());
     const std::optional<CacheCoordinator::AdmissionResult> admission =
         AdmitForTest(coordinator, tables, /*num_tokens=*/4);
@@ -4052,7 +4052,7 @@ TEST(EventFailurePath, ReqPoolExhaustionAtFirstChunkLeavesPoolBalanced) {
     ASSERT_EQ(req_pool.AvailableSlots(), 0);
 
     RequestSpec spec{.request_id = "r1", .tokens = MakeAlignedTokens(/*num_pages=*/2, /*granularity=*/2)};
-    Request request{spec, /*prefix_granularity=*/2, Role::kFused};
+    Request request{spec, /*prefix_granularity=*/2, Role::kFused, /*cache_only_prefill=*/false};
     std::vector<BlockTable> tables(coordinator.NumGroups());
     ASSERT_TRUE(AdmitForTest(coordinator, tables, /*num_tokens=*/4));
     ASSERT_EQ(pool.NumEmptyLcmBlocks(), 27);

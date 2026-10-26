@@ -165,7 +165,7 @@ class MoELayer(torch.nn.Module):
 
         # TODO: Unify alltoall backends at MoELayer level
         a2a_backend = get_all2all_backend().value
-        if a2a_backend in ("agrs", "flashinfer"):
+        if a2a_backend in ("agrs", "flashinfer", "nccl"):
             a2a_backend = "none"
         self._spec = MoELayerSpec(
             top_k=top_k,

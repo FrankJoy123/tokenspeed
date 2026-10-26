@@ -83,6 +83,8 @@ class DeepseekV4MLP(nn.Module):
         swiglu_limit: float | None = None,
         reduce_results: bool = False,
         is_shared_expert: bool = False,
+        *,
+        replicated: bool,
     ) -> None:
         super().__init__()
         if hidden_act != "silu":
@@ -91,6 +93,8 @@ class DeepseekV4MLP(nn.Module):
         tp_rank = tp.tp_ep_rank if is_shared_expert else tp.tp_rank
         tp_size = tp.tp_ep_size if is_shared_expert else tp.tp_size
         tp_group = tp.tp_ep_group if is_shared_expert else tp.tp_group
+        if replicated:
+            tp_rank, tp_size, tp_group = 0, 1, None
         self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size,
             [intermediate_size] * 2,
@@ -273,7 +277,13 @@ class DeepseekV4MoE(nn.Module):
         moe_backend = get_moe_backend()
         self.use_mega_moe = moe_backend.is_mega_moe()
         self.use_gluon_petit = moe_backend.is_gluon_petit()
-        self.owns_ep_communication = self.use_mega_moe or self.use_gluon_petit
+        self.use_nccl_dispatch = (
+            global_server_args_dict.get("all2all_backend") == "nccl"
+            and mapping.moe.ep_size > 1
+        )
+        self.owns_ep_communication = (
+            self.use_mega_moe or self.use_gluon_petit or self.use_nccl_dispatch
+        )
         # Petit's VMM-backed collective and auxiliary-stream shared experts do
         # not replay safely together. Keep both branches on the main stream.
         self.stream_fork = StreamFork(None if self.use_gluon_petit else aux_stream)
@@ -339,7 +349,8 @@ class DeepseekV4MoE(nn.Module):
                 # Normal EP sums routed and shared partials over the same TPxEP
                 # group. Fused MegaMoE paths return complete routed outputs and
                 # therefore keep the shared expert dense and local.
-                is_shared_expert=not (self.use_mega_moe or self.use_gluon_petit),
+                is_shared_expert=not self.owns_ep_communication,
+                replicated=self.use_nccl_dispatch,
             )
         else:
             self.shared_experts = None
@@ -445,6 +456,32 @@ class DeepseekV4MoE(nn.Module):
         max_num_tokens_per_gpu: int,
         do_finalize: bool,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.use_nccl_dispatch:
+            from tokenspeed.runtime.distributed.process_group_manager import (
+                process_group_manager as pg_manager,
+            )
+            from tokenspeed.runtime.layers.moe.nccl_dispatch import dispatch_combine
+
+            group = pg_manager.get_device_process_group(self.mapping.moe.ep_group)
+
+            def local_experts(rows, routes):
+                if rows.shape[0] == 0:
+                    return torch.empty_like(rows)
+                return self.experts(
+                    rows,
+                    routes,
+                    num_global_tokens,
+                    max_num_tokens_per_gpu,
+                    do_finalize=True,
+                )
+
+            return dispatch_combine(
+                hidden_states,
+                topk_output,
+                num_experts=self.config.n_routed_experts,
+                group=group,
+                local_experts=local_experts,
+            )
         return self.experts(
             hidden_states=hidden_states,
             topk_output=topk_output,
@@ -512,12 +549,13 @@ class DeepseekV4MoE(nn.Module):
 
         The following all-reduce can read this memory in place.
         """
-        if hidden_states.shape[0] == 0 and not self.use_gluon_petit:
+        if hidden_states.shape[0] == 0 and not self.owns_ep_communication:
             return hidden_states if out is None else out.copy_(hidden_states)
         with nvtx_range("moe_select_experts"):
             topk_output = self._compute_topk_output(hidden_states, input_ids)
         deferred_finalize = (
-            hidden_states.dtype == torch.bfloat16
+            not self.use_nccl_dispatch
+            and hidden_states.dtype == torch.bfloat16
             and self.experts.supports_deferred_cuda_finalize
         )
         shared = None
@@ -570,6 +608,22 @@ class DeepseekV4MoE(nn.Module):
                 ctx,
                 comm_manager,
             )
+        if self.use_nccl_dispatch and self.mapping.attn.has_tp:
+            from tokenspeed.runtime.distributed.process_group_manager import (
+                process_group_manager as pg_manager,
+            )
+            from tokenspeed.runtime.layers.moe.nccl_dispatch import replicated_input_moe
+
+            group = pg_manager.get_device_process_group(self.mapping.attn.tp_group)
+            result = replicated_input_moe(
+                hidden_states,
+                input_ids,
+                group=group,
+                local_forward=lambda rows, ids: self.forward_normal(
+                    rows, ids, num_global_tokens, max_num_tokens_per_gpu
+                ),
+            )
+            return result if out is None else out.copy_(result)
         return self.forward_normal(
             hidden_states, input_ids, num_global_tokens, max_num_tokens_per_gpu, out
         )

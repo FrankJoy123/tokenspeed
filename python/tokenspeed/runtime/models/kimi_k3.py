@@ -3670,7 +3670,7 @@ class KimiLinearModel(nn.Module):
         return self.embed_tokens
 
     def pp_stage_state_spec(
-        self, num_tokens: int, device: torch.device
+        self, num_tokens: int, device: torch.device, ctx: ForwardContext
     ) -> list[tuple[str, tuple[int, ...], torch.dtype]]:
         """Wire spec (name, shape, dtype) of the inter-stage boundary bundle.
 
@@ -3681,7 +3681,7 @@ class KimiLinearModel(nn.Module):
         two are the same number because the windows abut, so no shape
         metadata crosses the wire.
         """
-        del device
+        del device, ctx
         hidden = self.config.hidden_size
         valid_blocks = ceil_div(self.pp_start_layer, self.config.attn_res_block_size)
         # The activation dtype. get_default_dtype() would be wrong here (the

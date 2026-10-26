@@ -52,6 +52,9 @@ void validateGroupCapacityInputs(const SchedulerConfig& config, const CacheGroup
 }  // namespace
 
 void SchedulerConfig::Validate() const {
+    if (cache_only_prefill && (role != Role::kFused || enable_mixed_prefill_decode)) {
+        throw std::invalid_argument("cache-only Prefill requires a local, unmixed scheduler");
+    }
     ValidateCapacityInputs();
     if (device_allocator.total_pages <= 1) {
         throw std::invalid_argument("Scheduler: device cache must contain a null page and usable capacity");

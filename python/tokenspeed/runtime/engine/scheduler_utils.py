@@ -69,6 +69,18 @@ def engram_context_len(text_config) -> int:
     return text_config.ngram_context_len
 
 
+def validate_engram_inflight(
+    *, enabled: bool, pp_size: int, in_flight_depth: int, prefill_only: bool
+) -> None:
+    """Allow immutable prompt windows in PP; retain decode feedback limits."""
+    if enabled and (
+        (pp_size > 1 and not prefill_only) or (pp_size == 1 and in_flight_depth > 1)
+    ):
+        raise NotImplementedError(
+            "Engram history supports PP only for prefill; decode in-flight depth must be <= 1"
+        )
+
+
 @dataclass(frozen=True)
 class SchedulerCacheGeometry:
     prefix_granularity: int

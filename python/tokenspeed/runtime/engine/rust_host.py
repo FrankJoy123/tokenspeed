@@ -1026,7 +1026,11 @@ class HostBootstrap:
             else:
                 draft_model_config = None
             ngram_context_len = engram_context_len(model_config.hf_text_config)
-            if ngram_context_len and mapping.has_pp:
+            if (
+                ngram_context_len
+                and mapping.has_pp
+                and server_args.prefill_only_mode is None
+            ):
                 raise NotImplementedError(
                     "Engram input history requires PP=1 and in-flight depth <= 1"
                 )

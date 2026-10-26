@@ -99,8 +99,9 @@ def marlin_mxfp4_moe_weights(plan: dict, w: torch.nn.Module) -> None:
     Input (from the mxfp4 weight loader): ``w13_weight``/``w2_weight`` packed
     E2M1 as uint8 ``[E, N, K//2]`` and ``w13_weight_scale``/``w2_weight_scale``
     raw E8M0 as uint8 ``[E, N, K//32]``. Output: Marlin-repacked int32 weights
-    and permuted float8_e8m0fnu scales, written back onto the module. K3's
-    expert shapes are already aligned (latent 3584%256, ispp 3072%128), so no padding.
+    and permuted float8_e8m0fnu scales, written back onto the module.
+    The intermediate width is padded to a 64-element Marlin tile after loading;
+    gate and up halves must be padded separately to retain their alignment.
     """
     names = ("w13_weight", "w13_weight_scale", "w2_weight", "w2_weight_scale")
     if any(not hasattr(w, name) for name in names):
@@ -130,6 +131,27 @@ def marlin_mxfp4_moe_weights(plan: dict, w: torch.nn.Module) -> None:
             f"Marlin MXFP4 needs hidden%256==0 and ispp%32==0, got "
             f"hidden={hidden}, ispp={ispp}"
         )
+
+    # Loader alignment follows the platform, but Marlin's minimum K tile is
+    # 64 even on SM120. For example, a 2304-wide expert split over TP8 has
+    # 288 logical channels. Pad at this layout boundary, not at model slicing.
+    padded_ispp = (ispp + 63) // 64 * 64
+    if padded_ispp != ispp:
+        delta = padded_ispp - ispp
+
+        def _pad_gate_up(tensor: torch.Tensor, value: int) -> torch.Tensor:
+            paired = tensor.reshape(num_experts, 2, ispp, tensor.shape[-1])
+            return torch.nn.functional.pad(
+                paired, (0, 0, 0, delta), value=value
+            ).reshape(num_experts, 2 * padded_ispp, tensor.shape[-1])
+
+        w13 = _pad_gate_up(w13, 0)
+        w13_scale = _pad_gate_up(w13_scale, 127)
+        w2 = torch.nn.functional.pad(w2, (0, delta // 2), value=0)
+        w2_scale = torch.nn.functional.pad(
+            w2_scale, (0, delta // MXFP4_BLOCK), value=127
+        )
+        ispp = padded_ispp
 
     device = w13.device
     perm = torch.empty(0, dtype=torch.int, device=device)

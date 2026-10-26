@@ -141,6 +141,7 @@ NB_MODULE(tokenspeed_scheduler_ext, m) {
         .def_rw("decode_input_tokens", &tokenspeed::SchedulerConfig::decode_input_tokens)
         .def_rw("overlap_schedule_depth", &tokenspeed::SchedulerConfig::overlap_schedule_depth)
         .def_rw("role", &tokenspeed::SchedulerConfig::role)
+        .def_rw("cache_only_prefill", &tokenspeed::SchedulerConfig::cache_only_prefill)
         .def_prop_rw(
             "num_device_pages", [](const tokenspeed::SchedulerConfig& c) { return c.device_allocator.total_pages; },
             [](tokenspeed::SchedulerConfig& c, std::int32_t v) { c.device_allocator.total_pages = v; })

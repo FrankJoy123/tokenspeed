@@ -1160,6 +1160,9 @@ impl OutputProcessor {
                     break;
                 }
             }
+            if state.max_new_tokens == 0 {
+                state.check_finished(false);
+            }
             if !state.output_ids.is_empty() {
                 if let Some(timings) = state.timings.as_mut() {
                     timings.mark_first_token(stats_now);
@@ -1343,6 +1346,22 @@ mod tests {
         enabled: false,
         request_stats: false,
     };
+
+    #[test]
+    fn zero_output_finishes_only_after_the_prompt_lands() {
+        let mut p = processor(None);
+        register(&mut p, "cache", 16, 0, &[]);
+        let first = p.commit(&batch(&[("cache", 8, 0, 16)], 1), None, &result(&[], &[0])).unwrap();
+        assert!(first.outputs.is_empty());
+        assert!(p.state("cache").is_some());
+        let last = p.commit(&batch(&[("cache", 8, 8, 16)], 1), None, &result(&[], &[0])).unwrap();
+        assert!(last.events.iter().any(|event| event.kind == ForwardEventKind::Finish));
+        assert_eq!(last.outputs.len(), 1);
+        assert_eq!(last.outputs[0].completion_tokens, 0);
+        assert!(last.outputs[0].output_ids.is_empty());
+        assert_eq!(last.outputs[0].finish_reason, Some("length"));
+        assert_eq!(last.released, vec!["cache"]);
+    }
 
     fn processor(spec_num_tokens: Option<usize>) -> OutputProcessor {
         OutputProcessor::new(spec_num_tokens, 1, Some(4096), Role::Plain, NO_FINISH_LOG)

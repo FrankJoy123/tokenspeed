@@ -85,6 +85,8 @@ struct SchedulerConfig {
     // (transfer pins, destination layouts, transfer_policy validation) keys
     // on the role directly.
     Role role{Role::kFused};
+    // Local zero-output producer; finish after the last prompt result lands.
+    bool cache_only_prefill{false};
 
     bool disable_prefix_cache{false};
     // Minimum prompt tail that must be recomputed after a prefix-cache hit.

@@ -72,6 +72,9 @@ from torch import nn
 
 from tokenspeed.runtime.distributed import Mapping
 from tokenspeed.runtime.distributed.comm_ops import all_reduce, prepare_all_reduce_lane
+from tokenspeed.runtime.distributed.process_group_manager import (
+    process_group_manager as pg_manager,
+)
 from tokenspeed.runtime.layers.dense.fp8 import Fp8LinearMethod
 from tokenspeed.runtime.layers.linear import ReplicatedLinear
 from tokenspeed.runtime.layers.quantization.base_config import QuantizationConfig
@@ -312,32 +315,55 @@ _HOST_TABLE_JOB_ID: str | None = None
 _CREATED_HOST_FILES: list[str] = []
 
 
-def _host_table_job_id() -> str:
-    """Return a per-job id shared by every rank, unique across concurrent jobs."""
+def _host_table_share_group(mapping: Mapping):
+    """Reuse an initialized node-local DP group for replicated host tables.
+
+    Attention TP communication and row ownership are unchanged. Cross-node DP
+    groups retain the existing TP-local allocation behavior.
+    """
+    if mapping.attn.tp_size == 1 and mapping.attn.has_dp:
+        group = mapping.attn.dp_group
+        node_size = max(mapping.nprocs_per_node, 1)
+        if len({rank // node_size for rank in group}) == 1:
+            return group
+    return mapping.attn.tp_group
+
+
+def _host_table_job_id(mapping: Mapping) -> str:
+    """Return a job ID shared only by ranks owning this stage's Engram table."""
     global _HOST_TABLE_JOB_ID
     if _HOST_TABLE_JOB_ID is not None:
         return _HOST_TABLE_JOB_ID
-    if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
+    share_group = _host_table_share_group(mapping)
+    if torch.distributed.is_initialized() and len(share_group) > 1:
         payload = [str(os.getpid())]
-        torch.distributed.broadcast_object_list(payload, src=0)
+        group = pg_manager.get_process_group("gloo", share_group)
+        torch.distributed.broadcast_object_list(
+            payload, src=share_group[0], group=group
+        )
         _HOST_TABLE_JOB_ID = payload[0]
     else:
         _HOST_TABLE_JOB_ID = str(os.getpid())
     return _HOST_TABLE_JOB_ID
 
 
-def _engram_host_table_path(layer_id: int, field: str, nbytes: int) -> str:
+def _engram_host_table_path(
+    layer_id: int, field: str, nbytes: int, mapping: Mapping
+) -> str:
     return os.path.join(
         _host_table_dir(nbytes),
-        f"ts-engram-{_host_table_job_id()}-L{layer_id}-{field}",
+        f"ts-engram-{_host_table_job_id(mapping)}-PP{mapping.pp_rank}"
+        f"-N{mapping.rank // max(mapping.nprocs_per_node, 1)}-L{layer_id}-{field}",
     )
 
 
 def _is_host_table_writer(mapping: Mapping) -> bool:
-    local = os.environ.get("LOCAL_RANK")
-    if local is not None:
-        return int(local) == 0
-    return mapping.rank % max(mapping.nprocs_per_node, 1) == 0
+    node_size = max(mapping.nprocs_per_node, 1)
+    node = mapping.rank // node_size
+    local_members = [
+        rank for rank in _host_table_share_group(mapping) if rank // node_size == node
+    ]
+    return mapping.rank == min(local_members)
 
 
 def resolve_engram_host_layout(host_table: bool, tp_size: int) -> str:
@@ -486,6 +512,7 @@ class RowShardedEngramEmbedding(nn.Module):
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
         self.tp_group = mapping.attn.tp_group
+        self.host_share_group = _host_table_share_group(mapping)
         self.host_table = host_table
         self.host_layout = host_layout
         self.layer_id = layer_id
@@ -507,7 +534,7 @@ class RowShardedEngramEmbedding(nn.Module):
         shared_file = (
             host_layout == "shared"
             and torch.distributed.is_initialized()
-            and torch.distributed.get_world_size() > 1
+            and len(self.host_share_group) > 1
         )
         self._shared_writer = (not shared_file) or _is_host_table_writer(mapping)
         if host_table:
@@ -518,12 +545,18 @@ class RowShardedEngramEmbedding(nn.Module):
             if shared_file:
                 weight_bytes = _host_table_nbytes(weight_shape, torch.float8_e4m3fn)
                 scale_bytes = _host_table_nbytes(scale_shape, torch.uint8)
-                weight_path = _engram_host_table_path(layer_id, "weight", weight_bytes)
-                scale_path = _engram_host_table_path(layer_id, "scale", scale_bytes)
+                weight_path = _engram_host_table_path(
+                    layer_id, "weight", weight_bytes, mapping
+                )
+                scale_path = _engram_host_table_path(
+                    layer_id, "scale", scale_bytes, mapping
+                )
                 if self._shared_writer:
                     _create_host_file(weight_path, weight_bytes)
                     _create_host_file(scale_path, scale_bytes)
-                torch.distributed.barrier()
+                torch.distributed.barrier(
+                    group=pg_manager.get_process_group("gloo", self.host_share_group)
+                )
             weight, weight_mmap = _allocate_host_bytes(
                 weight_shape,
                 torch.float8_e4m3fn,
@@ -544,7 +577,9 @@ class RowShardedEngramEmbedding(nn.Module):
             self.weight = nn.Parameter(weight, requires_grad=False)
             self.scale = nn.Parameter(scale, requires_grad=False)
             if shared_file:
-                torch.distributed.barrier()
+                torch.distributed.barrier(
+                    group=pg_manager.get_process_group("gloo", self.host_share_group)
+                )
                 if self._shared_writer:
                     _unlink_host_file(weight_path)
                     _unlink_host_file(scale_path)

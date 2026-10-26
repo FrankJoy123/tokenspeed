@@ -339,6 +339,9 @@ void Scheduler::SubmitRequests(const std::vector<RequestSpec>& request_specs) {
         if (requests_by_id_.contains(spec.request_id) || !request_ids.insert(spec.request_id).second) {
             throw std::invalid_argument("Scheduler: duplicate request id '" + spec.request_id + "'");
         }
+        if (config_.cache_only_prefill && spec.max_new_tokens != 0) {
+            throw std::invalid_argument("cache-only Prefill requires max_new_tokens == 0");
+        }
         if (spec.max_new_tokens < 0) {
             throw std::invalid_argument("Scheduler: max_new_tokens must be non-negative");
         }
@@ -355,7 +358,8 @@ void Scheduler::SubmitRequests(const std::vector<RequestSpec>& request_specs) {
             throw std::invalid_argument("Scheduler: request token limit " + std::to_string(token_limit) +
                                         " exceeds cache capacity " + std::to_string(max_single_request_tokens_));
         }
-        pending_requests.push_back(std::make_unique<Request>(spec, config_.prefix_granularity, config_.role));
+        pending_requests.push_back(
+            std::make_unique<Request>(spec, config_.prefix_granularity, config_.role, config_.cache_only_prefill));
     }
 
     requests_.reserve(requests_.size() + pending_requests.size());

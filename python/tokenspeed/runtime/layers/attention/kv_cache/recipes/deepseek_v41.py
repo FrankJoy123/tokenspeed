@@ -111,8 +111,6 @@ class DeepseekV41Recipe(CacheRecipe):
             )
         if self.decode_input_tokens < 1:
             raise ValueError("DeepSeek V4.1 verify width must be positive")
-        if int(self.server_args.pipeline_parallel_size) != 1:
-            raise NotImplementedError("DeepSeek V4.1 shared-owner FlatKV requires PP=1")
         hf = self.model_config.hf_config
         hf = getattr(hf, "text_config", hf)
         ratios = tuple(int(r) for r in hf.compress_ratios[: self.num_target_layers])
