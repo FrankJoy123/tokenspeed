@@ -2112,6 +2112,28 @@ class DeepseekV41AttentionBackend(AttentionBackend):
             prefix_count = request_plan.prefix_slots.numel()
             current_rows = current[rows]
             swa_count = prefix_count + current_rows.shape[0]
+            # Keep old bounded SWA rows protected. A packed native reader can
+            # consume the original FP4 history without expanding its full prefix.
+            output = out[rows] if isinstance(rows, slice) else None
+            request_q = q[rows].contiguous()
+            if self.kvp_size == 1 and len(self.spec.attention_query_group) == 1:
+                result = dsv41.try_paged_prefill(
+                    request_q,
+                    prefix,
+                    current_rows,
+                    request_plan.swa_indices,
+                    global_cache,
+                    None if owner < 0 else global_slots[rows],
+                    None if owner < 0 else global_lens[rows],
+                    attn_sink,
+                    softmax_scale,
+                    output,
+                    None,
+                )
+                if result is not None:
+                    if output is None:
+                        out[rows] = result
+                    continue
             history_slots = (
                 self._prefill_global_history(request_plan, owner, forward_mode)
                 if owner >= 0 and self.kvp_size == 1

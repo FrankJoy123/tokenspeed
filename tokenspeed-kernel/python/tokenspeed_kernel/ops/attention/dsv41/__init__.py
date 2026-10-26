@@ -74,6 +74,7 @@ __all__ = [
     "index_query_rope_weights",
     "index_query_rope_quant",
     "selected_attention",
+    "try_paged_prefill",
     "selected_attention_rope",
     "new_attention_schedule",
     "index_score",
@@ -457,6 +458,62 @@ def selected_attention(
         prefill_kv,
         prefill_indices,
         **({"lse": lse} if lse is not None else {}),
+    )
+
+
+def try_paged_prefill(
+    q: torch.Tensor,
+    swa_prefix: torch.Tensor,
+    swa_current: torch.Tensor,
+    swa_indices: torch.Tensor,
+    global_cache: torch.Tensor | None,
+    global_slots: torch.Tensor | None,
+    global_lens: torch.Tensor | None,
+    attn_sink: torch.Tensor | None,
+    softmax_scale: float,
+    out: torch.Tensor | None,
+    lse: torch.Tensor | None,
+) -> torch.Tensor | None:
+    """Attend protected SWA rows plus original FP4 pages when a reader exists.
+
+    q is BF16 [T,H,512]. swa_prefix/current are already codec-rounded BF16
+    [rows,512], concatenated in that order; integer swa_indices[T,K] address
+    that concatenation, with -1 for invalid entries. Global arguments are
+    aligned page-planar uint8 [P,64,288], physical integer slots[T,K] and
+    scan lengths[T], or all None. attn_sink is FP32 [H] (padding is allowed),
+    counted once. softmax_scale scales QK. out is BF16 [T,H,512] and lse is
+    natural-log FP32 [T,H], or explicitly None to allocate/omit.
+
+    Returns BF16 output, or None when no registered implementation serves the
+    platform. Callers retain their existing workspace fallback in that case.
+    Empty/invalid selections produce zero output. This op never writes the
+    persistent SWA ring or changes global FP4 quantization.
+    """
+    try:
+        kernel = select_kernel(
+            "attention",
+            "dsv41_paged_prefill",
+            format_signature(x=dense_tensor_format(q.dtype)),
+            features=None,
+            platform=None,
+            traits=None,
+            solution=None,
+            override=None,
+        )
+    except NoKernelFoundError:
+        return None
+    return kernel(
+        q,
+        swa_prefix,
+        swa_current,
+        swa_indices,
+        global_cache,
+        global_slots,
+        global_lens,
+        attn_sink,
+        softmax_scale,
+        out,
+        lse,
     )
 
 
@@ -1376,6 +1433,7 @@ import tokenspeed_kernel.ops.attention.dsv41.gluon  # noqa: E402,F401
 import tokenspeed_kernel.ops.attention.dsv41.deep_select  # noqa: E402,F401
 import tokenspeed_kernel.ops.attention.dsv41.deep_gemm  # noqa: E402,F401
 import tokenspeed_kernel.ops.attention.dsv41.flash_mla  # noqa: E402,F401
+import tokenspeed_kernel.ops.attention.dsv41.flashinfer_sm120  # noqa: E402,F401
 
 # isort: on
 
