@@ -37,3 +37,6 @@ Prefill-only benchmarks measure the zero-output cache completion response.
 Profile requests run separately after priming, with distinct suffixes to avoid
 accidental full-cache hits. Compare equal new-token counts and actual stage
 layer work; normal pipeline filling and draining are not redundant computation.
+
+Profiler output identities include the pipeline stage and stage-local TP rank.
+Every rank must export a distinct file before a capture is accepted.

@@ -64,9 +64,13 @@ from tokenspeed.runtime.utils.env import envs
 logger = logging.getLogger(__name__)
 
 
-def _profile_rank_tag(attn_mapping) -> str:
+def _profile_rank_tag(attn_mapping, *, pp_rank: int | None) -> str:
     """File-name tag identifying this scheduler process's profile outputs."""
     parts = []
+    if pp_rank is not None:
+        if pp_rank < 0:
+            raise ValueError("pipeline rank must be non-negative")
+        parts.append(f"PP{pp_rank}")
     if attn_mapping.has_dp:
         parts.append(f"DP{attn_mapping.dp_rank}")
     parts.append(f"TP{attn_mapping.tp_rank}")
@@ -93,20 +97,29 @@ class Profiler:
             ``EXPERT_LOAD``).
         device: The device handle (expert-load counters), or None.
         attn_mapping: The attention mapping, for the trace file names.
+        pp_rank: The stage rank, or None without a pipeline. Stage-local TP
+            ranks alone would overwrite another stage's trace.
         sync_size: Ranks that rendezvous around a trace: attention TP, or
             the world with pipeline parallelism.
         sync_group: Their CPU group (unused with one rank).
     """
 
     def __init__(
-        self, *, server_args, device, attn_mapping, sync_size: int, sync_group
+        self,
+        *,
+        server_args,
+        device,
+        attn_mapping,
+        pp_rank: int | None,
+        sync_size: int,
+        sync_group,
     ) -> None:
         self.server_args = server_args
         self._device = device
         self.forward_ct = 0
         self.attn_tp_size = sync_size
         self.attn_tp_cpu_group = sync_group
-        self.profile_rank_tag = _profile_rank_tag(attn_mapping)
+        self.profile_rank_tag = _profile_rank_tag(attn_mapping, pp_rank=pp_rank)
         # Rendezvous buffer for _profile_sync, allocated once -- see
         # _profile_sync.
         self._profile_sync_buf = torch.zeros(1, dtype=torch.int32, device="cpu")

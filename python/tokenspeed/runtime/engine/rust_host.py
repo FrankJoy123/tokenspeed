@@ -1308,6 +1308,7 @@ class HostBootstrap:
                     server_args=server_args,
                     device=device.handle,
                     attn_mapping=mapping.attn,
+                    pp_rank=mapping.pp_rank if mapping.has_pp else None,
                     # With a pipeline every stage rendezvouses around a trace.
                     sync_size=(
                         mapping.world_size if mapping.has_pp else mapping.attn.tp_size

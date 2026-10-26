@@ -38,6 +38,7 @@ def _make_handler(attn_mapping: SimpleNamespace | None = None) -> Profiler:
         server_args=SimpleNamespace(enable_eplb=False),
         device=None,
         attn_mapping=attn_mapping,
+        pp_rank=None,
         # Two peers, so _profile_sync rendezvouses (tests patch it).
         sync_size=getattr(attn_mapping, "tp_size", 2),
         sync_group=None,
@@ -492,12 +493,18 @@ class TestRequestHandlerProtonProfile:
             assert not (self.handler.profile_in_progress)
 
     def test_rank_tag_includes_dp_rank_when_present(self):
-        assert (profiler_mod._profile_rank_tag(_attn_mapping(tp_rank=3))) == ("TP3")
         assert (
-            profiler_mod._profile_rank_tag(_attn_mapping(tp_rank=0, dp_rank=1))
+            profiler_mod._profile_rank_tag(_attn_mapping(tp_rank=3), pp_rank=None)
+        ) == ("TP3")
+        assert (
+            profiler_mod._profile_rank_tag(
+                _attn_mapping(tp_rank=0, dp_rank=1), pp_rank=None
+            )
         ) == ("DP1-TP0")
         assert (
-            profiler_mod._profile_rank_tag(_attn_mapping(tp_rank=2, dp_rank=1))
+            profiler_mod._profile_rank_tag(
+                _attn_mapping(tp_rank=2, dp_rank=1), pp_rank=None
+            )
         ) == ("DP1-TP2")
 
     def test_proton_outputs_do_not_collide_across_dp_ranks(self):
