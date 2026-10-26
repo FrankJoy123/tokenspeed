@@ -83,4 +83,5 @@ def triton_sm120_dsv41_index_topk(
         out,
         index_metadata,
         scan_num_warps=8 if tuned else 4,
+        dense_selector=None,
     )

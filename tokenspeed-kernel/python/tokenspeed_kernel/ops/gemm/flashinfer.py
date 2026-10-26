@@ -954,7 +954,11 @@ from tokenspeed_kernel.thirdparty.flashinfer.mxfp8_sm120 import (
     has_cutlass_mxfp8_sm120,
 )
 
-if has_cutlass_mxfp8_sm120():
+if (
+    platform.is_nvidia
+    and platform.arch_version == ArchVersion(12, 0)
+    and has_cutlass_mxfp8_sm120()
+):
 
     @register_kernel(
         "gemm",

@@ -36,3 +36,13 @@ register spilling. Short queries, candidate production and Reindex retain four
 warps. Other architectures retain the portable implementation. TP head gathering
 and rank-ordered rounding are unchanged; the optimization changes launch geometry,
 not cache format or selection semantics.
+
+
+The optional SM120 FlashInfer Full Top512 route preserves the same quantized
+query/key decode, BF16 dot and rank-ordered head rounding. It materializes at
+most 256 query rows by 65536 history columns as FP32 scores, then uses public
+graph-safe TopK with smaller-ID boundary ties. The existing finalizer restores
+ascending logical IDs and -1 padding, so the library need not return a fixed
+ordering. Candidate production, Reindex and short/unmeasured shapes retain the
+streaming selector. Scratch lives only for one query tile; history/cache bytes
+and the model's selection contract are unchanged.

@@ -73,7 +73,12 @@ def test_full_scan_preserves_selected_ids_and_lengths(
         None,
     )
     reference = dsv41.index_topk(*args, solution="triton")
-    for solution in ("triton_sm120", None):
+    from tokenspeed_kernel.thirdparty.flashinfer.topk import has_exact_topk
+
+    solutions = ["triton_sm120", None]
+    if torch.cuda.get_device_capability() == (12, 0) and has_exact_topk():
+        solutions.append("flashinfer_sm120")
+    for solution in solutions:
         actual = dsv41.index_topk(*args, solution=solution)
         for got, expected in zip(actual, reference, strict=True):
             torch.testing.assert_close(got, expected, rtol=0, atol=0)
@@ -97,3 +102,90 @@ def test_full_scan_preserves_selected_ids_and_lengths(
         actual = dsv41.index_topk(*reindex_args, solution="triton_sm120")
         for got, wanted in zip(actual, expected, strict=True):
             torch.testing.assert_close(got, wanted, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("weight_dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("ties", [False, True])
+def test_dense_full_selection_graph_refreshes_metadata(weight_dtype, ties):
+    from tokenspeed_kernel.thirdparty.flashinfer.topk import has_exact_topk
+
+    if torch.cuda.get_device_capability() != (12, 0) or not has_exact_topk():
+        pytest.skip("optional exact Full selector requires SM120 and FlashInfer TopK")
+    torch.manual_seed(31)
+    tokens, history = 256, 8192
+    cache = torch.zeros(history // 64 + 1, 64, 68, device="cuda", dtype=torch.uint8)
+    dsv41.cache_scatter(
+        torch.randn(history, 128, device="cuda", dtype=torch.bfloat16),
+        cache,
+        torch.arange(64, history + 64, device="cuda"),
+        "index",
+    )
+    table = torch.arange(1, history // 64 + 1, device="cuda", dtype=torch.int32)
+    table = table[None].expand(tokens, -1).clone()
+    table[3::7, 2] = -1
+    q = torch.randn(tokens, 32, 128, device="cuda", dtype=torch.bfloat16)
+    weights = torch.randn(tokens, 32, device="cuda", dtype=weight_dtype)
+    if ties:
+        weights.zero_()
+    visible = torch.full((tokens,), history, device="cuda", dtype=torch.int32)
+    args = (q, weights, cache, table, visible, None, 512, 0, 8, 256, 256, None, None)
+    dsv41.index_topk(*args, solution="flashinfer_sm120")
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        actual = dsv41.index_topk(*args, solution="flashinfer_sm120")
+    for shift in (3, 5):
+        q.copy_(torch.randn_like(q))
+        if not ties:
+            weights.copy_(torch.randn_like(weights))
+        visible.copy_(torch.arange(tokens, device="cuda", dtype=torch.int32) + shift)
+        visible[:7] = torch.tensor([0, 1, 17, 511, 512, 513, history], device="cuda")
+        graph.replay()
+        expected = dsv41.index_topk(*args, solution="triton")
+        for got, wanted in zip(actual, expected, strict=True):
+            torch.testing.assert_close(got, wanted, rtol=0, atol=0)
+
+
+def test_dense_full_table_width_does_not_recompile():
+    from tokenspeed_kernel.ops.attention.dsv41 import triton as impl
+    from tokenspeed_kernel.thirdparty.flashinfer.topk import has_exact_topk
+    from utils import assert_no_triton_compile
+
+    if torch.cuda.get_device_capability() != (12, 0) or not has_exact_topk():
+        pytest.skip("optional exact Full selector requires SM120 and FlashInfer TopK")
+    q = torch.randn(256, 32, 128, device="cuda", dtype=torch.bfloat16)
+    w = torch.randn(256, 32, device="cuda", dtype=torch.bfloat16)
+    cache = torch.zeros(129, 64, 68, device="cuda", dtype=torch.uint8)
+    dsv41.cache_scatter(
+        torch.randn(8192, 128, device="cuda", dtype=torch.bfloat16),
+        cache,
+        torch.arange(64, 8256, device="cuda"),
+        "index",
+    )
+    visible = torch.full((256,), 8192, device="cuda", dtype=torch.int32)
+
+    def run(cols):
+        pages = torch.full((256, cols), -1, device="cuda", dtype=torch.int32)
+        pages[:, :128] = torch.arange(1, 129, device="cuda", dtype=torch.int32)
+        return dsv41.index_topk(
+            q,
+            w,
+            cache,
+            pages,
+            visible,
+            None,
+            512,
+            0,
+            8,
+            256,
+            256,
+            None,
+            None,
+            solution="flashinfer_sm120",
+        )
+
+    expected = run(128)
+    run(129)
+    with assert_no_triton_compile(impl._index_scan_kernel):
+        for cols in (144, 131, 263, 1024):
+            for got, wanted in zip(run(cols), expected, strict=True):
+                torch.testing.assert_close(got, wanted, rtol=0, atol=0)

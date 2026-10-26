@@ -1544,3 +1544,8 @@ def compact_slots(slots: torch.Tensor, lengths: torch.Tensor):
         packed = slots.masked_fill(~valid, -1).gather(1, order)
         return packed, valid.sum(dim=-1, dtype=torch.int32)
     return _kernel("compact_slots", slots)(slots, lengths)
+
+
+from tokenspeed_kernel.ops.attention.dsv41 import (  # noqa: F401
+    flashinfer_index_sm120 as _flashinfer_index_sm120,
+)

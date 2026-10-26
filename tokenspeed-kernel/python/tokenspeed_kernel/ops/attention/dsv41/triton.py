@@ -905,6 +905,8 @@ def _index_scan_kernel(
     BLOCK_K: tl.constexpr,
     MAKE_BLOCKS: tl.constexpr,
     INDEX_FP8: tl.constexpr,
+    DENSE_OUTPUT: tl.constexpr,
+    DENSE_WIDTH,
 ):
     query, part = tl.program_id(0), tl.program_id(1)
     visible = tl.minimum(tl.maximum(tl.load(Visible + query * VS), 0), TABLE_WIDTH * 64)
@@ -917,7 +919,8 @@ def _index_scan_kernel(
     span = tl.cdiv(width, PARTS * 8) * 8
     begin = part * span
     end = tl.minimum(begin + span, width)
-    row_acc = tl.full((ROW_K,), 0, tl.uint64)
+    if not DENSE_OUTPUT:
+        row_acc = tl.full((ROW_K,), 0, tl.uint64)
     if MAKE_BLOCKS:
         block_acc = tl.full((BLOCK_K,), 0, tl.uint64)
     h = tl.arange(0, H)
@@ -1017,7 +1020,14 @@ def _index_scan_kernel(
             scores = scores + partial.to(W.dtype.element_ty).to(tl.float32)
         scores = scores.to(W.dtype.element_ty).to(tl.float32)
         scores = tl.where(valid, scores, -float("inf"))
-        row_acc = _index_merge(row_acc, scores, logical, B, ROW_K)
+        if DENSE_OUTPUT:
+            tl.store(
+                RowScores + query * DENSE_WIDTH + col,
+                scores,
+                col < tl.minimum(start + STEP, end),
+            )
+        else:
+            row_acc = _index_merge(row_acc, scores, logical, B, ROW_K)
         if MAKE_BLOCKS:
             block_scores = tl.max(scores.reshape(B // 8, 8), 1)
             block_ids = (start // 8 + tl.arange(0, B // 8)).to(tl.int64)
@@ -1029,10 +1039,11 @@ def _index_scan_kernel(
             block_acc = _index_merge(
                 block_acc, block_scores, block_ids, B // 8, BLOCK_K
             )
-    offset = (query * PARTS + part) * ROW_K + tl.arange(0, ROW_K)
-    scores, ids = _index_unpack(row_acc)
-    tl.store(RowScores + offset, scores)
-    tl.store(RowIds + offset, ids)
+    if not DENSE_OUTPUT:
+        offset = (query * PARTS + part) * ROW_K + tl.arange(0, ROW_K)
+        scores, ids = _index_unpack(row_acc)
+        tl.store(RowScores + offset, scores)
+        tl.store(RowIds + offset, ids)
     if MAKE_BLOCKS:
         offset = (query * PARTS + part) * BLOCK_K + tl.arange(0, BLOCK_K)
         scores, ids = _index_unpack(block_acc)
@@ -1247,6 +1258,7 @@ def index_topk(
         out,
         index_metadata,
         scan_num_warps=4,
+        dense_selector=None,
     )
 
 
@@ -1267,8 +1279,11 @@ def _index_topk(
     index_metadata,
     *,
     scan_num_warps,
+    dense_selector,
 ):
     del index_metadata
+    if dense_selector is not None and (candidate_blocks is not None or candidate_topk):
+        raise ValueError("Dense selection serves Full row TopK only")
     out = _index_topk_outputs(
         index_q,
         weights,
@@ -1308,9 +1323,15 @@ def _index_topk(
         q = index_q_quantize(q, index_format, None)
         table, visible = page_table[start:end], visible_lens[start:end]
         candidates = None if candidate_blocks is None else candidate_blocks[start:end]
-        shape = (end - start, parts * row_k)
+        dense_width = table.shape[1] * 64 if dense_selector is not None else 0
+        shape = (end - start, dense_width or parts * row_k)
         row_scores = torch.empty(shape, dtype=torch.float32, device=q.device)
-        row_ids = torch.empty(shape, dtype=torch.int64, device=q.device)
+        if dense_selector is not None:
+            # Scan writes only visible rows. All masked columns still enter
+            # selection, so initialize them to the same -inf sentinel.
+            row_scores.fill_(-torch.inf)
+        id_shape = shape if dense_selector is None else (end - start, 0)
+        row_ids = torch.empty(id_shape, dtype=torch.int64, device=q.device)
         shape = (end - start, parts * block_k if candidate_topk else 0)
         block_scores = torch.empty(shape, dtype=torch.float32, device=q.device)
         block_ids = torch.empty(shape, dtype=torch.int64, device=q.device)
@@ -1345,12 +1366,18 @@ def _index_topk(
             block_k,
             bool(candidate_topk),
             index_format == "index_v4",
+            dense_selector is not None,
+            dense_width,
             enable_fp_fusion=False,
             num_warps=scan_num_warps,
         )
-        _index_finish_parts(
-            row_scores, row_ids, topk, row_out[start:end], row_lens[start:end]
-        )
+        if dense_selector is None:
+            _index_finish_parts(
+                row_scores, row_ids, topk, row_out[start:end], row_lens[start:end]
+            )
+        else:
+            values, ids = dense_selector(row_scores, topk)
+            _finish_topk(values, ids, row_out[start:end], row_lens[start:end])
         if candidate_topk:
             _index_finish_parts(
                 block_scores,
