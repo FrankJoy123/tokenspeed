@@ -26,3 +26,13 @@ FlashInfer is imported only by the kernel package's third-party adapter.
 No implementation is advertised outside SM120/SM121. A missing registered reader
 returns None from the family helper; errors from a selected reader are surfaced.
 The CUDA environment must provide a compatible optional FlashInfer installation.
+
+## SM120 indexer
+
+The SM120/SM121 registered Triton launcher keeps the portable scoring and
+selection math. Full MXFP4 scans with 32 index heads, at least 256 queries,
+Top512 and a 256-key score tile use eight warps instead of four to reduce
+register spilling. Short queries, candidate production and Reindex retain four
+warps. Other architectures retain the portable implementation. TP head gathering
+and rank-ordered rounding are unchanged; the optimization changes launch geometry,
+not cache format or selection semantics.

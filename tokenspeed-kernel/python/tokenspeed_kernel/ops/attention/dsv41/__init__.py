@@ -1434,6 +1434,7 @@ import tokenspeed_kernel.ops.attention.dsv41.deep_select  # noqa: E402,F401
 import tokenspeed_kernel.ops.attention.dsv41.deep_gemm  # noqa: E402,F401
 import tokenspeed_kernel.ops.attention.dsv41.flash_mla  # noqa: E402,F401
 import tokenspeed_kernel.ops.attention.dsv41.flashinfer_sm120  # noqa: E402,F401
+import tokenspeed_kernel.ops.attention.dsv41.triton_sm120  # noqa: E402,F401
 
 # isort: on
 

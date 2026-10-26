@@ -1231,6 +1231,43 @@ def index_topk(
     out,
     index_metadata,
 ):
+    return _index_topk(
+        index_q,
+        weights,
+        index_cache,
+        page_table,
+        visible_lens,
+        candidate_blocks,
+        topk,
+        candidate_topk,
+        candidate_block_size,
+        query_chunk_size,
+        score_chunk_size,
+        process_group,
+        out,
+        index_metadata,
+        scan_num_warps=4,
+    )
+
+
+def _index_topk(
+    index_q,
+    weights,
+    index_cache,
+    page_table,
+    visible_lens,
+    candidate_blocks,
+    topk,
+    candidate_topk,
+    candidate_block_size,
+    query_chunk_size,
+    score_chunk_size,
+    process_group,
+    out,
+    index_metadata,
+    *,
+    scan_num_warps,
+):
     del index_metadata
     out = _index_topk_outputs(
         index_q,
@@ -1309,6 +1346,7 @@ def index_topk(
             bool(candidate_topk),
             index_format == "index_v4",
             enable_fp_fusion=False,
+            num_warps=scan_num_warps,
         )
         _index_finish_parts(
             row_scores, row_ids, topk, row_out[start:end], row_lens[start:end]
