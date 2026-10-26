@@ -556,6 +556,7 @@ class Dots3NoteDecoderLayer(DeepseekV3DecoderLayer):
             input_layernorm=self.input_layernorm,
             post_attn_layernorm=self.post_attention_layernorm,
             dense_batch_invariant=False,
+            moe_owns_row_communication=False,
             query_sharded=False,
         )
 

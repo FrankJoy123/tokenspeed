@@ -311,11 +311,13 @@ def validate_qcp(
     dense_tp_size: int,
     moe_tp_ep_size: int,
     enable_mixed_batch: bool,
+    moe_owns_query_rows: bool,
 ) -> None:
     """Reject query-context-parallel layouts the first landing does not serve.
 
     QCP shards an extend forward's rows over the attention TP group; the
     decode arm serves only the drafter's steps, every row on every rank.
+    Pure encoder-cache dispatchers may tile the query group with expert replicas.
     These are the layout gaps that rule; the role and size relations live in
     ``validate_context_parallel_roles``, the shard width in ``Mapping``, and
     the backend, device and KV-cache capabilities in ``AttnConfig``, which
@@ -329,9 +331,9 @@ def validate_qcp(
             f"attn_dp_size={attn_dp_size}): the sampled-row table of a shard is "
             "per DP group and the DP metadata gather does not carry it"
         )
-    if dense_tp_size not in (1, attn_tp_size) or moe_tp_ep_size not in (
-        1,
-        attn_tp_size,
+    if dense_tp_size not in (1, attn_tp_size) or (
+        moe_tp_ep_size not in (1, attn_tp_size)
+        and not (moe_owns_query_rows and attn_tp_size % moe_tp_ep_size == 0)
     ):
         raise ValueError(
             "--query-context-parallel-size > 1 requires --dense-tp-size and the "
@@ -1198,6 +1200,11 @@ class ServerArgs:
             dense_tp_size=self.mapping.dense.tp_size,
             moe_tp_ep_size=self.mapping.moe.tp_ep_size,
             enable_mixed_batch=self.enable_mixed_batch,
+            moe_owns_query_rows=(
+                self.prefill_only_mode == "encoder-cache"
+                and self.all2all_backend == "deepep"
+                and self.mapping.moe.tp_size == 1
+            ),
         )
         if self.mapping.moe.has_tp and self.mapping.moe.has_ep:
             raise ValueError("MoE TP and EP cannot be both > 1")

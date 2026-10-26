@@ -71,6 +71,7 @@ def _manager(mode: str, monkeypatch, norm: StubNorm) -> CommManager:
         is_moe=False,
         prev_is_moe=False,
         dense_batch_invariant=False,
+        moe_owns_row_communication=False,
         query_sharded=False,
         input_layernorm=norm,
         post_attn_layernorm=norm,
@@ -174,6 +175,7 @@ def test_unfused_vetoes_the_fused_all_reduce_norm_where_it_is_relied_upon(
             is_moe=False,
             prev_is_moe=False,
             dense_batch_invariant=False,
+            moe_owns_row_communication=False,
             query_sharded=False,
         )
         assert manager.should_fuse(4) is fuses, mode

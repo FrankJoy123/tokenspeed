@@ -651,6 +651,7 @@ class _RuntimeLongcatDecoderLayer(nn.Module):
             is_moe=True,
             prev_is_moe=False,
             dense_batch_invariant=False,
+            moe_owns_row_communication=False,
             query_sharded=query_sharded,
         )
         # --tp-batch-invariant attn+dense: the dense tail transposes rows
@@ -667,6 +668,7 @@ class _RuntimeLongcatDecoderLayer(nn.Module):
                 input_layernorm=self.input_layernorm[branch_id],
                 post_attn_layernorm=self.post_attention_layernorm[branch_id],
                 dense_batch_invariant=dense_batch_invariant,
+                moe_owns_row_communication=False,
                 query_sharded=query_sharded,
             )
             for branch_id in range(2)

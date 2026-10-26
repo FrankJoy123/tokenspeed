@@ -292,6 +292,7 @@ class CommManager:
         post_attn_layernorm: torch.nn.Module | None = None,
         *,
         query_sharded: bool,
+        moe_owns_row_communication: bool,
     ) -> None:
         if query_sharded != mapping.attn.has_qcp:
             raise ValueError(
@@ -302,7 +303,13 @@ class CommManager:
             )
         if query_sharded and (
             mapping.dense.tp_size not in (1, mapping.attn.tp_size)
-            or mapping.moe.tp_ep_size not in (1, mapping.attn.tp_size)
+            or (
+                mapping.moe.tp_ep_size not in (1, mapping.attn.tp_size)
+                and not (
+                    moe_owns_row_communication
+                    and mapping.attn.tp_size % mapping.moe.tp_ep_size == 0
+                )
+            )
         ):
             # A replicated-row forward (the drafter's decode steps) keeps its
             # rows whole through attention, so a dense / MoE group narrower
@@ -319,6 +326,9 @@ class CommManager:
         self.input_layernorm = input_layernorm
         self.post_attn_layernorm = post_attn_layernorm
         self.query_sharded = query_sharded
+        # A layer-owned dispatcher consumes and returns each query owner's
+        # rows directly, so its expert replicas may tile the query group.
+        self.moe_owns_row_communication = moe_owns_row_communication
         # utils.env imports server_args, which imports this package: resolve
         # the launch options lazily, as the fusion predicates below do.
         from tokenspeed.runtime.utils.env import global_server_args_dict

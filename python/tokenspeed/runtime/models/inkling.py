@@ -918,6 +918,7 @@ class InklingSparseMoeBlock(nn.Module):
             is_moe=True,
             prev_is_moe=True,
             dense_batch_invariant=False,
+            moe_owns_row_communication=False,
             query_sharded=False,
         )
         # sconv shifts along the token dim, so this block must return full token rows (no reduce-scatter).

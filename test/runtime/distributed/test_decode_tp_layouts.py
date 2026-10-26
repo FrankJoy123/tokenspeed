@@ -167,6 +167,7 @@ def _worker_comm(rank: int, rendezvous: str) -> None:
             is_moe=False,
             prev_is_moe=False,
             dense_batch_invariant=True,
+            moe_owns_row_communication=False,
             query_sharded=False,
         )
 
@@ -249,6 +250,7 @@ def _worker_dense(rank: int, rendezvous: str) -> None:
             is_moe=False,
             prev_is_moe=False,
             dense_batch_invariant=True,
+            moe_owns_row_communication=False,
             query_sharded=False,
         )
         ctx = _ctx(SimpleNamespace(), rank)
@@ -430,6 +432,7 @@ def _worker_attention(
             is_moe=False,
             prev_is_moe=False,
             dense_batch_invariant=False,
+            moe_owns_row_communication=False,
             query_sharded=False,
         )
 
@@ -546,6 +549,7 @@ def _draft_layer(mapping: Mapping, attn):
         is_moe=False,
         prev_is_moe=False,
         dense_batch_invariant=False,
+        moe_owns_row_communication=False,
         query_sharded=False,
         input_layernorm=_norm_stub,
         post_attn_layernorm=_norm_stub,
@@ -579,6 +583,7 @@ def _eagle3_layer(mapping: Mapping, attn):
         is_moe=False,
         prev_is_moe=False,
         dense_batch_invariant=False,
+        moe_owns_row_communication=False,
         query_sharded=False,
         post_attn_layernorm=_norm_stub,
     )
@@ -684,6 +689,7 @@ def test_dense_batch_invariant_needs_a_token_scatter_tail():
             is_moe=False,
             prev_is_moe=False,
             dense_batch_invariant=True,
+            moe_owns_row_communication=False,
             query_sharded=False,
         )
     dp_dense_tp = Mapping(
@@ -699,6 +705,7 @@ def test_dense_batch_invariant_needs_a_token_scatter_tail():
         is_moe=False,
         prev_is_moe=False,
         dense_batch_invariant=True,
+        moe_owns_row_communication=False,
         query_sharded=False,
     )
     assert cm.dense_batch_invariant

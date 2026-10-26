@@ -1567,6 +1567,7 @@ class DeepseekV41DecoderLayer(nn.Module):
             dense_batch_invariant=False,
             input_layernorm=None,
             post_attn_layernorm=None,
+            moe_owns_row_communication=self.ffn.owns_ep_communication,
             query_sharded=mapping.attn.has_qcp,
         )
         self.attn_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -1997,10 +1998,22 @@ class DeepseekV41Model(nn.Module):
             raise NotImplementedError(
                 "V4.1 attention DP with ordinary EP requires prefill graphs disabled"
             )
+        normal_query_ep = (
+            mapping.attn.has_qcp
+            and not mapping.has_pp
+            and mapping.attn.dp_size == 1
+            and mapping.dense.tp_size == mapping.moe.tp_size == 1
+            and mapping.moe.ep_size > 1
+            and mapping.attn.qcp_size % mapping.moe.ep_size == 0
+            and global_server_args_dict.get("all2all_backend") == "deepep"
+            and global_server_args_dict.get("prefill_only_mode") == "encoder-cache"
+            and global_server_args_dict.get("disable_prefill_graph", False)
+        )
         if (
             mapping.attn.tp_size != mapping.moe.tp_ep_size
             and not local_owned_ep
             and not normal_dp_ep
+            and not normal_query_ep
         ):
             raise NotImplementedError(
                 "V4.1 requires attention TP == MoE TPxEP or owned EP with attention/dense/MoE TP1"

@@ -79,6 +79,7 @@ def _manager(
         is_moe=True,
         prev_is_moe=False,
         dense_batch_invariant=False,
+        moe_owns_row_communication=False,
         query_sharded=False,
     )
 

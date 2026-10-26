@@ -462,6 +462,7 @@ def test_residual_fusion_gather_boundaries_match_communication(
         input_layernorm=None,
         post_attn_layernorm=None,
         dense_batch_invariant=False,
+        moe_owns_row_communication=False,
         query_sharded=False,
     )
     x = torch.arange(12).reshape(3, 4)

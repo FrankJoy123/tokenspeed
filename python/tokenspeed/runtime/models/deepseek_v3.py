@@ -1892,6 +1892,7 @@ class DeepseekV3DecoderLayer(nn.Module):
             input_layernorm=self.input_layernorm,
             post_attn_layernorm=self.post_attention_layernorm,
             dense_batch_invariant=dense_batch_invariant and not self.is_moe_layer,
+            moe_owns_row_communication=False,
             query_sharded=False,
         )
 
@@ -2489,6 +2490,7 @@ class Eagle3MlaDecoderLayer(nn.Module):
             prev_is_moe=False,
             dense_batch_invariant=dense_batch_invariant,
             post_attn_layernorm=self.post_attention_layernorm,
+            moe_owns_row_communication=False,
             query_sharded=False,
         )
 

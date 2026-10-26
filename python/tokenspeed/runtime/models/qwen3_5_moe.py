@@ -306,6 +306,7 @@ class Qwen3_5MoeSparseMoeBlock(nn.Module):
             is_moe=True,
             prev_is_moe=_is_moe_layer(layer_index - 1, config),
             dense_batch_invariant=False,
+            moe_owns_row_communication=False,
             query_sharded=False,
         )
 

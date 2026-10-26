@@ -456,3 +456,45 @@ def test_v41_aggregated_kvp_requires_explicit_matching_dcp(size):
                 str(size),
             ]
         )
+
+
+@pytest.mark.parametrize("ep_size", [2, 4, 8])
+def test_encoder_cache_query_owners_allow_deepep_expert_replicas(ep_size):
+    argv = [
+        "--model",
+        "x",
+        "--world-size",
+        "8",
+        "--attn-tp-size",
+        "8",
+        "--query-context-parallel-size",
+        "8",
+        "--kv-parallel-size",
+        "1",
+        "--attn-head-tp-size",
+        "1",
+        "--dense-tp-size",
+        "1",
+        "--moe-tp-size",
+        "1",
+        "--ep-size",
+        str(ep_size),
+        "--attention-backend",
+        "deepseek_v41",
+        "--moe-backend",
+        "marlin",
+        "--all2all-backend",
+        "deepep",
+        "--prefill-only-mode",
+        "encoder-cache",
+        "--disable-prefill-graph",
+    ]
+    args = prepare_server_args(argv)
+    assert args.mapping.attn.qcp_size == 8
+    assert args.mapping.moe.ep_size == ep_size
+    assert args.mapping.moe.dp_size == 8 // ep_size
+    if ep_size < 8:
+        with pytest.raises(ValueError, match="1 or the attention TP width"):
+            prepare_server_args(argv + ["--all2all-backend", "none"])
+    with pytest.raises(ValueError, match="pure prefill|enable-mixed-batch"):
+        prepare_server_args(argv + ["--enable-mixed-batch"])

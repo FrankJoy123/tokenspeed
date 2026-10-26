@@ -207,6 +207,7 @@ def test_comm_manager_flag_must_agree_with_the_mapping():
                 is_moe=False,
                 prev_is_moe=False,
                 dense_batch_invariant=False,
+                moe_owns_row_communication=False,
                 query_sharded=flag,
             )
 

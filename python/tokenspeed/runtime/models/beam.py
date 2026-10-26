@@ -1255,6 +1255,7 @@ class BeamDecoderLayer(BaseDecoderLayer):
             dense_batch_invariant=False,
             input_layernorm=self.input_layernorm,
             post_attn_layernorm=self.post_attention_layernorm,
+            moe_owns_row_communication=False,
             query_sharded=False,
         )
         # The input norm writes its decode rows' per-token FP8 for the

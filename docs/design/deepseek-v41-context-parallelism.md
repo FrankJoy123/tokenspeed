@@ -147,3 +147,21 @@ old prefixes before publishing current keys, and retains the full current-key
 span while slicing only query rows/indices and outputs. Publishing a ring
 before those old-prefix reads would corrupt shard-boundary attention.
 All persistent cache state stays in the existing LCM groups.
+
+### Expert replicas within the query group
+
+For eager encoder-cache V4.1, the DeepEP group can be a divisor of QCP
+(EP2, EP4 or EP8 under QCP8), with expert TP1. Each contiguous expert group
+contains every global expert once, and different groups replicate weights.
+All query owners retain different rows; shared-expert weights are complete
+on each owner, and dispatch/combine returns those same owned rows.
+
+The generic communication manager admits such narrower expert groups only
+when the model explicitly declares layer-owned row communication. Other
+models retain the replicated-forward guard. The V4.1 encoder-cache admission
+excludes the replicated decode arm, and expert group token counts are selected
+from the canonical query shard table, rather than the full query-group sum.
+
+This trades smaller communication domains and lower fanout against more
+expert weights per GPU and fewer rows per expert per replica. It does not
+reduce the global expert arithmetic and needs paired measurements.

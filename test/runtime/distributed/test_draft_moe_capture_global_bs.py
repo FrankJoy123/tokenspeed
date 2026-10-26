@@ -74,6 +74,7 @@ def test_capture_global_bs_none_diverges_from_replay():
         is_moe=True,
         prev_is_moe=True,
         dense_batch_invariant=False,
+        moe_owns_row_communication=False,
         query_sharded=False,
     )
     bs = 1
@@ -105,6 +106,7 @@ def test_draft_collectives_use_narrowed_counts_on_all_ranks(rank: int):
         is_moe=True,
         prev_is_moe=True,
         dense_batch_invariant=False,
+        moe_owns_row_communication=False,
         query_sharded=False,
     )
     bs = 1

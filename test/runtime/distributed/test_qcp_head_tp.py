@@ -289,6 +289,7 @@ def _worker(rank: int, rendezvous: str, tp_batch_invariant: str, lengths: list[i
             is_moe=False,
             prev_is_moe=False,
             dense_batch_invariant=False,
+            moe_owns_row_communication=False,
             query_sharded=True,
         )
 

@@ -1643,6 +1643,7 @@ class MuseSparkDecoderLayer(nn.Module):
             dense_batch_invariant=False,
             input_layernorm=None,
             post_attn_layernorm=None,
+            moe_owns_row_communication=False,
             query_sharded=False,
         )
         self.self_attn = MuseSparkAttention(

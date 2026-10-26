@@ -528,3 +528,123 @@ def test_model_constructs_replicated_vocabulary_for_different_query_rows(
     assert model.embed_tokens.weight.shape[0] >= config.vocab_size
     assert model.layers[0].attn.mapping.attn.tp_size == 1
     assert model.mapping is mapping and model.mapping.moe.ep_size == 8
+
+
+@pytest.mark.parametrize("rank", range(8))
+@pytest.mark.parametrize("ep_size", [2, 4, 8])
+@pytest.mark.parametrize("total", [65, 16512])
+def test_owned_query_expert_replicas_receive_only_their_groups_rows(
+    rank, ep_size, total
+):
+    from tokenspeed.runtime.distributed.comm_manager import CommManager
+    from tokenspeed.runtime.execution.context import ForwardContext
+    from tokenspeed.runtime.execution.output_layout import ForwardOutputLayout
+
+    mapping = Mapping(
+        rank=rank,
+        world_size=8,
+        attn_tp_size=8,
+        attn_qcp_size=8,
+        attn_dp_size=1,
+        dense_tp_size=1,
+        moe_tp_size=1,
+        moe_ep_size=ep_size,
+    )
+    plan = QueryShardPlan.from_forward(
+        total_tokens=total,
+        input_lengths=[19, total - 19],
+        size=8,
+        rank=rank,
+    )
+    ctx = ForwardContext(
+        attn_backend=None,
+        token_to_kv_pool=None,
+        bs=2,
+        num_extends=2,
+        input_num_tokens=total,
+        forward_mode=ForwardMode.EXTEND,
+        output_layout=ForwardOutputLayout(2, 2, 0, 2),
+        query_shard=plan,
+    )
+    kwargs = dict(
+        mapping=mapping,
+        layer_id=0,
+        is_moe=True,
+        prev_is_moe=True,
+        dense_batch_invariant=False,
+        query_sharded=True,
+    )
+    if ep_size < 8:
+        with pytest.raises(ValueError, match="1 or the attention TP width"):
+            CommManager(**kwargs, moe_owns_row_communication=False)
+    comm = CommManager(**kwargs, moe_owns_row_communication=True)
+    counts = comm.moe_tp_ep_group_scattered_num_tokens(ctx)
+    # Independent contiguous replica interval, including the last ragged owner.
+    expected_group = tuple(
+        range((rank // ep_size) * ep_size, (rank // ep_size + 1) * ep_size)
+    )
+    assert mapping.moe.ep_group == expected_group
+    base, remainder = divmod(total, 8)
+    expected_counts = [base + int(r < remainder) for r in expected_group]
+    assert counts == expected_counts
+    assert counts[rank % ep_size] == plan.local_rows
+    assert sum(counts) <= total
+    assert mapping.moe.dp_size == 8 // ep_size
+
+
+@pytest.mark.parametrize("rank", range(8))
+@pytest.mark.parametrize("ep_size", [2, 4, 8])
+def test_real_model_owned_dispatch_keeps_expert_weights_and_shared_projection_local(
+    monkeypatch, rank, ep_size
+):
+    from test.runtime.test_deepseek_v41_model import (
+        _config,
+        _mock_loader_hardware,
+        _quant,
+    )
+
+    from tokenspeed.runtime.layers.moe.utils import MoeBackend
+    from tokenspeed.runtime.models import deepseek_v41_moe as moe_module
+    from tokenspeed.runtime.models.deepseek_v41 import DeepseekV41Model
+    from tokenspeed.runtime.utils.env import global_server_args_dict
+
+    config = _config()
+    config.hidden_size = 256
+    config.num_hidden_layers = 3
+    config.compress_ratios = [0, 0, 2]
+    config.kv_source_layer_ids = config.index_source_layer_ids = [2]
+    config.candidate_source_layer_id = 2
+    config.engram_layer_ids, config.engram_num_embeddings = [1], [72]
+    config.num_attention_heads = config.o_groups = config.index_n_heads = 8
+    config.n_routed_experts = 8
+    mapping = Mapping(
+        rank=rank,
+        world_size=8,
+        attn_tp_size=8,
+        attn_dp_size=1,
+        attn_qcp_size=8,
+        attn_kvp_size=1,
+        dense_tp_size=1,
+        moe_tp_size=1,
+        moe_ep_size=ep_size,
+    )
+    _mock_loader_hardware(monkeypatch, mapping)
+    # CPU/meta has no real MoE planner or process group. The real normal-EP
+    # admission, parameter construction and row communication contract remain.
+    monkeypatch.setattr(moe_module, "get_moe_backend", lambda: MoeBackend.MARLIN)
+    monkeypatch.setitem(global_server_args_dict, "all2all_backend", "deepep")
+    monkeypatch.setitem(global_server_args_dict, "prefill_only_mode", "encoder-cache")
+    monkeypatch.setitem(global_server_args_dict, "disable_prefill_graph", True)
+    with torch.device("meta"):
+        model = DeepseekV41Model(
+            config, mapping, _quant(), "", host_table=False, host_layout="gpu"
+        )
+    layer = model.layers[0]
+    assert layer.ffn.use_deepep_dispatch and not layer.ffn.use_mega_moe
+    assert layer.comm_manager.moe_owns_row_communication
+    assert layer.ffn.experts.num_local_experts == config.n_routed_experts // ep_size
+    shared = layer.ffn.shared_experts
+    assert shared.tp_size == 1
+    assert shared.gate_up_proj.tp_size == shared.down_proj.tp_size == 1
+    assert model.embed_tokens.tp_size == 1
+    assert layer.attn.mapping.attn.tp_size == 1

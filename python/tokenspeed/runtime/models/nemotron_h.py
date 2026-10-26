@@ -183,6 +183,7 @@ class NemotronHNorm(RMSNorm):
             prev_is_moe=False,
             dense_batch_invariant=False,
             post_attn_layernorm=self,
+            moe_owns_row_communication=False,
             query_sharded=False,
         )
 
@@ -644,6 +645,7 @@ class NemotronHMoE(nn.Module):
             is_moe=True,
             prev_is_moe=False,
             dense_batch_invariant=False,
+            moe_owns_row_communication=False,
             query_sharded=False,
         )
         self.fc2_reduce_group = (

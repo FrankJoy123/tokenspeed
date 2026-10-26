@@ -141,6 +141,7 @@ def _worker_main(rank, world_size, port, attn_tp, dense_tp, dp_tokens, hidden_si
         is_moe=False,
         prev_is_moe=False,
         dense_batch_invariant=False,
+        moe_owns_row_communication=False,
         query_sharded=False,
     )
 
@@ -355,6 +356,7 @@ def _qcp_main(rank: int, port: int) -> None:
         layer_id=1,
         is_moe=True,
         prev_is_moe=False,
+        moe_owns_row_communication=False,
         query_sharded=True,
         dense_batch_invariant=False,
     )
@@ -363,6 +365,7 @@ def _qcp_main(rank: int, port: int) -> None:
         layer_id=2,
         is_moe=False,
         prev_is_moe=True,
+        moe_owns_row_communication=False,
         query_sharded=True,
         dense_batch_invariant=False,
     )
@@ -456,6 +459,7 @@ def _qcp_main(rank: int, port: int) -> None:
             is_moe=is_moe,
             prev_is_moe=prev_is_moe,
             dense_batch_invariant=False,
+            moe_owns_row_communication=False,
             query_sharded=True,
         )
         assert not manager.use_all_reduce(is_moe=False)  # the RSAG dense layout
@@ -533,6 +537,7 @@ def _qcp_main(rank: int, port: int) -> None:
             is_moe=False,
             prev_is_moe=False,
             dense_batch_invariant=False,
+            moe_owns_row_communication=False,
             query_sharded=True,
         )
 
@@ -558,6 +563,7 @@ def test_query_sharded_manager_refuses_a_sharded_forward_it_did_not_declare():
         is_moe=False,
         prev_is_moe=False,
         dense_batch_invariant=False,
+        moe_owns_row_communication=False,
         query_sharded=False,
     )
     with pytest.raises(RuntimeError, match="did not declare"):
