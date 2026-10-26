@@ -33,6 +33,15 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(autouse=True)
+def select_sm120_mixes(monkeypatch):
+    # Exercise this implementation even when the serving environment pins
+    # the portable kernel for an older source checkout.
+    monkeypatch.setenv(
+        "TOKENSPEED_KERNEL_OVERRIDE_RESIDUAL_MHC_MIXES", "triton_sm120_mhc_mixes"
+    )
+
+
 def _operands(tokens, hidden, seed):
     g = torch.Generator(device="cuda").manual_seed(seed)
     x = torch.randn(tokens, 4, hidden, device="cuda", generator=g).bfloat16()
