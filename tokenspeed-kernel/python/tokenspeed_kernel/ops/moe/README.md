@@ -403,3 +403,14 @@ hidden width. Some kernels (Triton MXFP4) return no weights; `MoELayer` then
 returns the precomputed route weights it passed in. FP16 inputs, ROCm builds
 without the fused finalizer, and kernels without deferred finalize keep the
 kernel's own finalized output.
+
+### Marlin route-alignment synchronization
+
+The CUDA alignment kernel's shared prefix scan spans several warps. Publishing
+its prefix table must complete across the block before any warp searches it to
+assign expert IDs. A kernel completion orders later kernels, but cannot order
+these readers inside the same block. Keep the block barrier after the shared
+prefix stores. The route-order regression covers masked EP routes and checks
+that every live route appears once in the block of its own expert; also run
+the test under Compute Sanitizer racecheck to exercise the synchronization
+contract independently of the warp schedule.

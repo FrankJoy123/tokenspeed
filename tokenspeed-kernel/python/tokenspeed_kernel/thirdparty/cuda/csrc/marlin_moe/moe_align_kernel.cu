@@ -224,6 +224,9 @@ __global__ void moe_align_block_size_kernel(
 
   // Write prefix[0..num_experts - 1] and cumsum
   if (tid < num_experts) prefix[tid] = scan_buf[tid];
+  // Every warp below searches the shared prefix table. Publish the stores
+  // from all scan warps before building cumsum and per-block expert IDs.
+  __syncthreads();
 #endif
 
   if (tid <= num_experts) {
