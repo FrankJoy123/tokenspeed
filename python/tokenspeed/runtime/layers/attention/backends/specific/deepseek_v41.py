@@ -94,12 +94,6 @@ from tokenspeed.runtime.layers.attention.query_partition import InterleavedQuery
 from tokenspeed.runtime.layers.attention.registry import register_backend
 from tokenspeed.runtime.utils.host_sync import allow_host_sync
 
-# Amortize query exchange by each rank's work, not a fixed global batch.
-# This retains the original 4096-row threshold for TP8 while allowing PP
-# microchunks with the same local work on narrower stage groups.
-_INDEXER_PARTITION_MIN_QUERIES_PER_RANK = 512
-_INDEXER_PARTITION_MIN_HISTORY = 8192
-
 
 class V41CompressorPlan(NamedTuple):
     """Current-forward pair indices and addresses shared by all ratio-2 owners.
@@ -1261,7 +1255,7 @@ class DeepseekV41AttentionBackend(AttentionBackend):
             or layer_id != source
             or layer_id >= self.spec.candidate_source
             or len(group) <= 1
-            or total < _INDEXER_PARTITION_MIN_QUERIES_PER_RANK * len(group)
+            or total < len(group)
         ):
             return None
         window = self._window(positions, requests, forward_mode)
@@ -1271,7 +1265,9 @@ class DeepseekV41AttentionBackend(AttentionBackend):
         visible = max(
             ((span.prefix + span.count) // ratio for span in window[1]), default=0
         )
-        if visible < _INDEXER_PARTITION_MIN_HISTORY:
+        # Short history selects all keys without Q/weight projections. It must
+        # retain the unpartitioned path, whose index_q can legitimately be None.
+        if visible <= self.spec.index_topk:
             return None
         return InterleavedQueryPlan(
             total_rows=total, rank=self.spec.indexer_query_rank, size=len(group)

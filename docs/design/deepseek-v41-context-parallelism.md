@@ -65,8 +65,11 @@ For TP8, enable either or both operator-level QCP paths with:
 ```
 
 Each query size is either 1 (disabled) or the attention TP size. Indexer QCP
-also requires sufficiently long query/history windows. Attention thresholds
-are set by `--deepseek-v41-attention-query-min-tokens` and
+requires at least one query per rank and history larger than the exact
+all-keys selection budget. There is no additional minimum local query or
+history size: communication break-even is measured per workload. Mixed,
+candidate-producing, Reindex, and decode eligibility stays unchanged.
+Attention thresholds are set by `--deepseek-v41-attention-query-min-tokens` and
 `--deepseek-v41-attention-query-swa-min-tokens`.
 
 For V4.1 aggregated KVP+DCP, select the backend and matching sizes:

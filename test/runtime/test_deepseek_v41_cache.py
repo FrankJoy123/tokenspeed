@@ -2893,8 +2893,14 @@ def test_index_geometry_scope_preserves_all_indexer_selections_in_graph(monkeypa
         (ForwardMode.EXTEND, 2, 8192, 65536, None, True),
         (ForwardMode.EXTEND, 8, 8192, 65536, None, True),
         (ForwardMode.EXTEND, 14, 8192, 65536, None, True),
-        (ForwardMode.EXTEND, 2, 4095, 65536, None, False),
-        (ForwardMode.EXTEND, 2, 8192, 4096, None, False),
+        (ForwardMode.EXTEND, 2, 4095, 65536, None, True),
+        (ForwardMode.EXTEND, 2, 1024, 65536, None, True),
+        (ForwardMode.EXTEND, 2, 128, 65536, None, True),
+        (ForwardMode.EXTEND, 2, 8, 65536, None, True),
+        (ForwardMode.EXTEND, 2, 7, 65536, None, False),
+        (ForwardMode.EXTEND, 2, 8, 4, None, False),
+        (ForwardMode.EXTEND, 2, 8, 5, None, True),
+        (ForwardMode.EXTEND, 2, 1024, 4096, None, True),
         (ForwardMode.EXTEND, 3, 8192, 65536, None, False),
         (ForwardMode.EXTEND, 20, 8192, 65536, None, False),
         (ForwardMode.EXTEND, 24, 8192, 65536, None, False),
@@ -2917,7 +2923,7 @@ def test_indexer_projection_plan_preserves_execution_boundaries(
         plan = backend.plan_indexer_queries(layer, positions, None, mode, head_group)
     assert (plan is not None) == expected
     if expected:
-        assert plan.local_rows == 1024
+        assert plan.local_rows == len(range(3, total, 8))
         assert plan.local_slice == slice(3, total, 8)
 
 
