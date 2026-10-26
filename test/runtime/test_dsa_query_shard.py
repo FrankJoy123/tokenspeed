@@ -664,6 +664,7 @@ def test_the_registry_allocates_the_workspace_once_and_the_draft_shares_it():
     max_model_len = 37
     config = SimpleNamespace(
         qcp_size=WORLD,
+        kvp_size=WORLD,
         context_len=max_model_len,
         max_bs=4,
         kv_cache_dtype=torch.bfloat16,

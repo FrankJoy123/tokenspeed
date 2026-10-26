@@ -224,7 +224,11 @@ class AttnConfig:
             softmax = softmax_components[0]
             # The gathered-history extend arm exists on the GPU DSA leaf only;
             # every other leaf rejects a query shard at its metadata build.
-            if not (softmax.is_dsa and softmax.backend_name in (None, "dsa")):
+            v41_query_shard = softmax.backend_name == "deepseek_v41"
+            if not (
+                v41_query_shard
+                or (softmax.is_dsa and softmax.backend_name in (None, "dsa"))
+            ):
                 raise ValueError(
                     "query context parallelism requires GPU DSA attention; "
                     f"got {softmax.backend_name!r}"
@@ -233,7 +237,7 @@ class AttnConfig:
                 raise ValueError("GPU DSA query context parallelism requires CUDA")
             # The sharded KV write gathers the rotated latent and stores it
             # with latent_store, which writes native (bf16) rows only.
-            if (
+            if not v41_query_shard and (
                 self.kv_cache_dtype is not torch.bfloat16
                 or self.kv_cache_mxfp8
                 or self.kv_cache_quant_method != "none"

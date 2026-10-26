@@ -613,7 +613,11 @@ class DeepseekV4MoE(nn.Module):
                 ctx,
                 comm_manager,
             )
-        if self.use_dispatch_combine and self.mapping.attn.has_tp:
+        if (
+            self.use_dispatch_combine
+            and self.mapping.attn.has_tp
+            and not self.mapping.attn.has_qcp
+        ):
             from tokenspeed.runtime.distributed.process_group_manager import (
                 process_group_manager as pg_manager,
             )

@@ -44,19 +44,19 @@ holds (``V41Metadata.global_write_floor``).
 
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
 from typing import NamedTuple
 
 import torch
 from tokenspeed_kernel.ops.attention.dsv4._triton.dcp import normalize_dcp_partials
 
 from tokenspeed.runtime.configs.model_config import AttentionArch
-from tokenspeed.runtime.distributed.comm_ops import all_gather
+from tokenspeed.runtime.distributed.comm_ops import all_gather, token_all_gather_rows
 from tokenspeed.runtime.execution.forward_batch_info import ForwardMode
 from tokenspeed.runtime.execution.query_shard import QueryShardPlan
 from tokenspeed.runtime.layers.attention.backends.base import (
     AttentionBackend,
-    reject_query_shard,
 )
 from tokenspeed.runtime.layers.attention.backends.support import CudaGraphSupport
 from tokenspeed.runtime.layers.attention.configs.base import AttnConfig
@@ -69,6 +69,7 @@ from tokenspeed.runtime.layers.attention.dcp.placement import (
     CachePlacement,
     resolve_cache_slots,
 )
+from tokenspeed.runtime.layers.attention.deepseek_v41_cp import request_query_rows
 from tokenspeed.runtime.layers.attention.deepseek_v41_geometry import (
     V41_COMPRESSOR_TAIL_GROUP_ID,
     V41_GLOBAL_R1_GROUP_ID,
@@ -252,6 +253,10 @@ class DeepseekV41AttentionBackend(AttentionBackend):
     def __init__(self, config: AttnConfig, spec: DeepseekV41Config) -> None:
         super().__init__(config, spec)
         self._attention_exchange_layers: set[int] = set()
+        self._query_shard: QueryShardPlan | None = None
+        self._full_prefill_metadata: V41Metadata | None = None
+        self._full_prefill_spans: tuple[V41PrefillSpan, ...] = ()
+        self.qcp_group = config.qcp_group
         self.kvp_size = config.kvp_size
         self.kvp_rank = config.kvp_rank
         self.kvp_group = config.kvp_group
@@ -339,6 +344,9 @@ class DeepseekV41AttentionBackend(AttentionBackend):
         super()._publish_cache_pool(cache_pool)
         self._kvp_tables_cpu = {}
         self.forward_metadata = None
+        self._query_shard = None
+        self._full_prefill_metadata = None
+        self._full_prefill_spans = ()
         self.forward_prefill_metadata = None
         self.forward_decode_metadata = None
         self._decode_views_by_bs.clear()
@@ -614,7 +622,19 @@ class DeepseekV41AttentionBackend(AttentionBackend):
         query_shard: QueryShardPlan | None,
         **kwargs,
     ) -> None:
-        reject_query_shard(query_shard, "DeepseekV41AttentionBackend")
+        self._query_shard = query_shard
+        self._full_prefill_metadata = None
+        self._full_prefill_spans = ()
+        if query_shard is not None:
+            if not forward_mode.is_extend() or num_extends != bs or self.kvp_size != 1:
+                raise ValueError(
+                    "V4.1 query shards require pure prefill and replicated KV"
+                )
+            if min(query_shard.row_counts) == 0:
+                raise ValueError(
+                    "V4.1 encoder-cache QCP currently requires a nonempty shard on every rank"
+                )
+
         if self.kvp_size > 1:
             if (
                 not forward_mode.is_extend()
@@ -745,6 +765,84 @@ class DeepseekV41AttentionBackend(AttentionBackend):
             meta, completes, window, forward_mode
         )
         self.sparse_topk.clear()
+        if query_shard is not None:
+            if query_shard.total_rows != n:
+                raise ValueError(
+                    "V4.1 query shard and canonical input lengths disagree"
+                )
+            full = self.forward_prefill_metadata
+            self._full_prefill_metadata = full
+            self._full_prefill_spans = self._prefill_spans
+            start, end = query_shard.local_start, query_shard.local_end
+            local = replace(
+                full,
+                positions=full.positions[start:end],
+                request_indices=full.request_indices[start:end],
+                swa_write_slots=full.swa_write_slots[start:end],
+                compressor=full.compressor.window(start, end),
+            )
+            self.forward_metadata = self.forward_prefill_metadata = local
+            spans = []
+            for span in self._full_prefill_spans:
+                left, right = max(start, span.offset), min(
+                    end, span.offset + span.count
+                )
+                if left < right:
+                    spans.append(
+                        V41PrefillSpan(
+                            span.request,
+                            left - start,
+                            span.prefix + left - span.offset,
+                            right - left,
+                            span.swa_prefix_begin,
+                        )
+                    )
+            self._prefill_spans = tuple(spans)
+
+    def gather_query_rows(self, values: torch.Tensor) -> torch.Tensor:
+        plan = self._query_shard
+        if plan is None:
+            return values
+        if values.ndim != 2 or values.shape[0] != plan.local_rows:
+            raise ValueError("V4.1 CP gather requires this rank's complete local rows")
+        return token_all_gather_rows(values, self.qcp_group, list(plan.row_counts))
+
+    @contextmanager
+    def full_query_metadata(self):
+        """Use canonical rows only while producing shared compression or SWA plans."""
+        if self._query_shard is None:
+            yield
+            return
+        if self._full_prefill_metadata is None:
+            raise RuntimeError("V4.1 CP canonical metadata is not prepared")
+        saved = (
+            self.forward_metadata,
+            self.forward_prefill_metadata,
+            self._prefill_spans,
+        )
+        self.forward_metadata = self.forward_prefill_metadata = (
+            self._full_prefill_metadata
+        )
+        self._prefill_spans = self._full_prefill_spans
+        try:
+            yield
+        finally:
+            (
+                self.forward_metadata,
+                self.forward_prefill_metadata,
+                self._prefill_spans,
+            ) = saved
+
+    @contextmanager
+    def global_source_inputs(self, values, positions, requests, mode):
+        """Gather normalized source hidden rows; all cache history remains in LCM."""
+        local = self.query_metadata(mode)
+        if positions is not local.positions or requests is not local.request_indices:
+            raise ValueError("V4.1 CP source must cover the canonical local query rows")
+        complete = self.gather_query_rows(values)
+        with self.full_query_metadata():
+            full = self.query_metadata(mode)
+            yield complete, full.positions, full.request_indices
 
     def _build_decoder_view(
         self,
@@ -2069,7 +2167,19 @@ class DeepseekV41AttentionBackend(AttentionBackend):
                 None,
                 lse=None,
             )
-        plan = self._swa_query_plan(positions, request_indices, forward_mode)
+        source_positions = positions
+        source_swa = swa_kv
+        if self._query_shard is not None:
+            source_swa = self.gather_query_rows(swa_kv)
+            with self.full_query_metadata():
+                source_meta = self.query_metadata(forward_mode)
+                source_positions = source_meta.positions
+                locations = source_meta.swa_write_slots
+                plan = self._swa_query_plan(
+                    source_positions, source_meta.request_indices, forward_mode
+                )
+        else:
+            plan = self._swa_query_plan(positions, request_indices, forward_mode)
         # Quantize current rows exactly as cache storage, without publishing them
         # until every request has read its old sliding prefix.
         prefixes = [
@@ -2078,13 +2188,15 @@ class DeepseekV41AttentionBackend(AttentionBackend):
         ]
         if swa_rope_cache is None:
             current = dsv41.cache_unpack(
-                dsv41.cache_pack(swa_kv, self.swa_format, None), self.swa_format, None
+                dsv41.cache_pack(source_swa, self.swa_format, None),
+                self.swa_format,
+                None,
             )
         else:
-            current = torch.empty_like(swa_kv)
+            current = torch.empty_like(source_swa)
             dsv41.swa_rope_scatter(
-                swa_kv,
-                positions,
+                source_swa,
+                source_positions,
                 swa_rope_cache,
                 cache,
                 locations,
@@ -2108,9 +2220,18 @@ class DeepseekV41AttentionBackend(AttentionBackend):
                 )
         out = torch.zeros_like(q)
         for request_plan, prefix in zip(plan.requests, prefixes, strict=True):
-            rows = request_plan.rows
+            source_rows = request_plan.rows
+            rows = source_rows
+            selection_rows = slice(None)
+            if self._query_shard is not None:
+                if not isinstance(source_rows, slice):
+                    raise ValueError("V4.1 CP requires canonical request spans")
+                bound = request_query_rows(self._query_shard, source_rows)
+                if bound is None:
+                    continue
+                rows, selection_rows = bound
             prefix_count = request_plan.prefix_slots.numel()
-            current_rows = current[rows]
+            current_rows = current[source_rows]
             swa_count = prefix_count + current_rows.shape[0]
             # Keep old bounded SWA rows protected. A packed native reader can
             # consume the original FP4 history without expanding its full prefix.
@@ -2121,7 +2242,7 @@ class DeepseekV41AttentionBackend(AttentionBackend):
                     request_q,
                     prefix,
                     current_rows,
-                    request_plan.swa_indices,
+                    request_plan.swa_indices[selection_rows],
                     global_cache,
                     None if owner < 0 else global_slots[rows],
                     None if owner < 0 else global_lens[rows],
@@ -2147,7 +2268,7 @@ class DeepseekV41AttentionBackend(AttentionBackend):
             workspace = current.new_empty((swa_count + history_count, 512))
             workspace[:prefix_count].copy_(prefix)
             workspace[prefix_count:swa_count].copy_(current_rows)
-            indices = request_plan.swa_indices
+            indices = request_plan.swa_indices[selection_rows]
             if owner >= 0:
                 if self.kvp_size > 1:
                     packed = self._gather_kvp_history(
@@ -2239,7 +2360,7 @@ class DeepseekV41AttentionBackend(AttentionBackend):
                 out[rows] = result
             del workspace, current_rows, indices
         if swa_rope_cache is None:
-            dsv41.cache_scatter(swa_kv, cache, locations, self.swa_format)
+            dsv41.cache_scatter(source_swa, cache, locations, self.swa_format)
         if out_rope_cache is not None:
             dsv41.rope_inplace(out, positions, out_rope_cache, None)
         return out

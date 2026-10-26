@@ -96,6 +96,27 @@ class DeepseekV41Config(SoftmaxAttnConfig):
                 "DeepSeek V4.1 PD transfers the cache after the prompt completes; "
                 "pass --disaggregation-layerwise-interval 0"
             )
+        attn_mapping = server_args.mapping.attn
+        if attn_mapping.has_qcp:
+            if (
+                server_args.prefill_only_mode != "encoder-cache"
+                or server_args.mapping.has_pp
+                or attn_mapping.kvp_size != 1
+                or attn_mapping.head_tp_size != 1
+                or attn_mapping.dp_size != 1
+                or server_args.mapping.moe.tp_size != 1
+                or server_args.mapping.moe.ep_size != attn_mapping.qcp_size
+                or server_args.all2all_backend != "deepep"
+                or not server_args.disable_prefill_graph
+                or server_args.enable_mixed_batch
+                or server_args.speculative_algorithm is not None
+                or server_args.deepseek_v41_indexer_query_parallel_size != 1
+                or server_args.deepseek_v41_attention_query_parallel_size != 1
+            ):
+                raise ValueError(
+                    "V4.1 query shards require eager encoder-cache PP1/DP1, "
+                    "replicated KV/heads, DeepEP with expert TP1, and no operator-local QCP"
+                )
         kwargs = model_wide_kwargs(
             server_args,
             model_config,
@@ -150,7 +171,11 @@ class DeepseekV41Config(SoftmaxAttnConfig):
             num_attention_heads=model_config.num_attention_heads,
             num_kv_heads=1,
             head_dim=int(hf.head_dim),
-            attn_tp_size=server_args.attn_tp_size or server_args.mapping.attn.tp_size,
+            attn_tp_size=(
+                1
+                if attn_mapping.has_qcp
+                else (server_args.attn_tp_size or attn_mapping.tp_size)
+            ),
             attention_query_swa_min_tokens=attention_swa_min_tokens,
             attention_query_min_tokens=attention_min_tokens,
             attention_query_rank=attn.tp_rank if attention_size > 1 else 0,

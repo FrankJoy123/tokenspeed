@@ -89,7 +89,9 @@ def test_off_by_default_everywhere():
     ],
 )
 def test_the_roles_that_take_the_flags(kwargs):
-    validate_context_parallel_roles(**kwargs, enable_mixed_batch=False)
+    validate_context_parallel_roles(
+        **kwargs, enable_mixed_batch=False, prefill_only_mode=None
+    )
 
 
 @pytest.mark.parametrize(
@@ -150,7 +152,9 @@ def test_the_roles_that_take_the_flags(kwargs):
 )
 def test_the_roles_that_refuse_the_flags(kwargs, match):
     with pytest.raises(ValueError, match=match):
-        validate_context_parallel_roles(**kwargs, enable_mixed_batch=False)
+        validate_context_parallel_roles(
+            **kwargs, enable_mixed_batch=False, prefill_only_mode=None
+        )
 
 
 def test_the_decode_role_reads_the_shards_with_dcp():

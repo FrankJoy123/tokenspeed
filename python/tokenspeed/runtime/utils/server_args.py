@@ -228,6 +228,7 @@ def validate_context_parallel_roles(
     qcp_size: int,
     disaggregation_mode: str,
     enable_mixed_batch: bool,
+    prefill_only_mode: str | None,
 ) -> None:
     """Validate KVP/DCP roles and the PD-prefill-only QCP layout.
 
@@ -243,7 +244,15 @@ def validate_context_parallel_roles(
             "--kv-parallel-size > 1 requires --disaggregation-mode null, prefill "
             f"or decode (got {disaggregation_mode!r})"
         )
-    if qcp_size > 1:
+    encoder_cache_qcp = prefill_only_mode == "encoder-cache" and qcp_size > 1
+    if encoder_cache_qcp:
+        if disaggregation_mode != "null" or kvp_size != 1 or dcp_size != 1:
+            raise ValueError(
+                "encoder-cache query parallelism requires local prefill and replicated KV"
+            )
+        if enable_mixed_batch:
+            raise ValueError("encoder-cache query parallelism requires pure prefill")
+    if qcp_size > 1 and not encoder_cache_qcp:
         if disaggregation_mode != "prefill":
             raise ValueError(
                 "--query-context-parallel-size > 1 requires --disaggregation-mode "
@@ -1180,6 +1189,7 @@ class ServerArgs:
             qcp_size=self.mapping.attn.qcp_size,
             disaggregation_mode=self.disaggregation_mode,
             enable_mixed_batch=self.enable_mixed_batch,
+            prefill_only_mode=self.prefill_only_mode,
         )
         validate_qcp(
             qcp_size=self.mapping.attn.qcp_size,

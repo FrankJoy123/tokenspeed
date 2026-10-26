@@ -134,6 +134,7 @@ from tokenspeed.runtime.layers.activation import SiluAndMul
 from tokenspeed.runtime.layers.attention.backends.specific.deepseek_v41 import (
     V41RowPlan,
 )
+from tokenspeed.runtime.layers.attention.deepseek_v41_cp import projection_mapping
 from tokenspeed.runtime.layers.dense.fp8 import Fp8LinearMethod
 from tokenspeed.runtime.layers.dense.unquant import UnquantizedLinearMethod
 from tokenspeed.runtime.layers.layernorm import RMSNorm
@@ -875,6 +876,20 @@ def _row_plan(layer_id: int, ced_decoder_start: int, ctx: ForwardContext) -> V41
 def _write_v41_global_kv(owner, hidden_states, positions, requests, backend, mode):
     if owner.compressor is None:
         return
+    if owner.query_sharded:
+        with backend.global_source_inputs(
+            hidden_states, positions, requests, mode
+        ) as source:
+            _write_v41_complete_global_kv(owner, *source, backend, mode)
+        return
+    _write_v41_complete_global_kv(
+        owner, hidden_states, positions, requests, backend, mode
+    )
+
+
+def _write_v41_complete_global_kv(
+    owner, hidden_states, positions, requests, backend, mode
+):
     latent, row_positions, row_requests = owner.compressor(
         hidden_states, owner.layer_id, positions, requests, backend, mode
     )
@@ -907,6 +922,7 @@ def _write_v41_global_kv(owner, hidden_states, positions, requests, backend, mod
 class DeepseekV41GlobalCacheWriter(nn.Module):
     def __init__(self, config, mapping, layer_id, quant_config, prefix):
         super().__init__()
+        self.query_sharded = mapping.attn.has_qcp
         self.layer_id = layer_id
         self.compressor = DeepseekV41Compressor(
             config, layer_id, add_prefix("compressor", prefix)
@@ -966,6 +982,8 @@ class DeepseekV41Attention(nn.Module):
         self.stream_fork = StreamFork(aux_stream)
         self.layer_id = layer_id
         self.ced_decoder_start = ced_decoder_start
+        self.query_sharded = mapping.attn.has_qcp
+        mapping = projection_mapping(mapping)
         self.mapping = mapping
         self.head_dim = config.head_dim
         self.n_local_heads = config.num_attention_heads // mapping.attn.tp_size
@@ -1549,7 +1567,7 @@ class DeepseekV41DecoderLayer(nn.Module):
             dense_batch_invariant=False,
             input_layernorm=None,
             post_attn_layernorm=None,
-            query_sharded=False,
+            query_sharded=mapping.attn.has_qcp,
         )
         self.attn_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.ffn_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -1557,7 +1575,7 @@ class DeepseekV41DecoderLayer(nn.Module):
             DeepseekV41Engram(
                 config,
                 layer_id,
-                mapping,
+                projection_mapping(mapping),
                 dense_quant,
                 add_prefix("engram", prefix),
                 self.attn.wq_a_wkv.weight.device,
@@ -2502,6 +2520,19 @@ class DeepseekV41Model(nn.Module):
         h = self.embed_tokens(input_ids) if input_embeds is None else input_embeds
         if h.shape != (input_ids.numel(), self.config.hidden_size):
             raise ValueError("V4.1 input embeddings have the wrong shape")
+        if ctx.query_shard is not None:
+            local = ctx.query_shard.local_slice
+            # Vocabulary TP still embeds the complete packed input collectively.
+            # Slice prepared global hashes; never restart n-gram history at a shard.
+            h = h[local].contiguous()
+            positions = positions[local].contiguous()
+            image_mask = None if image_mask is None else image_mask[local].contiguous()
+            hashes = None if hashes is None else hashes[local].contiguous()
+            engram_token_mask = (
+                None
+                if engram_token_mask is None
+                else engram_token_mask[local].contiguous()
+            )
         if h.is_cuda:
             from tokenspeed_kernel.ops.residual import mhc_init
 
@@ -2824,7 +2855,9 @@ class DeepseekV41ForCausalLM(BaseCausalLM):
             quant_config,
             add_prefix("model", prefix),
             host_table,
-            resolve_engram_host_layout(host_table, mapping.attn.tp_size),
+            resolve_engram_host_layout(
+                host_table, projection_mapping(mapping).attn.tp_size
+            ),
         )
 
     def bind_checkpoint_dir(self, checkpoint_dir: str) -> None:
@@ -3058,7 +3091,7 @@ class DeepseekV41ForCausalLM(BaseCausalLM):
             raise ValueError(f"{name}: expected {expected}, got {tuple(tensor.shape)}")
         key = name.rsplit(".", 1)[0]
         rows = linear.weight.shape[0]
-        start = self.mapping.attn.tp_rank * rows
+        start = linear.tp_rank * rows
         # Retain only local codes/scales even when the two arrive in different files.
         if field == "scale":
             local = (

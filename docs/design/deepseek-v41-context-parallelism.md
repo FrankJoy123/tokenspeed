@@ -116,3 +116,31 @@ It skips the final cache producer: that boundary has no expert collective,
 and an idle owner has no rows to write. This is ordinary request-level DP,
 not splitting a single request's queries across replicas. Full-model query
 context parallelism still requires a separate V4.1 layout/backend contract.
+
+
+## Experimental encoder-cache model-wide query shards
+
+The encoder-cache-only layout can use attention TP as the query group, with
+head TP1, KVP1, expert TP1 and DeepEP over that group. It is currently PP1,
+eager, pure prefill, without speculation or the operator-local query exchanges.
+Every scheduled forward must have at least one query per rank; metadata rejects
+empty shards on all ranks before any collective. This is an experimental
+contract, not a performance or general serving claim.
+
+Vocabulary TP embeds the complete packed input before the model slices rows.
+Prepared Engram hashes and masks are sliced in the same global row order;
+Engram table/head projections follow each query owner with replicated heads.
+Attention projections and mHC run only local rows. Expert communication consumes
+those rows directly, without applying replicated-input TP ownership a second time.
+
+Each source gathers its normalized hidden rows in canonical request order
+before the existing ratio-2 compressor and global/index-K writers. A temporary
+canonical metadata view preserves pairing, tails, replay floors and LCM page
+addresses; it contains only the current forward, not request history.
+Every rank therefore publishes the same complete compressed state.
+
+SWA gathers only the new 512-wide key rows. The existing prefill path protects
+old prefixes before publishing current keys, and retains the full current-key
+span while slicing only query rows/indices and outputs. Publishing a ring
+before those old-prefix reads would corrupt shard-boundary attention.
+All persistent cache state stays in the existing LCM groups.
