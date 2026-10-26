@@ -281,8 +281,13 @@ class DeepseekV4MoE(nn.Module):
             global_server_args_dict.get("all2all_backend") == "nccl"
             and mapping.moe.ep_size > 1
         )
+        self.use_deepep_dispatch = (
+            global_server_args_dict.get("all2all_backend") == "deepep"
+            and mapping.moe.ep_size > 1
+        )
+        self.use_dispatch_combine = self.use_nccl_dispatch or self.use_deepep_dispatch
         self.owns_ep_communication = (
-            self.use_mega_moe or self.use_gluon_petit or self.use_nccl_dispatch
+            self.use_mega_moe or self.use_gluon_petit or self.use_dispatch_combine
         )
         # Petit's VMM-backed collective and auxiliary-stream shared experts do
         # not replay safely together. Keep both branches on the main stream.
@@ -350,7 +355,7 @@ class DeepseekV4MoE(nn.Module):
                 # group. Fused MegaMoE paths return complete routed outputs and
                 # therefore keep the shared expert dense and local.
                 is_shared_expert=not self.owns_ep_communication,
-                replicated=self.use_nccl_dispatch,
+                replicated=self.use_dispatch_combine,
             )
         else:
             self.shared_experts = None
@@ -554,7 +559,7 @@ class DeepseekV4MoE(nn.Module):
         with nvtx_range("moe_select_experts"):
             topk_output = self._compute_topk_output(hidden_states, input_ids)
         deferred_finalize = (
-            not self.use_nccl_dispatch
+            not self.use_dispatch_combine
             and hidden_states.dtype == torch.bfloat16
             and self.experts.supports_deferred_cuda_finalize
         )
@@ -608,7 +613,7 @@ class DeepseekV4MoE(nn.Module):
                 ctx,
                 comm_manager,
             )
-        if self.use_nccl_dispatch and self.mapping.attn.has_tp:
+        if self.use_dispatch_combine and self.mapping.attn.has_tp:
             from tokenspeed.runtime.distributed.process_group_manager import (
                 process_group_manager as pg_manager,
             )

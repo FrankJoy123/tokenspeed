@@ -225,6 +225,31 @@ class DeepEPBuffer:
         else:
             raise NotImplementedError
 
+        # An explicit override preserves the installed library defaults when
+        # unset. PR375's no-NVLink normal transport uses RDMA for every rank.
+        normal_transport = os.environ.get("TS_DEEPEP_NORMAL_TRANSPORT")
+        if normal_transport not in (None, "nvlink", "rdma"):
+            raise ValueError("TS_DEEPEP_NORMAL_TRANSPORT must be nvlink or rdma")
+        transport_options = {}
+        if normal_transport == "rdma":
+            if deepep_mode != DeepEPMode.normal:
+                raise ValueError(
+                    "DeepEP RDMA normal transport requires deepep_mode=normal"
+                )
+            rdma_buffer_bytes = os.environ.get("TS_DEEPEP_RDMA_BUFFER_BYTES")
+            if rdma_buffer_bytes is None or int(rdma_buffer_bytes) <= 0:
+                raise ValueError(
+                    "Set a positive TS_DEEPEP_RDMA_BUFFER_BYTES for RDMA normal transport"
+                )
+            num_nvl_bytes = 0
+            num_rdma_bytes = max(num_rdma_bytes, int(rdma_buffer_bytes))
+            transport_options = {
+                "allow_nvlink_for_normal_mode": False,
+                "allow_nvlink_for_low_latency_mode": False,
+            }
+        elif normal_transport == "nvlink":
+            transport_options = {"allow_nvlink_for_normal_mode": True}
+
         free_gpu_memory_begin = _get_available_gpu_memory(torch.cuda.current_device())
         cls._buffer = Buffer(
             group,
@@ -233,6 +258,7 @@ class DeepEPBuffer:
             low_latency_mode=deepep_mode.enable_low_latency(),
             num_qps_per_rank=num_qps_per_rank,
             allow_mnnvl=_resolve_allow_mnnvl(torch.cuda.current_device()),
+            **transport_options,
         )
         free_gpu_memory_end = _get_available_gpu_memory(torch.cuda.current_device())
         logger.info(

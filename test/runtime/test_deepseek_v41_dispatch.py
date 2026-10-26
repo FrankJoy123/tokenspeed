@@ -28,7 +28,7 @@ from tokenspeed.runtime.utils.server_args import ServerArgs
 
 
 @pytest.mark.parametrize("pp,tp", [(1, 8), (2, 4), (4, 2), (8, 1)])
-@pytest.mark.parametrize("backend", ["none", "nccl"])
+@pytest.mark.parametrize("backend", ["none", "nccl", "deepep"])
 def test_local_encoder_cache_layout(tmp_path, pp, tp, backend):
     (tmp_path / "config.json").write_text(
         json.dumps({"architectures": ["DeepseekV41ForCausalLM"]})

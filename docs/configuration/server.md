@@ -1343,3 +1343,19 @@ On a host whose address is IPv6, the PD transfer engine sets `MC_USE_IPV6=1`
 (unless it is already set) so Mooncake's handshake uses IPv6. The Mooncake L3
 store client reads `MC_USE_IPV6` on its own when the store starts, so export
 `MC_USE_IPV6=1` yourself when the L3 store runs on an IPv6 host.
+
+
+### Explicit DeepEP normal transport
+
+The installed DeepEP library supplies the transport defaults. For an isolated
+build of the legacy PCIe implementation (DeepEP PR375), set
+`TS_DEEPEP_NORMAL_TRANSPORT=rdma` and a positive
+`TS_DEEPEP_RDMA_BUFFER_BYTES`, and select `--deepep-mode normal`.
+This mode routes all ranks through RDMA, including ranks on one host, and
+disables normal/low-latency NVLink transport. It requires a matching
+architecture build and NVSHMEM/IBGDA. The buffer byte count is explicit
+because NVLink buffer hints do not size this transport. Unset transport
+variables preserve the installed library defaults.
+DeepSeek V4.1 attention-TP inputs are partitioned into unique token owners
+before routed dispatch; shared experts remain complete for each owner and
+the result is gathered back to the attention layout.
