@@ -1888,10 +1888,8 @@ class ServerArgs:
                 raise ValueError(
                     "encoder-cache Prefill runs locally without speculation or PD"
                 )
-            if self.mapping.has_attn_dp or self.enable_mixed_batch:
-                raise ValueError(
-                    "encoder-cache Prefill requires attention DP1 and no mixed batches"
-                )
+            if self.enable_mixed_batch:
+                raise ValueError("encoder-cache Prefill requires no mixed batches")
             self.disable_overlap_schedule = True
             self.enforce_eager = True
             self.disable_prefill_graph = True

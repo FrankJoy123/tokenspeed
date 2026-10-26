@@ -102,3 +102,17 @@ capacity; V4.1's small selected-attention workload does not imply a decode
 speedup. Performance and model accuracy need paired workload measurements.
 Changing collective/reduction order can change greedy outputs, so equal task
 accuracy is not a claim of token-for-token equivalence.
+
+## Encoder-cache attention DP
+
+A PP1 encoder-cache engine can assign requests to attention-DP owners with
+ordinary expert parallelism. Each owner retains its own request and cache
+pages; the local prefill completion emits no sampled token and performs no
+PD transfer. The engine remains eager, without mixed batches or overlapping
+scheduler rounds. PP with attention DP remains unsupported.
+
+An idle expert peer enters every encoder layer's ordinary EP collective.
+It skips the final cache producer: that boundary has no expert collective,
+and an idle owner has no rows to write. This is ordinary request-level DP,
+not splitting a single request's queries across replicas. Full-model query
+context parallelism still requires a separate V4.1 layout/backend contract.

@@ -80,3 +80,34 @@ def test_local_cache_refuses_incompatible_execution(tmp_path, changes):
     options.update(changes)
     with pytest.raises(ValueError):
         ServerArgs(**options)
+
+
+def test_encoder_cache_attention_dp_owns_local_requests(tmp_path):
+    (tmp_path / "config.json").write_text(
+        json.dumps({"architectures": ["DeepseekV41ForCausalLM"]})
+    )
+    args = ServerArgs(
+        model=str(tmp_path),
+        world_size=8,
+        attn_tp_size=1,
+        data_parallel_size=8,
+        pipeline_parallel_size=1,
+        ep_size=8,
+        moe_tp_size=1,
+        max_num_seqs=8,
+        enable_expert_parallel=True,
+        moe_backend="marlin",
+        all2all_backend="deepep",
+        deepep_mode="normal",
+        prefill_only_mode="encoder-cache",
+        disable_kvstore=True,
+        language_model_only=True,
+    )
+    assert args.mapping.attn.dp_size == args.mapping.moe.ep_size == 8
+    assert args.mapping.attn.tp_size == args.mapping.moe.tp_size == 1
+    assert (
+        args.disable_overlap_schedule
+        and args.enforce_eager
+        and args.disable_prefill_graph
+    )
+    assert args.prefill_only_mode == "encoder-cache"

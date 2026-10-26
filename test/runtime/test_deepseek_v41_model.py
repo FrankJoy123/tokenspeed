@@ -547,14 +547,23 @@ def test_empty_decoder_rows_complete_hc_and_preserve_ep_participation(
             layer._forward_ffn(hidden[:, 0, :], image_mask, ctx, defer_reduce=True)
 
 
-def test_idle_model_calls_every_ep_layer_with_completed_empty_state(monkeypatch):
+@pytest.mark.parametrize("cache_only", [False, True])
+def test_idle_model_calls_every_ep_layer_with_completed_empty_state(
+    monkeypatch, cache_only
+):
     monkeypatch.setattr(v41, "DeepseekV41MoE", _DenseFFN)
+    monkeypatch.setitem(
+        v41.global_server_args_dict,
+        "prefill_only_mode",
+        "encoder-cache" if cache_only else None,
+    )
     config = _config()
     config.engram_layer_ids = []
     model = DeepseekV41Model(config, _mapping(0, 1, 1), None, "model", False, "gpu")
-    model.mapping = SimpleNamespace(attn=SimpleNamespace(has_dp=True))
+    model.mapping = _mapping(0, 1, 2)
     calls = []
-    for layer in model.layers:
+    ep_layers = model.layers[: model.ced_decoder_start] if cache_only else model.layers
+    for layer in ep_layers:
         layer.ffn.owns_ep_communication = True
         monkeypatch.setattr(
             layer.comm_manager,
@@ -591,7 +600,9 @@ def test_idle_model_calls_every_ep_layer_with_completed_empty_state(monkeypatch)
         image_mask=None,
     )
     assert hidden.shape == (0, config.hidden_size) and captured is None
-    assert calls == list(range(config.num_hidden_layers))
+    assert calls == list(
+        range(model.ced_decoder_start if cache_only else config.num_hidden_layers)
+    )
 
 
 @pytest.mark.parametrize("attention_dp", [False, True])

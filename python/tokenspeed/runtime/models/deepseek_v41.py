@@ -2181,7 +2181,15 @@ class DeepseekV41Model(nn.Module):
                     (0, self.config.hc_mult), dtype=torch.float32, device=hidden.device
                 )
                 counts = None
-                for layer in self.layers:
+                # Idle peers still enter every encoder EP collective. The
+                # cache-only boundary has no expert collective and no local
+                # rows to write; its signature is not a decoder-layer call.
+                idle_layers = (
+                    self.layers[: self.ced_decoder_start]
+                    if self.cache_only_prefill
+                    else self.layers
+                )
+                for layer in idle_layers:
                     hidden, pre_mix, _, _ = layer(
                         hidden,
                         pre_mix,
