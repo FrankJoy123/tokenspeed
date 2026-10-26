@@ -46,3 +46,14 @@ converts canonical FP32 1x128 activation and 128x128 weight scales to the
 required layout without UE8M0 rounding. Conversion is part of each call,
 including graph capture; no persistent weight cache is created. Unsupported
 forced calls fail explicitly. It does not claim batch-invariant numerics.
+
+## SM120 group32 MXFP8 prefill
+
+The optional FlashInfer CUTLASS leaf consumes existing E4M3 codes and canonical
+per-row group32 UE8M0 scales. It permutes scales to F8_128x4 for each call;
+weight values, activation quantization and the model cache codec are unchanged.
+Auto selection is limited to measured large-row BF16-output projections
+(M/N/K at least 1024, N aligned to 32 and K to 128), with PDL disabled.
+Small-row and unsupported-format requests retain the portable implementation.
+This is separate from the SM100 CuTe DSL path; it does not imply identical
+floating-point accumulation order or batch-invariant numerics.

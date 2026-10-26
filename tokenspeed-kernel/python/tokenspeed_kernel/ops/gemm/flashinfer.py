@@ -943,3 +943,112 @@ def prepare_flashinfer_fp8_blockscale_weight_scales(
     prepacked MN-major layout ``[K // 128, N // 128]`` consumed by
     ``gemm_fp8_nt_groupwise`` with ``scale_major_mode="MN"``."""
     return weight_scales.t().contiguous()
+
+
+# ===-----------------------------------------------------------------------===#
+# MXFP8 (1x32 UE8M0): FlashInfer CUTLASS (NVIDIA SM120)
+# ===-----------------------------------------------------------------------===#
+
+from tokenspeed_kernel.thirdparty.flashinfer.mxfp8_sm120 import (
+    cutlass_mxfp8_sm120,
+    has_cutlass_mxfp8_sm120,
+)
+
+if has_cutlass_mxfp8_sm120():
+
+    @register_kernel(
+        "gemm",
+        "mm",
+        name="flashinfer_mm_mxfp8_sm120",
+        solution="flashinfer",
+        capability=CapabilityRequirement(
+            min_arch_version=ArchVersion(12, 0),
+            max_arch_version=ArchVersion(12, 0),
+            vendors=frozenset({"nvidia"}),
+        ),
+        signatures=frozenset(
+            {
+                format_signature(
+                    a=tensor_format("mxfp8", _fp8_dtype, scale=_MXFP8_UE8M0_1X32_SCALE),
+                    b=tensor_format("mxfp8", _fp8_dtype, scale=_MXFP8_UE8M0_1X32_SCALE),
+                )
+            }
+        ),
+        traits={
+            "m_min": frozenset({1024}),
+            "n_min": frozenset({1024}),
+            "k_min": frozenset({1024}),
+            "n_align": frozenset({32}),
+            "k_align": frozenset({128}),
+            "a_inner_stride_one": frozenset({True}),
+            "b_inner_stride_one": frozenset({True}),
+            "out_dtype": frozenset({torch.bfloat16}),
+            "pdl_enabled": frozenset({False}),
+        },
+        # Small-M scale conversion costs more than the portable GEMM; keep
+        # that path. Large prefill projections amortize both scale swizzles.
+        priority=Priority.SPECIALIZED + 2,
+    )
+    def flashinfer_mm_mxfp8_sm120(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        A_scales: torch.Tensor | None,
+        B_scales: torch.Tensor | None,
+        out_dtype: torch.dtype,
+        *,
+        alpha: torch.Tensor | None = None,
+        block_size: list[int] | None = None,
+        out: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """SM120 E4M3 GEMM with canonical, per-row group32 UE8M0 scales.
+
+        A is contiguous [M,K]. B is contiguous [N,K], or its transposed
+        [K,N] view for an explicit override. Scale tensors are [M,K/32]
+        and [N,K/32]. Only scale layout changes; no re-quantization occurs.
+        Returns BF16 [M,N], copying into an optional output buffer.
+        """
+        if alpha is not None or block_size != [1, 32]:
+            raise ValueError("SM120 MXFP8 requires group32 scales and alpha=None")
+        if (
+            out_dtype != torch.bfloat16
+            or A.dtype != _fp8_dtype
+            or B.dtype != _fp8_dtype
+        ):
+            raise ValueError("SM120 MXFP8 requires E4M3 operands and BF16 output")
+        if A.ndim != 2 or B.ndim != 2 or not A.is_contiguous():
+            raise ValueError("SM120 MXFP8 requires contiguous 2D A and NK/KN B")
+        k = A.shape[1]
+        # Square matrices are ambiguous by shape: use the physical layout.
+        b = B if B.shape[0] == k and B.stride(0) == 1 else B.t()
+        m, n = A.shape[0], b.shape[1]
+        if b.shape[0] != k or b.stride(0) != 1 or b.stride(1) != k:
+            raise ValueError(
+                "SM120 MXFP8 requires contiguous NK weights or their transpose"
+            )
+        if m < 1 or n < 128 or n % 32 or k < 128 or k % 128:
+            raise ValueError("SM120 MXFP8 requires M>0, N%32=0 and K%128=0")
+        for sf, shape in ((A_scales, (m, k // 32)), (B_scales, (n, k // 32))):
+            if (
+                sf is None
+                or sf.dtype != torch.uint8
+                or tuple(sf.shape) != shape
+                or sf.device != A.device
+            ):
+                raise ValueError("SM120 MXFP8 requires canonical uint8 UE8M0 scales")
+        if not A.is_cuda or B.device != A.device:
+            raise ValueError("SM120 MXFP8 operands must share a CUDA device")
+        sa = swizzle_mxfp8_scale(A_scales, m, k)
+        sb = swizzle_mxfp8_scale(B_scales, n, k)
+        result = cutlass_mxfp8_sm120(A, b, sa, sb, out_dtype)
+        if out is not None:
+            if (
+                out.shape != result.shape
+                or out.dtype != out_dtype
+                or out.device != A.device
+            ):
+                raise ValueError(
+                    "SM120 MXFP8 out must match the result shape, dtype and device"
+                )
+            out.copy_(result)
+            return out
+        return result
