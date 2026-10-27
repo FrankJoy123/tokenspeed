@@ -604,3 +604,27 @@ def test_compute_placement_maps_is_host_only_and_init_by_eplb_wraps_it():
     assert seen["ep_size"] == 4 and seen["num_physical_experts"] == 12
     assert placement.ep_rank == 2 and placement.ep_rank_nodes == (0, 0, 0, 0)
     assert torch.equal(placement.physical_to_logical_map, phy2log)
+
+
+@pytest.mark.parametrize("allocation_device", ["meta", "cuda"])
+@pytest.mark.parametrize("table_device", ["cpu", "cuda"])
+@pytest.mark.parametrize("ep_rank", [0, 1, 2, 3])
+def test_static_map_ignores_the_default_allocation_device(
+    allocation_device, table_device, ep_rank
+):
+    if "cuda" in (allocation_device, table_device) and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    # Expert 1 has two copies on node 1; ranks on node 0 take the fair-draw
+    # path. Other experts cover local, same-node and single-replica choices.
+    replicas = torch.tensor(
+        [[[0, 4], [6, 7], [2, -1], [1, 5], [3, -1]]],
+        device=table_device,
+    )
+    options = dict(num_physical_experts=8, ep_rank_nodes=(0, 0, 1, 1), ep_rank=ep_rank)
+    expected = compute_logical_to_rank_dispatch_physical_map(replicas, **options)
+    # Serving constructs the model under a CUDA default device. Host-side
+    # placement planning must not inherit that allocation device.
+    with torch.device(allocation_device):
+        actual = compute_logical_to_rank_dispatch_physical_map(replicas, **options)
+    assert actual.device == replicas.device and actual.dtype == torch.int32
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)

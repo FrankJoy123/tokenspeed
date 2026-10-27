@@ -774,7 +774,8 @@ def compute_logical_to_rank_dispatch_physical_map(
     if not 0 <= ep_rank < num_gpus:
         raise ValueError(f"ep_rank={ep_rank} is outside the {num_gpus} EP ranks")
     num_local = num_physical_experts // num_gpus
-    nodes = torch.tensor(list(ep_rank_nodes), dtype=torch.int64)
+    # Plan on the host even when model construction sets a CUDA default device.
+    nodes = torch.tensor(list(ep_rank_nodes), dtype=torch.int64, device="cpu")
     num_nodes = int(nodes.max().item()) + 1
 
     replicas = logical_to_all_physical_map.cpu().to(torch.int64)
@@ -789,7 +790,10 @@ def compute_logical_to_rank_dispatch_physical_map(
     # [layers, experts, gpus] instead of a loop over the gpus.
     def first_replica_on(owner: torch.Tensor, count: int) -> torch.Tensor:
         first = torch.full(
-            (num_layers, num_logical_experts, count), -1, dtype=torch.int64
+            (num_layers, num_logical_experts, count),
+            -1,
+            dtype=torch.int64,
+            device="cpu",
         )
         for column in reversed(range(max_replicas)):
             index = owner[..., column].clamp_min(0).unsqueeze(-1)
@@ -822,6 +826,7 @@ def compute_logical_to_rank_dispatch_physical_map(
         column[unassigned] = torch.tensor(
             _fair_choices(candidates, k=int(unassigned.sum().item()), r=r),
             dtype=torch.int64,
+            device="cpu",
         )
 
     return (
