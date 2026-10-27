@@ -3647,3 +3647,75 @@ def test_short_history_skips_query_projections_but_preserves_keys(
     assert bool(backend.global_writes) == (layer_id in (2, 20))
     if layer_id in (2, 20):
         assert backend.global_writes[layer_id][1].numel() > 0
+
+
+@pytest.mark.parametrize("rank", [0, 1, 2, 3])
+def test_static_placement_loads_the_mapped_logical_expert_per_layer(
+    monkeypatch, rank, tmp_path
+):
+    from tokenspeed.runtime.configs.deepseek_v41_config import (
+        DeepseekV41Config,
+        DeepseekV41TextConfig,
+    )
+    from tokenspeed.runtime.moe.expert_location import (
+        ExpertLocationMetadata,
+        get_global_expert_location_metadata,
+        set_global_expert_location_metadata,
+    )
+
+    config = DeepseekV41TextConfig(**vars(_loader_config()))
+    config.hidden_size = 256
+    mapping = _mapping(rank, 4, 4)
+    maps = [[3, 1, 0, 2], [1, 2, 3, 0], [2, 0, 1, 3]]
+    placement = ExpertLocationMetadata.from_physical_to_logical_map(
+        torch.tensor(maps),
+        4,
+        ep_size=4,
+        ep_rank=rank,
+        ep_rank_nodes=(0, 0, 0, 0),
+    )
+    old = get_global_expert_location_metadata()
+    set_global_expert_location_metadata(placement)
+    try:
+        # CPU has no grouped-GEMM backend or process group; use the established
+        # hardware-only loader fixture while keeping real allocation/loading.
+        _mock_loader_hardware(monkeypatch, mapping)
+        for module in (v4, v41, expert_module):
+            monkeypatch.setattr(module, "get_moe_backend", lambda: MoeBackend.MARLIN)
+        monkeypatch.setitem(global_server_args_dict, "all2all_backend", "deepep")
+        monkeypatch.setitem(global_server_args_dict, "ep_dispatch_algorithm", "static")
+        monkeypatch.setitem(global_server_args_dict, "deepep_mode", "normal")
+        with set_default_torch_dtype(torch.bfloat16), torch.device("cpu"):
+            model = DeepseekV41ForCausalLM(
+                DeepseekV41Config(text_config=config),
+                mapping,
+                _quant(),
+                is_multimodal_active=False,
+                mm_attention_backend=None,
+            )
+        weights = _checkpoint(config)
+        rest = _bind_engram_tables(model, weights, tmp_path)
+        model.load_weights(iter(rest.items()))
+        assert model.expert_placement is placement
+        for layer_id, layer in enumerate(model.model.layers):
+            expert = maps[layer_id][rank]
+            w = layer.ffn.experts
+            prefix = f"layers.{layer_id}.ffn.experts.{expert}."
+            width = config.moe_intermediate_size
+            for name, target in [
+                ("w1.weight", w.w13_weight[0, :width]),
+                ("w3.weight", w.w13_weight[0, width:]),
+                ("w2.weight", w.w2_weight[0]),
+                ("w1.scale", w.w13_weight_scale[0, :width]),
+                ("w3.scale", w.w13_weight_scale[0, width:]),
+                ("w2.scale", w.w2_weight_scale[0]),
+            ]:
+                torch.testing.assert_close(
+                    target.view(torch.uint8),
+                    weights[prefix + name].view(torch.uint8),
+                    atol=0,
+                    rtol=0,
+                )
+        assert model.checkpoint_load_report["skipped"]["remote_expert"] == 54
+    finally:
+        set_global_expert_location_metadata(old)

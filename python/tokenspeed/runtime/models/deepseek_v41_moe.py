@@ -41,18 +41,76 @@ from tokenspeed.runtime.layers.linear import (
 )
 from tokenspeed.runtime.layers.moe.expert import MoELayer
 from tokenspeed.runtime.layers.moe.topk import (
+    ExpertLocationDispatchInfo,
     StandardTopKOutput,
     TopK,
     TopKOutput,
+    record_expert_load,
     simulated_router_logits,
+    topk_ids_logical_to_physical,
 )
 from tokenspeed.runtime.layers.moe.utils import RoutingMethodType, get_moe_backend
 from tokenspeed.runtime.layers.quantization import Fp8Config, Mxfp4Config
 from tokenspeed.runtime.layers.quantization.base_config import QuantizationConfig
+from tokenspeed.runtime.moe.expert_location import (
+    ExpertLocationMetadata,
+    get_global_expert_location_metadata,
+)
 from tokenspeed.runtime.utils import add_prefix
 from tokenspeed.runtime.utils.cuda_stream import StreamFork
 from tokenspeed.runtime.utils.env import global_server_args_dict
 from tokenspeed.runtime.utils.nvtx import nvtx_range
+
+
+def _precomputed_expert_dispatch_info(
+    placement: ExpertLocationMetadata | None,
+    *,
+    layer_id: int,
+    num_experts: int,
+    ep_size: int,
+    backend: str,
+    algorithm: str | None,
+) -> ExpertLocationDispatchInfo | None:
+    """Bind a static, unreplicated placement without changing logical routing."""
+    if placement is None:
+        return None
+    if backend != "deepep" or ep_size <= 1:
+        raise ValueError("V4.1 static expert placement requires DeepEP")
+    if algorithm not in ("static", "static_with_zero_expert"):
+        raise ValueError("V4.1 expert placement requires static dispatch")
+    if (
+        placement.ep_size != ep_size
+        or placement.num_logical_experts != num_experts
+        or placement.num_physical_experts != num_experts
+    ):
+        raise ValueError("V4.1 static placement requires one slot per logical expert")
+    logical = placement.physical_to_logical_map_cpu[layer_id].tolist()
+    if sorted(logical) != list(range(num_experts)):
+        raise ValueError("V4.1 static placement must be an expert permutation")
+    return ExpertLocationDispatchInfo.init_new(
+        layer_id=layer_id,
+        ep_dispatch_algorithm=algorithm,
+        expert_location_metadata=placement,
+        all_to_all_ep=True,
+    )
+
+
+def _map_precomputed_expert_routes(
+    output: StandardTopKOutput,
+    info: ExpertLocationDispatchInfo | None,
+) -> StandardTopKOutput:
+    """Map already-selected logical IDs; preserve gate scores and route order."""
+    if info is None:
+        return output
+    physical_ids = topk_ids_logical_to_physical(
+        output.topk_ids,
+        info,
+        num_experts=info.num_physical_experts,
+    )
+    record_expert_load(info.load, physical_ids)
+    return StandardTopKOutput(
+        output.topk_weights, physical_ids, output.router_logits, output.output_scale
+    )
 
 
 def _deepseek_v4_mega_moe_max_num_tokens() -> int:
@@ -297,14 +355,24 @@ class DeepseekV4MoE(nn.Module):
                 raise ValueError(
                     "DeepSeek V4 EP does not support EPLB with precomputed routing."
                 )
-            if global_server_args_dict.get("init_expert_location", "trivial") not in (
-                None,
-                "trivial",
-            ):
-                raise ValueError(
-                    "DeepSeek V4 EP requires trivial expert placement with "
-                    "precomputed routing."
-                )
+        self.expert_placement = get_global_expert_location_metadata()
+        if self.expert_placement is not None and (
+            not moe_backend.is_marlin()
+            or not self.use_deepep_dispatch
+            or global_server_args_dict.get("deepep_mode") != "normal"
+            or mapping.moe.tp_size != 1
+        ):
+            raise ValueError(
+                "V4.1 static placement requires Marlin, DeepEP normal and MoE TP1"
+            )
+        self.expert_dispatch_info = _precomputed_expert_dispatch_info(
+            self.expert_placement,
+            layer_id=layer_index,
+            num_experts=config.n_routed_experts,
+            ep_size=mapping.moe.ep_size,
+            backend=global_server_args_dict.get("all2all_backend", "none"),
+            algorithm=global_server_args_dict.get("ep_dispatch_algorithm"),
+        )
         if self.use_mega_moe:
             if mapping.moe.ep_size <= 1:
                 raise ValueError("DeepSeek V4 MegaMoE requires expert parallelism.")
@@ -450,13 +518,14 @@ class DeepseekV4MoE(nn.Module):
         router_logits, correction_bias, hash_indices_table, routing_input_ids = (
             self._routing_inputs(hidden_states, input_ids)
         )
-        return self.topk(
+        output = self.topk(
             hidden_states,
             router_logits,
             routing_correction_bias=correction_bias,
             hash_indices_table=hash_indices_table,
             input_ids=routing_input_ids,
         )
+        return _map_precomputed_expert_routes(output, self.expert_dispatch_info)
 
     def _forward_routed_experts(
         self,

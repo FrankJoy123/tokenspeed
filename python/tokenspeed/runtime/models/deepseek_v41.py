@@ -166,7 +166,11 @@ from tokenspeed.runtime.models.deepseek_v41_engram import (
     is_engram_embed_checkpoint_name,
     resolve_engram_host_layout,
 )
-from tokenspeed.runtime.models.deepseek_v41_moe import DeepseekV4MLP, DeepseekV4MoE
+from tokenspeed.runtime.models.deepseek_v41_moe import (
+    DeepseekV4MLP,
+    DeepseekV4MoE,
+    _map_precomputed_expert_routes,
+)
 from tokenspeed.runtime.models.deepseek_v41_vision import DeepseekV41Vision
 from tokenspeed.runtime.moe.expert_location import ModelConfigForExpertLocation
 from tokenspeed.runtime.multimodal.embedder import (
@@ -1431,7 +1435,10 @@ class DeepseekV41MoE(DeepseekV4MoE):
             except NoKernelFoundError:
                 pass
             else:
-                return StandardTopKOutput(topk_weights, topk_ids, None)
+                return _map_precomputed_expert_routes(
+                    StandardTopKOutput(topk_weights, topk_ids, None),
+                    self.expert_dispatch_info,
+                )
         return super()._compute_topk_output(hidden_states, image_mask)
 
 
@@ -2783,6 +2790,7 @@ class DeepseekV41ForCausalLM(BaseCausalLM):
     """V4.1 language and vision model with strict checkpoint coverage."""
 
     model_cls = DeepseekV41Model
+    supports_expert_placement = True
 
     def __init__(
         self,
@@ -2825,6 +2833,15 @@ class DeepseekV41ForCausalLM(BaseCausalLM):
                     )
             self.vision_embedder = VisionEmbedder(encoder_mapping=mapping.vision)
             self.image_encoder = self.vision.embed_media
+
+    @property
+    def expert_placement(self):
+        """The placement shared by this model's precomputed routers and loader."""
+        if self.model is not None:
+            for layer in self.model.layers:
+                if isinstance(layer, DeepseekV41DecoderLayer):
+                    return layer.ffn.expert_placement
+        return None
 
     def initialize_engram(self, tokenizer) -> None:
         if self.model is not None:
@@ -3003,10 +3020,18 @@ class DeepseekV41ForCausalLM(BaseCausalLM):
                 ):
                     raise ValueError(f"Unsupported V4.1 expert parameter: {name}")
                 count = self.model.config.n_routed_experts // self.mapping.moe.ep_size
-                for expert in range(
-                    self.mapping.moe.ep_rank * count,
-                    (self.mapping.moe.ep_rank + 1) * count,
-                ):
+                placement = self.expert_placement
+                logical_experts = (
+                    range(
+                        self.mapping.moe.ep_rank * count,
+                        (self.mapping.moe.ep_rank + 1) * count,
+                    )
+                    if placement is None
+                    else placement.local_slot_logical_experts(
+                        int(prefix.split(".")[1]), self.mapping.moe.ep_rank
+                    )
+                )
+                for expert in logical_experts:
                     for shard in ("w1", "w3") if projection == "w13" else ("w2",):
                         field = "scale" if suffix == "weight_scale" else "weight"
                         targets[f"{prefix}.experts.{expert}.{shard}.{field}"] = (
@@ -3175,6 +3200,7 @@ class DeepseekV41ForCausalLM(BaseCausalLM):
             include_bias=False,
             fused_load_style="per_expert",
             transpose_local_tensor_non_bias=False,
+            expert_placement=self.expert_placement,
         )
         seen, loaded = set(), set()
         skipped = Counter()
@@ -3218,7 +3244,16 @@ class DeepseekV41ForCausalLM(BaseCausalLM):
                         f"{raw_name}: expected packed FP4/E8M0, got {tensor.dtype}"
                     )
                 local_count = config.n_routed_experts // self.mapping.moe.ep_size
-                if expert_id // local_count != self.mapping.moe.ep_rank:
+                placement = self.expert_placement
+                local = (
+                    expert_id // local_count == self.mapping.moe.ep_rank
+                    if placement is None
+                    else expert_id
+                    in placement.local_slot_logical_experts(
+                        layer_id, self.mapping.moe.ep_rank
+                    )
+                )
+                if not local:
                     skipped["remote_expert"] += 1
                     continue
                 if name not in targets:
