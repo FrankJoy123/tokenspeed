@@ -544,3 +544,53 @@ def test_encoder_cache_flashinfer_ep_requires_matching_provider_and_fp8():
     assert args.mapping.moe.ep_size == 4
     assert args.mapping.moe.dp_size == 2
     assert args.moe_mxfp4_fp8_activation
+
+
+def test_sm120_local_w4a8_keeps_deepep_and_requires_explicit_precision():
+    argv = [
+        "--model",
+        "x",
+        "--world-size",
+        "8",
+        "--attn-tp-size",
+        "8",
+        "--query-context-parallel-size",
+        "8",
+        "--kv-parallel-size",
+        "1",
+        "--attn-head-tp-size",
+        "1",
+        "--dense-tp-size",
+        "1",
+        "--moe-tp-size",
+        "1",
+        "--ep-size",
+        "4",
+        "--attention-backend",
+        "deepseek_v41",
+        "--all2all-backend",
+        "deepep",
+        "--deepep-mode",
+        "normal",
+        "--moe-backend",
+        "flashinfer_cutlass_sm120_deepep",
+        "--prefill-only-mode",
+        "encoder-cache",
+        "--disable-prefill-graph",
+        "--dtype",
+        "bfloat16",
+    ]
+    with pytest.raises(ValueError, match="explicit FP8"):
+        prepare_server_args(argv)
+    valid = argv + ["--moe-mxfp4-fp8-activation"]
+    args = prepare_server_args(valid)
+    assert args.mapping.attn.qcp_size == 8
+    assert args.mapping.moe.ep_size == 4
+    assert args.all2all_backend == "deepep"
+    for suffix in [
+        ["--deepep-mode", "low_latency"],
+        ["--all2all-backend", "flashinfer_moe_ep"],
+        ["--moe-combine-order", "slot"],
+    ]:
+        with pytest.raises(ValueError):
+            prepare_server_args(valid + suffix)

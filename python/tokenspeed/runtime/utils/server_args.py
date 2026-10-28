@@ -2100,6 +2100,19 @@ class ServerArgs:
 
     def validate_flashinfer_moe_ep_options(self):
         """Keep the library transport/provider and activation precision explicit."""
+        if self.moe_backend == "flashinfer_cutlass_sm120_deepep":
+            if (
+                self.all2all_backend != "deepep"
+                or self.deepep_mode != "normal"
+                or self.dtype != "bfloat16"
+                or not self.moe_mxfp4_fp8_activation
+                or self.moe_combine_order != "rank"
+            ):
+                raise ValueError(
+                    "SM120 CUTLASS local W4A8 requires DeepEP normal, BF16 "
+                    "input, explicit FP8 activations and rank combination"
+                )
+            return
         provider = "flashinfer_cake_sm120_moe_ep"
         if self.all2all_backend == "flashinfer_moe_ep":
             if self.moe_backend != provider:

@@ -439,3 +439,24 @@ DeepEP transport settings do not configure this backend.
 Cake candidate: FlashInfer399b6c1d, SM120 MXFP4 weights / K32 MXFP8 activations, all-GIN transport, explicit EP4 encoder-cache CP8 only. Source manifest and NCCL Device ABI are checked. Transformed parameters alias the retained weight planes; one compatible workspace is shared by serial layers. A same-stream device assertion checks each protocol flag before reuse. Numerical-contract tests do not replace full-model task quality.
 
 The Cake provider requires --moe-combine-order slot: it returns complete token outputs in top-k slot order, so no outer all-reduce is permitted. The original Marlin/DeepEP rank-order configuration remains a separately frozen baseline.
+
+
+### SM120 local CUTLASS W4A8 with DeepEP normal
+
+The explicit `flashinfer_cutlass_sm120_deepep` provider retains BF16 DeepEP
+dispatch/combine and replaces only the received rows' local expert calculation.
+It requires expert TP1/EP4, standard clamped SwiGLU, original MXFP4 weights,
+`moe_mxfp4_fp8_activation=True`, and rank-order combination.
+Weights and scales are re-laid out once; weight bytes are not re-quantized.
+Received activations are K32 MXFP8, and the CUTLASS activation kernel produces
+the quantized FC2 input. This provider has no communication/GEMM overlap.
+The adapter qualifies the pinned FlashInfer SM120 fast-build module and keeps
+the third-party dependency inside the kernel package.
+
+
+Local expert GEMMs use the qualified heuristic rather than the process-wide
+profiling group: DeepEP receivers may have different row counts, including
+empty spans, and cannot enter profiling collectives in the same order.
+Only these two local GEMMs skip profiling; dense operators keep their normal
+autotuning. The four-GPU adapter test covers one empty receiver during a nested
+distributed tuning context.

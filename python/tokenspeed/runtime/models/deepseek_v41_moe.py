@@ -374,7 +374,10 @@ class DeepseekV4MoE(nn.Module):
                 )
         self.expert_placement = get_global_expert_location_metadata()
         placement_backend_verified = self.use_flashinfer_moe_ep or (
-            moe_backend.is_marlin()
+            (
+                moe_backend.is_marlin()
+                or str(moe_backend.value) == "flashinfer_cutlass_sm120_deepep"
+            )
             and self.use_deepep_dispatch
             and global_server_args_dict.get("deepep_mode") == "normal"
         )

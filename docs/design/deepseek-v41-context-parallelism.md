@@ -201,3 +201,23 @@ and contributions are combined in top-k slot order. This differs from the
 original Marlin W4A16 / DeepEP rank-order path. Independent same-format
 operator tests, full-model task quality and serving performance are
 separate acceptance gates; passing the first does not imply the others.
+
+
+### Local W4A8 expert alternative
+
+The same encoder-cache CP8 / dual EP4 row ownership can select
+`flashinfer_cutlass_sm120_deepep`. DeepEP normal continues to transport BF16
+rows and return rank-combined contributions. Only the local expert path changes:
+original MXFP4 weights, MXFP8 input quantization, CUTLASS grouped GEMM,
+clamped SwiGLU with MXFP8 output, and CUTLASS grouped GEMM/finalize.
+Static expert placement and the replicated shared expert retain their
+existing meanings. Explicit activation precision and rank combination are
+required; Cake's slot-order combination is a separate configuration.
+
+
+For the explicit local CUTLASS W4A8 provider, DeepEP still transfers BF16 rows.
+After dispatch, each receiver quantizes its own rows to K32 MXFP8 and runs both
+MXFP4 expert projections with a fused activation/quantization step between them.
+The local expert call skips process-wide tactic profiling because received row
+counts need not agree across ranks. This restriction leaves dense-op profiling
+enabled and does not alter query ownership, cache visibility, or EP transport.
