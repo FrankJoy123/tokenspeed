@@ -74,7 +74,7 @@ def _precomputed_expert_dispatch_info(
     """Bind a static, unreplicated placement without changing logical routing."""
     if placement is None:
         return None
-    if backend != "deepep" or ep_size <= 1:
+    if backend not in {"deepep", "flashinfer_moe_ep"} or ep_size <= 1:
         raise ValueError("V4.1 static expert placement requires DeepEP")
     if algorithm not in ("static", "static_with_zero_expert"):
         raise ValueError("V4.1 expert placement requires static dispatch")
@@ -343,7 +343,24 @@ class DeepseekV4MoE(nn.Module):
             global_server_args_dict.get("all2all_backend") == "deepep"
             and mapping.moe.ep_size > 1
         )
-        self.use_dispatch_combine = self.use_nccl_dispatch or self.use_deepep_dispatch
+        self.use_flashinfer_moe_ep = (
+            global_server_args_dict.get("all2all_backend") == "flashinfer_moe_ep"
+        )
+        if self.use_flashinfer_moe_ep and (
+            not mapping.attn.has_qcp
+            or mapping.attn.qcp_size != 8
+            or mapping.moe.ep_size != 4
+            or mapping.moe.tp_size != 1
+            or global_server_args_dict.get("prefill_only_mode") != "encoder-cache"
+        ):
+            raise ValueError(
+                "V4.1 FlashInfer MoE EP currently requires encoder-cache QCP8/EP4"
+            )
+        self.use_dispatch_combine = (
+            self.use_nccl_dispatch
+            or self.use_deepep_dispatch
+            or self.use_flashinfer_moe_ep
+        )
         self.owns_ep_communication = (
             self.use_mega_moe or self.use_gluon_petit or self.use_dispatch_combine
         )
@@ -356,14 +373,16 @@ class DeepseekV4MoE(nn.Module):
                     "DeepSeek V4 EP does not support EPLB with precomputed routing."
                 )
         self.expert_placement = get_global_expert_location_metadata()
+        placement_backend_verified = self.use_flashinfer_moe_ep or (
+            moe_backend.is_marlin()
+            and self.use_deepep_dispatch
+            and global_server_args_dict.get("deepep_mode") == "normal"
+        )
         if self.expert_placement is not None and (
-            not moe_backend.is_marlin()
-            or not self.use_deepep_dispatch
-            or global_server_args_dict.get("deepep_mode") != "normal"
-            or mapping.moe.tp_size != 1
+            not placement_backend_verified or mapping.moe.tp_size != 1
         ):
             raise ValueError(
-                "V4.1 static placement requires Marlin, DeepEP normal and MoE TP1"
+                "V4.1 static placement requires a verified transport and MoE TP1"
             )
         self.expert_dispatch_info = _precomputed_expert_dispatch_info(
             self.expert_placement,
@@ -464,7 +483,14 @@ class DeepseekV4MoE(nn.Module):
                 "routing_method_type": RoutingMethodType.Renormalize,
             },
             persistent_max_num_tokens_per_gpu=(
-                _deepseek_v4_mega_moe_max_num_tokens() if self.use_mega_moe else None
+                _deepseek_v4_mega_moe_max_num_tokens()
+                if self.use_mega_moe
+                else (
+                    (_deepseek_v4_mega_moe_max_num_tokens() + mapping.attn.qcp_size - 1)
+                    // mapping.attn.qcp_size
+                    if self.use_flashinfer_moe_ep
+                    else None
+                )
             ),
         )
         self.topk = DeepseekV4TopK(

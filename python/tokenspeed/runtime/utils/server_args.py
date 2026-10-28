@@ -1202,7 +1202,7 @@ class ServerArgs:
             enable_mixed_batch=self.enable_mixed_batch,
             moe_owns_query_rows=(
                 self.prefill_only_mode == "encoder-cache"
-                and self.all2all_backend == "deepep"
+                and self.all2all_backend in {"deepep", "flashinfer_moe_ep"}
                 and self.mapping.moe.tp_size == 1
             ),
         )
@@ -2098,6 +2098,30 @@ class ServerArgs:
                 "--model-update-draft-weights must be 'retain' or 'refresh'"
             )
 
+    def validate_flashinfer_moe_ep_options(self):
+        """Keep the library transport/provider and activation precision explicit."""
+        provider = "flashinfer_cake_sm120_moe_ep"
+        if self.all2all_backend == "flashinfer_moe_ep":
+            if self.moe_backend != provider:
+                raise ValueError(
+                    "--all2all-backend flashinfer_moe_ep requires "
+                    "--moe-backend flashinfer_cake_sm120_moe_ep"
+                )
+            if not self.moe_mxfp4_fp8_activation:
+                raise ValueError(
+                    "--all2all-backend flashinfer_moe_ep requires "
+                    "--moe-mxfp4-fp8-activation"
+                )
+            if self.dtype != "bfloat16":
+                raise ValueError("FlashInfer SM120 MoE EP requires BF16 input")
+            if self.moe_combine_order != "slot":
+                raise ValueError("Cake MoE requires --moe-combine-order slot")
+        elif self.moe_backend == provider:
+            raise ValueError(
+                "--moe-backend flashinfer_cake_sm120_moe_ep requires "
+                "--all2all-backend flashinfer_moe_ep"
+            )
+
     def validate_petit_moe_options(self):
         """Validate shared backend, model, and scheduling options for Petit.
 
@@ -2323,6 +2347,7 @@ class ServerArgs:
             if not self.disable_pdl:
                 raise ValueError("NPU execution requires --disable-pdl")
 
+        self.validate_flashinfer_moe_ep_options()
         self.validate_petit_moe_options()
         self.validate_rank_emulation()
 
@@ -3040,7 +3065,14 @@ class ServerArgs:
             metavar="ALL2ALL_BACKEND",
             type=str,
             default=ServerArgs.all2all_backend,
-            choices=["none", "agrs", "deepep", "flashinfer", "gluon_petit"],
+            choices=[
+                "none",
+                "agrs",
+                "deepep",
+                "flashinfer",
+                "flashinfer_moe_ep",
+                "gluon_petit",
+            ],
             help="MoE communication backend. agrs and flashinfer explicitly select "
             "the Kimi-K3 attention-DP transport; gluon_petit selects the fused "
             "Petit MegaMoE transport; none preserves existing behavior.",

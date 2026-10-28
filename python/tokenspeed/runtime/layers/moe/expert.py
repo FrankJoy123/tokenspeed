@@ -373,6 +373,11 @@ class MoELayer(torch.nn.Module):
             deepep_low_latency_max_num_tokens_per_gpu = global_server_args_dict[
                 "low_latency_max_num_tokens_per_gpu"
             ]
+        elif a2a_backend == "flashinfer_moe_ep":
+            mapping = global_server_args_dict["mapping"]
+            process_group = pg_manager.get_process_group(
+                "nccl", mapping.moe.tp_ep_group
+            )
         elif moe_backend == "mega_moe":
             mapping = global_server_args_dict["mapping"]
             process_group = pg_manager.get_device_process_group(mapping.moe.ep_group)
@@ -385,7 +390,14 @@ class MoELayer(torch.nn.Module):
             # The leaf folds the per-route outputs over the EP device group;
             # it is the fold's group whatever the plan's solution.
             mapping = global_server_args_dict["mapping"]
-            process_group = pg_manager.get_device_process_group(mapping.moe.ep_group)
+            if a2a_backend == "flashinfer_moe_ep":
+                process_group = pg_manager.get_process_group(
+                    "nccl", mapping.moe.ep_group
+                )
+            else:
+                process_group = pg_manager.get_device_process_group(
+                    mapping.moe.ep_group
+                )
         precision_policy = routing_config.get("precision_policy", "default")
         output_scale = float(routing_config.get("output_scale", 1.0))
         if precision_policy not in {

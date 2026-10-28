@@ -107,7 +107,7 @@ class DeepseekV41Config(SoftmaxAttnConfig):
                 or server_args.mapping.moe.tp_size != 1
                 or server_args.mapping.moe.ep_size < 2
                 or attn_mapping.qcp_size % server_args.mapping.moe.ep_size
-                or server_args.all2all_backend != "deepep"
+                or server_args.all2all_backend not in {"deepep", "flashinfer_moe_ep"}
                 or not server_args.disable_prefill_graph
                 or server_args.enable_mixed_batch
                 or server_args.speculative_algorithm is not None
@@ -116,7 +116,7 @@ class DeepseekV41Config(SoftmaxAttnConfig):
             ):
                 raise ValueError(
                     "V4.1 query shards require eager encoder-cache PP1/DP1, "
-                    "replicated KV/heads, DeepEP expert TP1 whose EP groups tile QCP, "
+                    "replicated KV/heads, expert-owned TP1 whose EP groups tile QCP, "
                     "and no operator-local QCP"
                 )
         kwargs = model_wide_kwargs(

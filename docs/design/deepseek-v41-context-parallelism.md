@@ -165,3 +165,35 @@ from the canonical query shard table, rather than the full query-group sum.
 This trades smaller communication domains and lower fanout against more
 expert weights per GPU and fewer rows per expert per replica. It does not
 reduce the global expert arithmetic and needs paired measurements.
+
+
+### Experimental SM120 FlashInfer expert path
+
+The eager encoder-cache QCP8/EP4 layout also admits the explicit
+flashinfer_moe_ep all-to-all backend, with the
+flashinfer_cake_sm120_moe_ep MoE provider and moe_mxfp4_fp8_activation enabled.
+It uses the same owned query rows, expert group row counts and replicated
+shared expert. It does not allocate a DeepEP buffer.
+
+The optional FlashInfer0.7.2 SM120 library transforms the existing packed
+MXFP4 checkpoint once. Parameters alias transformed weights so no raw weight
+copy survives preprocessing. EP4 layers share the library workspace at the
+configured per-owner capacity, derived from the host prefill bound divided
+by QCP8. The host supplies the agreed maximum EP source count on each call.
+
+The verified prefill provider prepares1024-row and capacity buckets before
+cache profiling and serving. Smaller live row spans are padded inside the
+prepared1024 bucket; they never compile a new tiny decode kernel. Tiny
+Green Context buckets are not part of this provider's contract. This trades
+extra small-input work for a bounded prefill compilation set.
+
+This path quantizes input and intermediate activations to MXFP8 and returns
+BF16 finalized rows. It is not numerically equivalent to Marlin W4A16.
+Operator-reference correctness, model quality and serving performance are
+separate gates. The deployment must supply the library's compatible Python
+and host NVSHMEM pair without injecting the production DeepEP preload.
+
+
+Cake candidate: FlashInfer399b6c1d, SM120 MXFP4 weights / K32 MXFP8 activations, all-GIN transport, explicit EP4 encoder-cache CP8 only. Source manifest and NCCL Device ABI are checked. Transformed parameters alias the retained weight planes; one compatible workspace is shared by serial layers. A same-stream device assertion checks each protocol flag before reuse. Numerical-contract tests do not replace full-model task quality.
+
+The Cake provider requires --moe-combine-order slot: it returns complete token outputs in top-k slot order, so no outer all-reduce is permitted. The original Marlin/DeepEP rank-order configuration remains a separately frozen baseline.

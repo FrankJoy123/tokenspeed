@@ -414,3 +414,28 @@ prefix stores. The route-order regression covers masked EP routes and checks
 that every live route appears once in the block of its own expert; also run
 the test under Compute Sanitizer racecheck to exercise the synchronization
 contract independently of the warp schedule.
+
+
+## Optional SM120 FlashInfer MoE EP
+
+flashinfer_cake_sm120_moe_ep is an explicit BF16-input/MXFP4-weight provider with
+MXFP8 internal activations and finalized BF16 outputs. Select it with the
+flashinfer_moe_ep all-to-all backend, internal_activation_dtype=fp8,
+EP4 and an explicit persistent_max_num_tokens_per_gpu. It supports standard
+concatenated SwiGLU, including the model's gate/up clamp, without bias,
+deferred finalization, DeepEP leg selection or overlap callbacks.
+
+The thirdparty/flashinfer adapter calls FlashInfer0.7.2 directly. Weight
+preprocessing aliases the transformed tensors into the module and prepares
+the1024/capacity bucket set. Runtime selection uses the host-agreed largest
+source-row count, including ragged peers. It does not size communication or
+compile from a rank-local live row count. CPU-small inputs use the prepared
+bucket as well; the current provider is intended for long prefill.
+The library owns internal graph/Green Context scheduling. An outer graph is
+optional. NVSHMEM Python/host compatibility is a deployment requirement;
+DeepEP transport settings do not configure this backend.
+
+
+Cake candidate: FlashInfer399b6c1d, SM120 MXFP4 weights / K32 MXFP8 activations, all-GIN transport, explicit EP4 encoder-cache CP8 only. Source manifest and NCCL Device ABI are checked. Transformed parameters alias the retained weight planes; one compatible workspace is shared by serial layers. A same-stream device assertion checks each protocol flag before reuse. Numerical-contract tests do not replace full-model task quality.
+
+The Cake provider requires --moe-combine-order slot: it returns complete token outputs in top-k slot order, so no outer all-reduce is permitted. The original Marlin/DeepEP rank-order configuration remains a separately frozen baseline.

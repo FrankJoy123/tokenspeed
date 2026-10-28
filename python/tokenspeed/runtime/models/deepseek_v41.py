@@ -2012,7 +2012,8 @@ class DeepseekV41Model(nn.Module):
             and mapping.dense.tp_size == mapping.moe.tp_size == 1
             and mapping.moe.ep_size > 1
             and mapping.attn.qcp_size % mapping.moe.ep_size == 0
-            and global_server_args_dict.get("all2all_backend") == "deepep"
+            and global_server_args_dict.get("all2all_backend")
+            in {"deepep", "flashinfer_moe_ep"}
             and global_server_args_dict.get("prefill_only_mode") == "encoder-cache"
             and global_server_args_dict.get("disable_prefill_graph", False)
         )

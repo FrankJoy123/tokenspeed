@@ -50,6 +50,7 @@ class All2AllBackend(Enum):
     NCCL = "nccl"
     DEEPEP = "deepep"
     FLASHINFER = "flashinfer"
+    FLASHINFER_MOE_EP = "flashinfer_moe_ep"
     GLUON_PETIT = "gluon_petit"
 
     @classmethod

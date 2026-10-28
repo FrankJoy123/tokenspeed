@@ -498,3 +498,49 @@ def test_encoder_cache_query_owners_allow_deepep_expert_replicas(ep_size):
             prepare_server_args(argv + ["--all2all-backend", "none"])
     with pytest.raises(ValueError, match="pure prefill|enable-mixed-batch"):
         prepare_server_args(argv + ["--enable-mixed-batch"])
+
+
+def test_encoder_cache_flashinfer_ep_requires_matching_provider_and_fp8():
+    argv = [
+        "--model",
+        "x",
+        "--world-size",
+        "8",
+        "--attn-tp-size",
+        "8",
+        "--query-context-parallel-size",
+        "8",
+        "--kv-parallel-size",
+        "1",
+        "--attn-head-tp-size",
+        "1",
+        "--dense-tp-size",
+        "1",
+        "--moe-tp-size",
+        "1",
+        "--ep-size",
+        "4",
+        "--attention-backend",
+        "deepseek_v41",
+        "--all2all-backend",
+        "flashinfer_moe_ep",
+        "--prefill-only-mode",
+        "encoder-cache",
+        "--disable-prefill-graph",
+        "--dtype",
+        "bfloat16",
+    ]
+    with pytest.raises(ValueError, match="requires --moe-backend"):
+        prepare_server_args(argv + ["--moe-backend", "marlin"])
+    provider = ["--moe-backend", "flashinfer_cake_sm120_moe_ep"]
+    with pytest.raises(ValueError, match="requires --moe-mxfp4-fp8-activation"):
+        prepare_server_args(argv + provider)
+    with pytest.raises(ValueError, match="moe-combine-order slot"):
+        prepare_server_args(argv + provider + ["--moe-mxfp4-fp8-activation"])
+    args = prepare_server_args(
+        argv + provider + ["--moe-mxfp4-fp8-activation", "--moe-combine-order", "slot"]
+    )
+    assert args.mapping.attn.qcp_size == 8
+    assert args.mapping.moe.ep_size == 4
+    assert args.mapping.moe.dp_size == 2
+    assert args.moe_mxfp4_fp8_activation
