@@ -167,33 +167,37 @@ expert weights per GPU and fewer rows per expert per replica. It does not
 reduce the global expert arithmetic and needs paired measurements.
 
 
-### Experimental SM120 FlashInfer expert path
+### Experimental SM120 Cake expert path
 
-The eager encoder-cache QCP8/EP4 layout also admits the explicit
-flashinfer_moe_ep all-to-all backend, with the
-flashinfer_cake_sm120_moe_ep MoE provider and moe_mxfp4_fp8_activation enabled.
-It uses the same owned query rows, expert group row counts and replicated
-shared expert. It does not allocate a DeepEP buffer.
+The eager encoder-cache QCP8/EP4 layout admits the explicit
+`flashinfer_moe_ep` transport, `flashinfer_cake_sm120_moe_ep` provider,
+`moe_mxfp4_fp8_activation=True` and `moe_combine_order=slot`.
+It consumes the same owned query rows and agreed expert-group row counts.
+The complete shared expert remains a separate computation on each owner.
 
-The optional FlashInfer0.7.2 SM120 library transforms the existing packed
-MXFP4 checkpoint once. Parameters alias transformed weights so no raw weight
-copy survives preprocessing. EP4 layers share the library workspace at the
-configured per-owner capacity, derived from the host prefill bound divided
-by QCP8. The host supplies the agreed maximum EP source count on each call.
+This provider qualifies FlashInfer commit `399b6c1d`, its Cake device-source
+manifest, and the compatible NCCL Device ABI. All remote peers use GIN in
+this qualified configuration. Cake owns dispatch, both expert GEMMs,
+activation, result return and slot-order combination; no DeepEP buffer or
+outer all-reduce is allocated. Its NCCL-based environment is isolated from
+the production DeepEP/NVSHMEM environment.
 
-The verified prefill provider prepares1024-row and capacity buckets before
-cache profiling and serving. Smaller live row spans are padded inside the
-prepared1024 bucket; they never compile a new tiny decode kernel. Tiny
-Green Context buckets are not part of this provider's contract. This trades
-extra small-input work for a bounded prefill compilation set.
+The library transforms the existing MXFP4 checkpoint once. Parameters alias
+the transformed weight planes so raw weight copies are released.
+Compatible layers share one serial workspace. The logical per-owner bound
+is the host prefill bound divided by QCP8 with upward rounding; physical
+workspace capacity is rounded to 128 rows. The provider prepares a 512-row
+bucket and the logical capacity bucket before serving. Live ragged sources,
+including an empty source, use the same host-agreed bucket on all EP peers.
+This bounds compilation rather than specializing every request length.
 
-This path quantizes input and intermediate activations to MXFP8 and returns
-BF16 finalized rows. It is not numerically equivalent to Marlin W4A16.
-Operator-reference correctness, model quality and serving performance are
-separate gates. The deployment must supply the library's compatible Python
-and host NVSHMEM pair without injecting the production DeepEP preload.
+A same-stream device assertion checks each layer's protocol error flag
+before the next layer clears the shared workspace. The returned tensor is
+cloned so consumers do not retain the next layer's shared output slot.
 
-
-Cake candidate: FlashInfer399b6c1d, SM120 MXFP4 weights / K32 MXFP8 activations, all-GIN transport, explicit EP4 encoder-cache CP8 only. Source manifest and NCCL Device ABI are checked. Transformed parameters alias the retained weight planes; one compatible workspace is shared by serial layers. A same-stream device assertion checks each protocol flag before reuse. Numerical-contract tests do not replace full-model task quality.
-
-The Cake provider requires --moe-combine-order slot: it returns complete token outputs in top-k slot order, so no outer all-reduce is permitted. The original Marlin/DeepEP rank-order configuration remains a separately frozen baseline.
+Input and intermediate activations are quantized to K32 MXFP8 and final
+rows are BF16. The route weight is applied before intermediate quantization,
+and contributions are combined in top-k slot order. This differs from the
+original Marlin W4A16 / DeepEP rank-order path. Independent same-format
+operator tests, full-model task quality and serving performance are
+separate acceptance gates; passing the first does not imply the others.
