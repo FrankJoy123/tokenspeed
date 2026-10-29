@@ -162,6 +162,8 @@ class WireEngineCoreReadyResponse(msgspec.Struct):
     kv_cache_size_tokens: int | None = None
     kv_cache_max_concurrency: float | None = None
     kv_events_config: dict | None = None
+    bootstrap_host: str | None = None
+    bootstrap_port: int | None = None
 
 
 _ENC = msgspec.msgpack.Encoder()
@@ -335,4 +337,12 @@ def engine_ready_response(
         max_num_batched_tokens=max(0, server_args.chunked_prefill_size),
         instance_id=server_args.served_model_name or server_args.model,
         kv_cache_size_tokens=kv_cache_size_tokens,
+        bootstrap_host=(
+            server_args.host if server_args.disaggregation_mode == "prefill" else None
+        ),
+        bootstrap_port=(
+            server_args.disaggregation_bootstrap_port
+            if server_args.disaggregation_mode == "prefill"
+            else None
+        ),
     )

@@ -409,6 +409,20 @@ class CommManager:
 
     def moe_tp_ep_group_scattered_num_tokens(self, ctx: ForwardContext) -> list[int]:
         tp_ep_size = self.mapping.moe.tp_ep_size
+        if (
+            self.query_sharded
+            and self.moe_owns_row_communication
+            and ctx.query_shard is None
+            and not self.mapping.attn.has_dp
+        ):
+            # A model can finish query sharding before its replicated tail.
+            # Expert-owned dispatch then consumes every row on every rank.
+            rows = (
+                ctx.collective_num_tokens
+                if ctx.collective_num_tokens is not None
+                else ctx.input_num_tokens
+            )
+            return [rows] * tp_ep_size
         global_counts = (
             ctx.collective_global_num_tokens
             if ctx.collective_global_num_tokens is not None

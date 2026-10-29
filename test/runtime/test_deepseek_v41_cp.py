@@ -591,6 +591,13 @@ def test_owned_query_expert_replicas_receive_only_their_groups_rows(
     assert sum(counts) <= total
     assert mapping.moe.dp_size == 8 // ep_size
 
+    # Normal PD gathers the encoder state before its replicated CED tail.
+    ctx.query_shard = None
+    ctx.collective_num_tokens = 127
+    assert comm.moe_tp_ep_group_scattered_num_tokens(ctx) == [127] * ep_size
+    ctx.collective_num_tokens = None
+    assert comm.moe_tp_ep_group_scattered_num_tokens(ctx) == [total] * ep_size
+
 
 @pytest.mark.parametrize("rank", range(8))
 @pytest.mark.parametrize("ep_size", [2, 4, 8])
@@ -648,3 +655,36 @@ def test_real_model_owned_dispatch_keeps_expert_weights_and_shared_projection_lo
     assert shared.gate_up_proj.tp_size == shared.down_proj.tp_size == 1
     assert model.embed_tokens.tp_size == 1
     assert layer.attn.mapping.attn.tp_size == 1
+
+
+@pytest.mark.parametrize("rank", range(8))
+def test_normal_pd_restores_full_metadata_at_ced_boundary(rank):
+    lengths, prefixes, replays = [19, 46], [129, 255], [1, 3]
+    reference = _backend("cpu", 2)
+    full = _extend(
+        reference, _tables("cpu"), lengths, prefixes, replays, _final(lengths, prefixes)
+    )
+    backend = _backend("cpu", 2)
+    _cp_extend(backend, lengths, prefixes, replays, rank, 8)
+    backend.finish_query_sharding()
+    restored = backend.query_metadata(ForwardMode.EXTEND)
+    assert torch.equal(restored.positions, full.positions)
+    assert torch.equal(restored.request_indices, full.request_indices)
+    assert torch.equal(restored.swa_write_slots, full.swa_write_slots)
+    assert torch.equal(
+        backend.decoder_view().metadata.positions,
+        reference.decoder_view().metadata.positions,
+    )
+    values = torch.arange(sum(lengths) * 3).reshape(sum(lengths), 3)
+    assert backend.gather_query_rows(values) is values
+
+
+def test_normal_pd_replicated_qcp_still_rejects_decode_role():
+    options = dict(
+        kvp_size=1, dcp_size=1, qcp_size=8,
+        enable_mixed_batch=False, prefill_only_mode=None,
+        replicated_kv_qcp=True,
+    )
+    validate_context_parallel_roles(disaggregation_mode="prefill", **options)
+    with pytest.raises(ValueError, match="prefill"):
+        validate_context_parallel_roles(disaggregation_mode="decode", **options)

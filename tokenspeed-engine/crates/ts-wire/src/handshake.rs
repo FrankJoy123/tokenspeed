@@ -129,5 +129,9 @@ wire_struct! {
         pub kv_cache_max_concurrency: Option<f64> = None,
         /// KV event publisher configuration.
         pub kv_events_config: Option<Dict<Value, Value>> = None,
+        /// Prefill bootstrap address advertised to a remote ZMQ gateway.
+        pub bootstrap_host: Option<String> = None,
+        /// Prefill bootstrap port paired with bootstrap_host.
+        pub bootstrap_port: Option<i64> = None,
     }
 }

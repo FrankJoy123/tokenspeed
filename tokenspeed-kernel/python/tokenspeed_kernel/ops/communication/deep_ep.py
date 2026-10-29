@@ -282,7 +282,15 @@ class DeepEPBuffer:
         experts, a bigger low-latency capacity, or a mode whose leg was never
         allocated) would corrupt dispatch instead of failing.
         """
-        if hidden_size != cls._hidden_size or num_experts != cls._num_experts:
+        # Normal-mode sizing and QP count do not depend on expert count.
+        # Keep exact expert geometry for buffers with low-latency legs.
+        normal_only = (
+            deepep_mode == DeepEPMode.normal
+            and cls._deepep_mode == DeepEPMode.normal
+        )
+        if hidden_size != cls._hidden_size or (
+            num_experts != cls._num_experts and not normal_only
+        ):
             raise ValueError(
                 "DeepEP buffer was allocated for hidden_size="
                 f"{cls._hidden_size}, num_experts={cls._num_experts}; cannot "

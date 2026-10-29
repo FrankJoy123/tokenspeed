@@ -229,6 +229,7 @@ def validate_context_parallel_roles(
     disaggregation_mode: str,
     enable_mixed_batch: bool,
     prefill_only_mode: str | None,
+    replicated_kv_qcp: bool = False,
 ) -> None:
     """Validate KVP/DCP roles and the PD-prefill-only QCP layout.
 
@@ -261,7 +262,7 @@ def validate_context_parallel_roles(
                 "rank (the drafter's steps only), which no engine serving "
                 "steady-state decode should pay"
             )
-        if qcp_size != kvp_size:
+        if qcp_size != kvp_size and not (replicated_kv_qcp and kvp_size == 1):
             raise ValueError(
                 "--query-context-parallel-size must equal --kv-parallel-size "
                 f"(got qcp={qcp_size}, kvp={kvp_size}): the history gather "
@@ -1192,6 +1193,11 @@ class ServerArgs:
             disaggregation_mode=self.disaggregation_mode,
             enable_mixed_batch=self.enable_mixed_batch,
             prefill_only_mode=self.prefill_only_mode,
+            replicated_kv_qcp=(
+                self.mapping.attn.qcp_size > 1
+                and _checkpoint_architectures(self.model, self.revision)
+                == ["DeepseekV41ForCausalLM"]
+            ),
         )
         validate_qcp(
             qcp_size=self.mapping.attn.qcp_size,
@@ -1201,7 +1207,8 @@ class ServerArgs:
             moe_tp_ep_size=self.mapping.moe.tp_ep_size,
             enable_mixed_batch=self.enable_mixed_batch,
             moe_owns_query_rows=(
-                self.prefill_only_mode == "encoder-cache"
+                (self.prefill_only_mode == "encoder-cache"
+                 or self.disaggregation_mode == "prefill")
                 and self.all2all_backend in {"deepep", "flashinfer_moe_ep"}
                 and self.mapping.moe.tp_size == 1
             ),

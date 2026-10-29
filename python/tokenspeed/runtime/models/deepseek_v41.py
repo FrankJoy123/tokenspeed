@@ -2014,7 +2014,10 @@ class DeepseekV41Model(nn.Module):
             and mapping.attn.qcp_size % mapping.moe.ep_size == 0
             and global_server_args_dict.get("all2all_backend")
             in {"deepep", "flashinfer_moe_ep"}
-            and global_server_args_dict.get("prefill_only_mode") == "encoder-cache"
+            and (
+                global_server_args_dict.get("prefill_only_mode") == "encoder-cache"
+                or global_server_args_dict.get("disaggregation_mode") == "prefill"
+            )
             and global_server_args_dict.get("disable_prefill_graph", False)
         )
         if (
@@ -2590,6 +2593,23 @@ class DeepseekV41Model(nn.Module):
         forward's real rows (an encoder graph output): only the real rows are
         used. A window-only stack has no candidate source and passes through.
         """
+        if ctx.query_shard is not None:
+            backend = ctx.attn_backend
+            tensors = []
+            for value in state._tensors():
+                if value is None:
+                    tensors.append(None)
+                    continue
+                rows = value.reshape(value.shape[0], -1).contiguous()
+                # Byte-sized masks need an even row width on the gather wire.
+                # int16 represents bool/int8/uint8 values exactly.
+                if rows.shape[1] * rows.element_size() % 2:
+                    rows = rows.to(torch.int16)
+                gathered = backend.gather_query_rows(rows).to(value.dtype)
+                tensors.append(gathered.reshape((-1, *value.shape[1:])))
+            state = state._rebuilt(tensors)
+            backend.finish_query_sharding()
+            ctx.query_shard = None
         ctx.attn_backend.begin_indexer_stage()
         start = self.ced_decoder_start
         if start >= len(self.layers):

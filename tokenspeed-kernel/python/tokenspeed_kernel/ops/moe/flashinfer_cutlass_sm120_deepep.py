@@ -36,9 +36,9 @@ _STATE = "flashinfer_cutlass_sm120_local"
 
 def flashinfer_cutlass_sm120_deepep_weights(plan, w):
     """Re-layout original MXFP4 bytes once and retain only the prepared views."""
-    if w.tp_size != 1 or w.ep_size != 4 or w.w13_input_layout != "concatenated":
+    if w.tp_size != 1 or w.ep_size not in (4, 8) or w.w13_input_layout != "concatenated":
         raise ValueError(
-            "Qualified CUTLASS local experts require TP1/EP4 and concatenated weights"
+            "Qualified CUTLASS local experts require TP1 with EP4 or EP8 and concatenated weights"
         )
     if w.swiglu_beta is not None or (
         w.swiglu_arg is not None and w.swiglu_arg.alpha not in (None, 1.0)
@@ -80,7 +80,7 @@ def flashinfer_cutlass_sm120_deepep_weights(plan, w):
         "routing_mode": frozenset({"precomputed_topk"}),
         "supports_deferred_finalize": frozenset({False}),
         "supports_ep": frozenset({True}),
-        "ep_size": frozenset({4}),
+        "ep_size": frozenset({4, 8}),
         "supports_all_to_all_ep": frozenset({True}),
         "a2a_backend": frozenset({"deepep"}),
         "deepep_modes": frozenset({"normal"}),

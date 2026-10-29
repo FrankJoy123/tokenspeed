@@ -99,7 +99,8 @@ class DeepseekV41Config(SoftmaxAttnConfig):
         attn_mapping = server_args.mapping.attn
         if attn_mapping.has_qcp:
             if (
-                server_args.prefill_only_mode != "encoder-cache"
+                (server_args.prefill_only_mode != "encoder-cache"
+                 and server_args.disaggregation_mode != "prefill")
                 or server_args.mapping.has_pp
                 or attn_mapping.kvp_size != 1
                 or attn_mapping.head_tp_size != 1
@@ -110,7 +111,7 @@ class DeepseekV41Config(SoftmaxAttnConfig):
                 or server_args.all2all_backend not in {"deepep", "flashinfer_moe_ep"}
                 or not server_args.disable_prefill_graph
                 or server_args.enable_mixed_batch
-                or server_args.speculative_algorithm is not None
+                or server_args.speculative_algorithm not in (None, "DSPARK")
                 or server_args.deepseek_v41_indexer_query_parallel_size != 1
                 or server_args.deepseek_v41_attention_query_parallel_size != 1
             ):

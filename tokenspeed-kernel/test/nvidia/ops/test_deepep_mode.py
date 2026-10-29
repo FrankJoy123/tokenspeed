@@ -175,3 +175,28 @@ def test_low_latency_dispatch_requests_deepep_packed_ue8m0(
 
     assert seen["round_scale"] is ue8m0_scales
     assert seen["use_ue8m0"] is ue8m0_scales
+
+
+def test_normal_buffer_serves_target_and_draft_expert_counts():
+    class NormalBuffer(DeepEPBuffer):
+        _hidden_size = 5120
+        _num_experts = 384
+        _deepep_mode = DeepEPMode.normal
+        _num_max_dispatch_tokens_per_rank = 256
+
+    NormalBuffer._check_reuse(5120, DeepEPMode.normal, 256, 128)
+    with pytest.raises(ValueError, match="hidden_size"):
+        NormalBuffer._check_reuse(7168, DeepEPMode.normal, 256, 128)
+    with pytest.raises(ValueError):
+        NormalBuffer._check_reuse(5120, DeepEPMode.low_latency, 256, 128)
+
+
+def test_low_latency_buffer_keeps_expert_geometry():
+    class LowLatencyBuffer(DeepEPBuffer):
+        _hidden_size = 5120
+        _num_experts = 384
+        _deepep_mode = DeepEPMode.auto
+        _num_max_dispatch_tokens_per_rank = 256
+
+    with pytest.raises(ValueError, match="num_experts"):
+        LowLatencyBuffer._check_reuse(5120, DeepEPMode.low_latency, 256, 128)

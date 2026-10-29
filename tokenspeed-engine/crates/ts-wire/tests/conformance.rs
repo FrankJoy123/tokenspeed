@@ -662,6 +662,8 @@ fn handshake_ready_response() {
             instance_id: s("model-a"),
             kv_cache_size_tokens: Some(790080),
             kv_cache_max_concurrency: Some(24.1),
+            bootstrap_host: None,
+            bootstrap_port: None,
             kv_events_config: Some(Dict(vec![
                 ("publisher".into(), "zmq".into()),
                 ("topic".into(), "".into()),

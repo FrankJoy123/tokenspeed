@@ -807,6 +807,18 @@ class DeepseekV41AttentionBackend(AttentionBackend):
             raise ValueError("V4.1 CP gather requires this rank's complete local rows")
         return token_all_gather_rows(values, self.qcp_group, list(plan.row_counts))
 
+    def finish_query_sharding(self) -> None:
+        """Restore replicated query metadata before the normal CED decoder."""
+        if self._query_shard is None:
+            return
+        if self._full_prefill_metadata is None:
+            raise RuntimeError("V4.1 CP canonical metadata is not prepared")
+        self.forward_metadata = self.forward_prefill_metadata = (
+            self._full_prefill_metadata
+        )
+        self._prefill_spans = self._full_prefill_spans
+        self._query_shard = None
+
     @contextmanager
     def full_query_metadata(self):
         """Use canonical rows only while producing shared compression or SWA plans."""
