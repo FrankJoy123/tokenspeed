@@ -25,7 +25,10 @@
 //! Socket I/O runs on its own small Tokio runtime; the loop exchanges
 //! messages with it through channels and never blocks on the network.
 
-use std::{sync::mpsc, time::Duration};
+use std::{collections::VecDeque, sync::mpsc, time::Duration};
+
+#[path = "gateway_control.rs"]
+mod gateway_control;
 
 use bytes::Bytes;
 use tokio::runtime::Runtime;
@@ -78,7 +81,8 @@ fn message(frames: Vec<Bytes>) -> ZmqMessage {
 /// A connected engine's request and output channels.
 pub struct EngineTransport {
     engine_index: u16,
-    requests: mpsc::Receiver<EngineRequest>,
+    requests: mpsc::Receiver<(EngineRequest, Option<i64>)>,
+    flush_call_ids: VecDeque<Option<i64>>,
     /// The input socket closed: the frontend is gone, and the socket does
     /// not reconnect.
     closed: bool,
@@ -132,7 +136,7 @@ impl EngineTransport {
 
             let mut input = DealerSocket::with_options(options(identity));
             input.connect(input_address).await?;
-            input.send(message(encode_frames(&ready))).await?;
+            input.send(message(gateway_control::ready_frames(&ready))).await?;
             let mut output = PushSocket::new();
             output.connect(output_address).await?;
             tracing::info!(
@@ -145,6 +149,8 @@ impl EngineTransport {
         })?;
 
         let (request_tx, requests) = mpsc::channel();
+        let (outputs, mut output_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<Bytes>>();
+        let control_outputs = outputs.clone();
         runtime.spawn(async move {
             loop {
                 let frames = match input.recv().await {
@@ -154,8 +160,11 @@ impl EngineTransport {
                         return;
                     }
                 };
-                match EngineRequest::from_frames(&frames) {
-                    Ok(request) => {
+                match gateway_control::decode(&frames, engine_index) {
+                    Ok(gateway_control::Input::Reply(reply)) => {
+                        if control_outputs.send(reply).is_err() { return; }
+                    }
+                    Ok(gateway_control::Input::Request(request)) => {
                         if request_tx.send(request).is_err() {
                             return;
                         }
@@ -166,7 +175,6 @@ impl EngineTransport {
                 }
             }
         });
-        let (outputs, mut output_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<Bytes>>();
         runtime.spawn(async move {
             let mut output = output;
             while let Some(frames) = output_rx.recv().await {
@@ -179,6 +187,7 @@ impl EngineTransport {
         Ok(Self {
             engine_index,
             requests,
+            flush_call_ids: VecDeque::new(),
             closed: false,
             outputs,
             runtime: Some(runtime),
@@ -300,7 +309,12 @@ impl Frontend for EngineTransport {
                 }
             },
         };
-        first.into_iter().chain(self.requests.try_iter()).collect()
+        first.into_iter().chain(self.requests.try_iter()).map(|(request, call_id)| {
+            if matches!(&request, EngineRequest::Control(op) if matches!(op.as_ref(), ts_wire::ControlRequest::FlushCache(_))) {
+                self.flush_call_ids.push_back(call_id);
+            }
+            request
+        }).collect()
     }
 
     fn closed(&self) -> bool {
@@ -316,7 +330,12 @@ impl Frontend for EngineTransport {
     }
 
     fn reply(&mut self, output: ControlOutput) {
-        let frames = EngineOutput::Control(Box::new(output)).to_frames();
+        let frames = if let ControlOutput::FlushCache(result) = &output {
+            match self.flush_call_ids.pop_front().flatten() {
+                Some(call_id) => gateway_control::reply(call_id, result.success, None, self.engine_index),
+                None => EngineOutput::Control(Box::new(output)).to_frames(),
+            }
+        } else { EngineOutput::Control(Box::new(output)).to_frames() };
         if self.outputs.send(frames).is_err() {
             tracing::warn!("output channel closed; dropping a control reply");
         }
@@ -341,18 +360,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn flush_replies_preserve_native_and_gateway_call_order() {
+        let (request_tx, requests)=mpsc::channel();
+        let (outputs, mut sent)=tokio::sync::mpsc::unbounded_channel();
+        let mut transport=EngineTransport { engine_index:7, requests,
+            flush_call_ids:VecDeque::new(), closed:false, outputs, runtime:None };
+        for id in [None,Some(42),Some(43)] {
+            let op=ts_wire::ControlRequest::FlushCache(ts_wire::control::FlushCacheReqInput{rid:None,http_worker_ipc:None});
+            request_tx.send((EngineRequest::Control(Box::new(op)),id)).unwrap();
+        }
+        assert_eq!(transport.receive(None).len(),3);
+        for success in [true,false,true] {
+            transport.reply(ControlOutput::FlushCache(ts_wire::control::FlushCacheReqOutput{rid:None,http_worker_ipc:None,success}));
+        }
+        let native=sent.try_recv().unwrap();
+        let actual:ControlOutput=decode_frames(&native).unwrap();
+        assert!(matches!(actual,ControlOutput::FlushCache(r) if r.success));
+        for (id,success) in [(42,false),(43,true)] {
+            let frames=sent.try_recv().unwrap();
+            let expected=gateway_control::reply(id,success,None,7);
+            assert_eq!(frames,expected);
+        }
+        assert!(transport.flush_call_ids.is_empty());
+    }
+
+    #[test]
     fn a_closed_input_is_noticed_after_its_last_messages() {
         let (request_tx, requests) = mpsc::channel();
         let (outputs, _sent) = tokio::sync::mpsc::unbounded_channel();
         let mut transport = EngineTransport {
             engine_index: 0,
             requests,
+            flush_call_ids: VecDeque::new(),
             closed: false,
             outputs,
             runtime: None,
         };
         let abort = EngineRequest::Abort(vec!["r0".to_owned()]);
-        request_tx.send(abort.clone()).unwrap();
+        request_tx.send((abort.clone(), None)).unwrap();
         // The input task ended.
         drop(request_tx);
         assert_eq!(transport.receive(Some(Duration::from_secs(10))), [abort]);
