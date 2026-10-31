@@ -1,0 +1,6 @@
+# name URL full-commit-SHA ; whitespace separated, add private sources in sources.local.tsv
+# This upstream revision plus patches/deepgemm.patch reproduces tracked local edits.
+deepgemm https://github.com/deepseek-ai/DeepGEMM.git 14073b4e1e706506e193231209738c848d092a1f
+cutlass https://github.com/NVIDIA/cutlass.git f3fde58372d33e9a5650ba7b80fc48b3b49d40c8
+gateway ssh://git@git.sankuai.com/~wangchangran/gateway.git c52056d4c00a1bccd69836b466e5565ba26c13f0
+# P custom snapshots have no verified Git remote/full SHA; do not substitute upstream main.

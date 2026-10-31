@@ -234,3 +234,42 @@ Inside the root `tokenspeed-kernel-amd/` directory:
   (`gluon_mha_decode_reduce_gfx950`). Kernels shared by several registered ops
   keep descriptive names. A `repr=` on the jit decorator replaces the compiled
   symbol, so its base string must be the kernel's `def` name as well.
+
+## PD deployment maintenance
+
+For changes affecting the DeepSeek-V4.1 PD deployment, maintain
+`deploy/dsv41_pd/` in the same change as the implementation. This applies to
+prefill and decode code, engine/scheduler/kernel builds, third-party patches,
+compiler or CUDA requirements, communication libraries, launch arguments,
+environment variables, and benchmark or validation behavior.
+
+* Before editing, read the deployment README, DEPLOYMENT.md, and
+  INSTALL_TROUBLESHOOTING.md. Identify whether P, D, or both roles are affected.
+* Turn required manual installation fixes into reproducible deployment steps.
+  Update install.sh, install_dependencies.sh, build helpers, requirements.txt,
+  sources.tsv, dependencies.tsv, or patches/ as appropriate. Build modified
+  in-repository components from the current checkout; do not silently use an
+  older published wheel.
+* Pin external Git revisions and dependency versions. When a source snapshot
+  is unavoidable, document its provenance and update its checksum and manifest.
+  Do not leave required changes only in site-packages or a temporary build tree.
+* Keep env.example.sh, launch scripts, check.sh, and deployment documentation
+  consistent with the supported configuration. Preserve separate P/D dependency
+  environments and explicitly document incompatible dependencies.
+* Keep deployment inputs configurable and paths relative to the checkout or
+  configured state/source directories. Do not introduce personal HDFS paths,
+  credentials, copied virtual environments, or dependencies on another experiment.
+* Update troubleshooting with the observed failure, cause, reproducible fix,
+  and verification status. Distinguish build/import checks from GPU execution,
+  model startup, PD connectivity, accuracy, and performance validation.
+* Validate affected deployment steps in an isolated environment where practical;
+  otherwise state what remains unverified. Do not edit a running installer,
+  concurrently install into one environment, or interrupt services to validate
+  changes without authorization.
+* If a change has no deployment impact, state why in the handoff instead of
+  making unrelated deployment edits. If both P and D repositories are available
+  in the authorized workspace, apply shared deployment fixes to both while
+  preserving role-specific settings. Otherwise identify the required counterpart
+  update explicitly; do not claim it has been synchronized.
+* This maintenance rule does not authorize committing, pushing, publishing,
+  upgrading dependencies, or restarting services beyond the user's request.

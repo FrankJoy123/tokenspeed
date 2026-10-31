@@ -1,0 +1,9 @@
+component	verified_source	required_action
+prefill-ts	abf8e108 (includes 16476b444aef408e74412bef8853036f6bb8242b normal PD/QCP/DSpark)	build local engine/scheduler; no encoder-only branch
+decode-ts	8a10ecab2535fb04037c9c9905639d10a61e0671	build local engine/scheduler
+p-deepep	pcie-pr375-c556a13 source snapshot	need original source Git URL/full SHA or relocated source; not the stock wheel
+p-flashinfer	flashinfer-cake-399b6c1d source snapshot	need original source Git URL/full SHA or relocated source
+p-nvshmem	nvshmem-3.4.5-ahfix snapshot, build-v2	need original patched source/build recipe; supply isolated lib directory; stock 3.4.5 is not equivalent
+d-deepgemm	14073b4e1e706506e193231209738c848d092a1f + local patch	fetch_sources.sh + install_dependencies.sh
+d-deepep	tokenspeed-deepep 2.1.0.post20260810	apply tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/deepep_sm120_experiment/elastic-rdma-tuner.patch from dependency root, per adjacent README
+gateway	c52056d4c00a1bccd69836b466e5565ba26c13f0	sources.tsv pins ssh://git@git.sankuai.com/~wangchangran/gateway.git; balanced DP routing and legacy role fixes
