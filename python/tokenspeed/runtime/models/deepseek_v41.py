@@ -2811,6 +2811,18 @@ class DeepseekV41Model(nn.Module):
                 for layer_id in range(config.num_hidden_layers)
             ]
         )
+        if mapping.attn.has_qcp and any(
+            layer.ffn.use_sm120_deepep for layer in self.layers
+        ):
+            # QCP may also execute unsharded forwards. Its SM120 expert
+            # path exchanges their row counts, just like ordinary DP/EP.
+            # Create the dedicated communicator at startup on every rank;
+            # forward and scheduler collectives must never share a group.
+            pg_manager.init_process_group(
+                tuple(range(mapping.world_size)),
+                backend="gloo",
+                name="v41_decoder_counts",
+            )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         # The decoder view keeps at most a prompt's last window per extend
         # request (and one row per decode request), which bounds the rows the

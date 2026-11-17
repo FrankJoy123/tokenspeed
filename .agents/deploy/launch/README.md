@@ -26,7 +26,10 @@ HTTP 评测入口使用当前 runtime 锁定的公开 SMG 1.16.0.post20261115。
  --host 0.0.0.0 --port 18500 \
  --reasoning-parser deepseek_v41 --multimodal-tensor-transport inline \
  --mm-per-request-image-limit 160 --max-payload-size 536870912 \
+ --worker-wedge-secs 0 --request-timeout-secs 7200 --queue-timeout-secs 7200 \
  --disable-retries --disable-circuit-breaker
 ```
+
+首次图文shape的冷JIT可能超过SMG默认3秒静默阈值；上述命令关闭该误取消规则，保留7200秒整体请求超时。
 
 然后 P 主机运行所选精度的 `prefill.sh`，两个 D 节点分别以 `NODE_RANK=0/1` 运行同精度 `decode.sh`。检查真实文本和图片请求均完成后再跑固定评测；HTTP端口监听或单独 `/health` 通过不足以验收 P→D。Longdoc50 最多102张原图，上述图数与 body 上限覆盖该固定回归。

@@ -863,6 +863,56 @@ def test_ordinary_dp_ep_requires_disabled_prefill_graph(monkeypatch):
         DeepseekV41Model(_config(), mapping, None, "model", False, "gpu", None)
 
 
+@pytest.mark.parametrize("sm120", [False, True])
+def test_qcp_constructor_registers_only_its_sm120_count_group(monkeypatch, sm120):
+    from tokenspeed.runtime.distributed.process_group_manager import ProcessGroupManager
+
+    class Expert(_DenseFFN):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.use_sm120_deepep = sm120
+            self.owns_ep_communication = sm120
+
+    manager = ProcessGroupManager()
+    created = []
+
+    def new_group(ranks, *, backend, timeout):
+        group = object()
+        created.append((tuple(ranks), backend, group))
+        return group
+
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 8)
+    monkeypatch.setattr(torch.distributed, "new_group", new_group)
+    monkeypatch.setattr(v41, "pg_manager", manager)
+    monkeypatch.setattr(v41, "DeepseekV41MoE", Expert)
+    monkeypatch.setattr(v41, "get_moe_backend", lambda: MoeBackend.TRITON)
+    mapping = v41.Mapping(
+        rank=0,
+        world_size=8,
+        attn_tp_size=8,
+        attn_qcp_size=8,
+        dense_tp_size=1,
+        moe_tp_size=1,
+        moe_ep_size=8,
+    )
+    with torch.device("meta"):
+        DeepseekV41Model(_config(), mapping, None, "model", False, "gpu", None)
+    assert len(created) == int(sm120)
+    assert (
+        manager.has_process_group("gloo", tuple(range(8)), name="v41_decoder_counts")
+        is sm120
+    )
+    assert not manager.has_process_group("gloo", tuple(range(8)))
+    if sm120:
+        assert created[0][:2] == (tuple(range(8)), "gloo")
+        assert (
+            manager.get_process_group(
+                "gloo", tuple(range(8)), name="v41_decoder_counts"
+            )
+            is created[0][2]
+        )
+
+
 def test_decoder_counts_preserve_decode_and_fused_ep_boundaries(
     monkeypatch, ordinary_dp_model
 ):
