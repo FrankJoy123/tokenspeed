@@ -70,6 +70,8 @@ print(json.dumps({key:os.environ.get(key) for key in keys}))
 PYENV
  exit 0
 fi
+"$VIRTUAL_ENV/bin/python" "$script_dir/../../../deploy/launch/preflight_model.py" \
+ --model "$model" --profile w4a8 --output "$point/model-identity.json"
 "$VIRTUAL_ENV/bin/python" "$script_dir/../../../deploy/setup/identity.py" \
  --source "$script_dir/../../../.." --output "$point/runtime-identity.json"
 exec "$VIRTUAL_ENV/bin/python" -m tokenspeed.runtime.entrypoints.engine \

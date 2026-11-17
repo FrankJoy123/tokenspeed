@@ -4505,6 +4505,18 @@ def test_generic_safetensors_engram_load_is_bounded(monkeypatch, tmp_path):
     config.engram_num_embeddings = [rows]
     model = _loader_model(monkeypatch, config, 2, "cpu")
     weights = _checkpoint(config)
+    # Distinct rows detect misplaced or repeated chunks in either parameter.
+    for field in ("weight", "scale"):
+        key = f"layers.1.engram.embed.{field}"
+        value = weights[key]
+        row_ids = torch.arange(value.shape[0]).unsqueeze(1)
+        if field == "weight":
+            weights[key] = (
+                ((row_ids % 17) / 4).expand_as(value).to(value.dtype).contiguous()
+            )
+        else:
+            raw = (120 + row_ids % 9).expand_as(value).to(torch.uint8).contiguous()
+            weights[key] = raw.view(value.dtype)
     rest = _bind_engram_tables(model, weights, tmp_path)
 
     embed = model.model.layers[1].engram.embed
@@ -4515,20 +4527,35 @@ def test_generic_safetensors_engram_load_is_bounded(monkeypatch, tmp_path):
         assert rows.device.type == "cpu"
         assert rows.shape[0] <= 65536
         assert rows.dtype in (torch.float8_e4m3fn, torch.float8_e8m0fnu)
-        copies.append((local_start, rows.shape[0]))
+        copies.append(
+            ("scale" if param is embed.scale else "weight", local_start, rows.shape[0])
+        )
         original(param, rows, local_start)
 
     monkeypatch.setattr(embed, "_copy_rows", copy_rows)
     model.load_weights(rest.items())
     local_rows = embed.row_end - embed.row_start
-    assert (
-        copies
-        == [
-            (start, min(65536, local_rows - start))
-            for start in range(0, local_rows, 65536)
+    # Completion order is intentionally unconstrained across read workers.
+    # Each parameter must cover its entire local shard once, with no gap/overlap.
+    for field in ("weight", "scale"):
+        chunks = sorted(
+            (start, count)
+            for copied_field, start, count in copies
+            if copied_field == field
+        )
+        cursor = 0
+        for offset, count in chunks:
+            assert offset == cursor
+            assert 0 < count <= 65536
+            cursor += count
+        assert cursor == local_rows
+        expected = weights[f"layers.1.engram.embed.{field}"][
+            embed.row_start : embed.row_end
         ]
-        * 2
-    )
+        actual = getattr(embed, field)
+        torch.testing.assert_close(
+            actual.view(torch.uint8), expected.view(torch.uint8), atol=0, rtol=0
+        )
     assert (
         embed.weight.dtype == torch.float8_e4m3fn and embed.scale.dtype == torch.uint8
     )
@@ -4588,13 +4615,12 @@ def test_snapshot_full_text_manifest_and_wo_a_dtype(monkeypatch):
         pytest.skip("set DEEPSEEK_V41_REFERENCE_DIR for full snapshot coverage")
     path = Path(root)
     raw_config = json.loads((path / "config.json").read_text())
-    config = SimpleNamespace(
-        **raw_config["text_config"],
-        num_hash_layers=0,
-        n_group=1,
-        topk_group=1,
-        expert_dtype="fp4",
-    )
+    config = v41.DeepseekV41Config(**raw_config).text_config
+    quantization = raw_config["quantization_config"]
+    assert config.expert_dtype == quantization["expert_dtype"]
+    assert config.moe_quant_algo == quantization.get("moe_quant_algo")
+    assert config.engram_embed_quant == "mxfp8"
+    assert (config.num_hash_layers, config.n_group, config.topk_group) == (0, 1, 1)
     index = json.loads((path / "model.safetensors.index.json").read_text())[
         "weight_map"
     ]

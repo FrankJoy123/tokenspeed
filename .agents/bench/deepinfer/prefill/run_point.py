@@ -50,10 +50,9 @@ def benchmark_environment(inherited, *, script_dir, expert_routing, indexer):
         "TOKENSPEED_KERNEL_OVERRIDE_ATTENTION_DSV41_INDEX_TOPK",
     ]:
         env.pop(name, None)
-    if expert_routing == "uniform":
-        env["TOKENSPEED_MOE_ROUTING_SIMULATION"] = "uniform"
-    else:
-        env.pop("TOKENSPEED_MOE_ROUTING_SIMULATION", None)
+    if expert_routing != "natural":
+        raise ValueError("Prefill requires natural expert routing")
+    env.pop("TOKENSPEED_MOE_ROUTING_SIMULATION", None)
     for name in [
         "TOKENSPEED_ENABLE_SM120_NATIVE_FP4_INDEXER",
         "TOKENSPEED_ENABLE_SM120_FP4_CANDIDATE_INDEXER",
@@ -74,6 +73,25 @@ def benchmark_environment(inherited, *, script_dir, expert_routing, indexer):
     return env
 
 
+def benchmark_cache_environment(inherited, *, out):
+    env = dict(inherited)
+    cache = out / "cache"
+    env.update(
+        {
+            "DG_JIT_CACHE_DIR": str(cache / "deepgemm"),
+            "DG_SM120_JIT_CACHE_DIR": str(cache / "deepgemm-sm120"),
+            "EP_JIT_CACHE_DIR": str(cache / "deepep"),
+            "TRITON_CACHE_DIR": str(cache / "triton"),
+            "CUDA_CACHE_PATH": str(cache / "cuda"),
+            "CUTE_DSL_CACHE_DIR": str(cache / "cute"),
+            "TOKENSPEED_KERNEL_CACHE_ROOT": str(cache / "kernel"),
+            "FLASHINFER_WORKSPACE_BASE": str(cache / "flashinfer-workspace"),
+            "XDG_CACHE_HOME": str(cache / "xdg"),
+        }
+    )
+    return env
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--layout", choices=["dp8", "cp8"], required=True)
@@ -83,9 +101,7 @@ def main():
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--python", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument(
-        "--expert-routing", choices=["natural", "uniform"], required=True
-    )
+    parser.add_argument("--expert-routing", choices=["natural"], required=True)
     parser.add_argument("--indexer", choices=["bf16", "native-fp4"], required=True)
     parser.add_argument("--profile-steps", type=int, required=True)
     args = parser.parse_args()
@@ -176,8 +192,6 @@ def main():
         "7200",
         "--enable-async-logging",
         "--enable-output-logprobs",
-        "--ep-dispatch-algorithm",
-        "static",
     ]
     env = benchmark_environment(
         os.environ,
@@ -185,18 +199,7 @@ def main():
         expert_routing=args.expert_routing,
         indexer=args.indexer,
     )
-    cache = out / "cache"
-    env.update(
-        {
-            "DG_JIT_CACHE_DIR": str(cache / "deepgemm"),
-            "DG_SM120_JIT_CACHE_DIR": str(cache / "deepgemm-sm120"),
-            "EP_JIT_CACHE_DIR": str(cache / "deepep"),
-            "TRITON_CACHE_DIR": str(cache / "triton"),
-            "CUDA_CACHE_PATH": str(cache / "cuda"),
-            "CUTE_DSL_CACHE_DIR": str(cache / "cute"),
-            "TOKENSPEED_KERNEL_CACHE_ROOT": str(cache / "kernel"),
-        }
-    )
+    env = benchmark_cache_environment(env, out=out)
     for name in ("CC", "CXX"):
         value = env.get(name)
         if not value or not Path(value).is_file() or not os.access(value, os.X_OK):
@@ -231,7 +234,7 @@ def main():
         "--prefill-rows-per-rank",
         str(physical),
         "--rounds",
-        "2",
+        "1",
         "--extra-experts",
         "0",
         "--expert-routing",

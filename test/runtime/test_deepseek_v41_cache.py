@@ -2646,18 +2646,27 @@ def test_native_decode_receives_compact_window_and_real_lengths(monkeypatch, pos
         torch.testing.assert_close(slots[0, :count], expected.int())
 
 
+@pytest.mark.parametrize("reuse_runner", [False, True])
 def test_native_decode_schedule_shared_per_length_pair_within_a_forward(
     monkeypatch,
+    reuse_runner,
 ):
     from tokenspeed_kernel.ops.attention import dsv41
 
     backend = _backend("cpu", 2)
     tables = _tables("cpu")
-    produced = []
+    produced, previous_calls = [], []
+
+    def create_schedule(*, previous):
+        previous_calls.append(previous)
+        schedule = previous if reuse_runner and previous is not None else object()
+        produced.append(schedule)
+        return schedule
+
     monkeypatch.setattr(
         dsv41,
         "new_attention_schedule",
-        lambda: produced.append(object()) or produced[-1],
+        create_schedule,
     )
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
 
@@ -2680,13 +2689,19 @@ def test_native_decode_schedule_shared_per_length_pair_within_a_forward(
     shared = backend._decode_schedule(swa_lens, global_lens)
     assert backend._decode_schedule(swa_lens, global_lens) is shared
     swa_only = backend._decode_schedule(swa_lens, None)
-    assert swa_only is not shared
+    assert (swa_only is shared) is reuse_runner
     assert backend._decode_schedule(swa_lens, None) is swa_only
-    assert backend._decode_schedule(swa_lens, torch.tensor([512])) is not shared
+    separate = backend._decode_schedule(swa_lens, torch.tensor([512]))
+    assert (separate is shared) is reuse_runner
     assert len(produced) == 3
-    # The next forward's refreshed lengths must not reuse an initialized producer.
+    assert previous_calls == [None, shared, swa_only]
+    # Every forward must call the producer again with the last runner, even
+    # when a reusable SM120 runner retains warmed shape plans and scratch.
     refresh()
-    assert backend._decode_schedule(swa_lens, global_lens) is not shared
+    next_forward = backend._decode_schedule(swa_lens, global_lens)
+    assert (next_forward is shared) is reuse_runner
+    assert previous_calls[-1] is separate
+    assert backend._decode_schedule(swa_lens, global_lens) is next_forward
     assert len(produced) == 4
 
 

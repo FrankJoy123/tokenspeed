@@ -790,9 +790,13 @@ def test_local_snapshot_reference_parity():
     from transformers import PreTrainedTokenizerFast
 
     snapshot = Path(directory)
-    config = SimpleNamespace(
-        **json.loads((snapshot / "config.json").read_text())["text_config"]
+    raw_config = json.loads((snapshot / "config.json").read_text())
+    config = v41.DeepseekV41Config(**raw_config).text_config
+    assert config.expert_dtype == raw_config["quantization_config"]["expert_dtype"]
+    assert config.moe_quant_algo == raw_config["quantization_config"].get(
+        "moe_quant_algo"
     )
+    assert config.engram_embed_quant == "mxfp8"
     tokenizer = PreTrainedTokenizerFast(tokenizer_file=str(snapshot / "tokenizer.json"))
     spec = importlib.util.spec_from_file_location(
         "_v41_reference_engram", snapshot / "inference/engram.py"
@@ -819,6 +823,9 @@ def test_local_snapshot_reference_parity():
     assert full.wkv.weight_scale_inv.shape == (25600, 192)
     assert full.q_weight.shape == full.k_weight.shape == (4, 5120)
     assert full.embed.weight.shape == (96001542, 256)
+    assert full.embed.storage_format == config.engram_embed_quant
+    assert full.embed.weight.dtype == torch.float8_e4m3fn
+    assert full.embed.scale.dtype == torch.uint8
     token_map, vocab_size = reference.build_compressed_token_map(tokenizer)
     assert vocab_size == 99092
     assert state.token_map.tolist() == token_map
@@ -885,7 +892,7 @@ def test_local_snapshot_reference_parity():
     hash_ids = torch.randint(72, (2, 3, 6))
     token_mask = torch.tensor([[True, False, True], [False, True, True]])
     ref_model = SimpleNamespace(
-        embed=model.embed,
+        embed=lambda indices: model.embed(indices, query_shard=None),
         wkv=lambda x: F.linear(x, model.wkv.weight),
         q_weight=model.q_weight,
         k_weight=model.k_weight,

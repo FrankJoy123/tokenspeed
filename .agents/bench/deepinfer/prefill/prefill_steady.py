@@ -95,9 +95,19 @@ def steady_window(
         raise ValueError("compile monitor unavailable in the steady window")
     if any(s["serving_compiles"] != selected[0]["serving_compiles"] for s in selected):
         raise ValueError("kernel compilation inside the measured steady window")
-    elapsed = (selected[-1]["completed_ns"] - selected[0]["completed_ns"]) / 1e9
-    if elapsed <= 0:
-        raise ValueError("invalid completion timestamps")
+    completed_ns = [s["completed_ns"] for s in selected]
+    interval_ns = [end - start for start, end in zip(completed_ns, completed_ns[1:])]
+    if any(value <= 0 for value in interval_ns):
+        raise ValueError("completion timestamps must be strictly increasing")
+    elapsed = sum(interval_ns) / 1e9
+    ordered = sorted(interval_ns)
+
+    def quantile_ms(q):
+        # Linear interpolation over all intervals, with positions (n - 1) * q.
+        position = (len(ordered) - 1) * q
+        lo, hi = math.floor(position), math.ceil(position)
+        return (ordered[lo] + (ordered[hi] - ordered[lo]) * (position - lo)) / 1e6
+
     measured = selected[1:]
     computed = sum(r["prefill_rows"] for r in measured)
     replay = sum(r["replay_rows"] for r in measured)
@@ -108,6 +118,15 @@ def steady_window(
         "window_steps": measure_steps,
         "window_seconds": elapsed,
         "step_latency_ms": elapsed / measure_steps * 1000,
+        "step_ids": [s["step"] for s in selected],
+        "endpoint_completed_ns": completed_ns,
+        "interval_ns": interval_ns,
+        "interval_ms_distribution": {
+            "min": ordered[0] / 1e6,
+            "p50": quantile_ms(0.5),
+            "p95": quantile_ms(0.95),
+            "max": ordered[-1] / 1e6,
+        },
         "computed_rows": computed,
         "new_rows": useful,
         "replay_rows": replay,
@@ -130,11 +149,9 @@ def main() -> None:
     parser.add_argument("--new-tokens", type=int, required=True)
     parser.add_argument("--computed-rows-per-request", type=int, required=True)
     parser.add_argument("--prefill-rows-per-rank", type=int, required=True)
-    parser.add_argument("--rounds", type=int, required=True)
-    parser.add_argument("--extra-experts", type=int, required=True)
-    parser.add_argument(
-        "--expert-routing", choices=["natural", "uniform"], required=True
-    )
+    parser.add_argument("--rounds", type=int, choices=[1], required=True)
+    parser.add_argument("--extra-experts", type=int, choices=[0], required=True)
+    parser.add_argument("--expert-routing", choices=["natural"], required=True)
     parser.add_argument("--warmup-steps", type=int, required=True)
     parser.add_argument("--measure-steps", type=int, required=True)
     parser.add_argument("--seed", type=int, required=True)
@@ -177,13 +194,17 @@ def main() -> None:
         == args.prefill_rows_per_rank
     )
     assert os.environ.get("PREFILL_BENCH_OBSERVE") == "1"
-    assert os.environ.get("TOKENSPEED_MOE_ROUTING_SIMULATION") == (
-        "uniform" if args.expert_routing == "uniform" else None
-    )
+    assert os.environ.get("TOKENSPEED_MOE_ROUTING_SIMULATION") is None
     assert args.prefill_rows_per_rank % args.computed_rows_per_request == 0
     assert args.computed_rows_per_request >= args.new_tokens > 0
-    assert args.rounds > 0 and args.warmup_steps >= 5 and args.measure_steps >= 10
-    # Same supply formula as DeepInfer: 5+2*(10+1)+2*2 = 31 full steps.
+    assert args.rounds == 1 and args.warmup_steps >= 5 and args.measure_steps == 10
+    assert (args.prefix_tokens, args.new_tokens, args.computed_rows_per_request) == (
+        126976,
+        4096,
+        4224,
+    )
+    # Per-queue supply is independent of the number of formal cohorts.
+    # Retain the current DeepInfer-style 31-step supply and CP queue mapping.
     supply_steps = args.warmup_steps + 2 * (args.measure_steps + 1) + 4
     per_rank = max(
         64,
@@ -248,7 +269,7 @@ def main() -> None:
             "eplb": False,
             "redundant_experts": args.extra_experts,
             "routing": args.expert_routing,
-            "routing_scope": "Product expert routing; not the historical physical-416-slot simulation.",
+            "routing_scope": "Natural expert routing without redundant expert replicas or routing simulation.",
             "cp": cp,
             "prefix_sha256": hashlib.sha256(json.dumps(prefix).encode()).hexdigest(),
             "sampling": sampling | {"top_logprobs": 5},

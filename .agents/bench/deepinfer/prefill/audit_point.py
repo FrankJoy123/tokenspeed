@@ -18,7 +18,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Recompute two formal windows and all-rank compile audit from raw records."""
+"""Recompute the single formal window and all-rank compile audit from raw records."""
 
 import argparse
 import hashlib
@@ -43,7 +43,22 @@ config = json.loads((point / "configuration.json").read_text())
 terminal = json.loads((root / "terminal.json").read_text())
 assert terminal["returncode"] == 0
 assert json.loads((point / "state.json").read_text())["stage"] == "complete"
-assert config["routing"] in ("natural", "uniform") and config["redundant_experts"] == 0
+assert config["routing"] == "natural" and config["redundant_experts"] == 0
+assert config["eplb"] is False
+assert config["benchmark"]["rounds"] == 1
+assert config["benchmark"]["warmup_steps"] >= 5
+assert config["benchmark"]["measure_steps"] == 10
+assert (
+    config["benchmark"]["prefix_tokens"],
+    config["benchmark"]["new_tokens"],
+    config["benchmark"]["computed_rows_per_request"],
+) == (126976, 4096, 4224)
+assert (
+    config["sampling"]["temperature"],
+    config["sampling"]["top_p"],
+    config["sampling"]["top_k"],
+    config["sampling"]["max_new_tokens"],
+) == (0.3, 0.95, -1, 1)
 cp = config["cp"]
 dp = config["dp"]
 physical = config["benchmark"]["prefill_rows_per_rank"]
@@ -55,7 +70,15 @@ by_rank = defaultdict(list)
 for sample in samples:
     by_rank[sample["rank"]].append(sample)
 assert sorted(by_rank) == list(range(dp))
-for iteration in (0, 1, 2):
+for iteration in (0, 1):
+    primes = json.loads((point / f"r{iteration}-primes.json").read_text())
+    assert len(primes) == dp
+    assert all(
+        (x["prompt_tokens"], x["cached_tokens"], x["completion_tokens"])
+        == (126976, 0, 1)
+        and x["finish_reason"] != "abort"
+        for x in primes
+    )
     rows = json.loads((point / f"r{iteration}-requests.json").read_text())
     assert len(rows) == config["requests_per_round"]
     assert all(
@@ -65,7 +88,7 @@ for iteration in (0, 1, 2):
         for x in rows.values()
     )
 trials = []
-for iteration in (1, 2):
+for iteration in (1,):
     tag = f"steady-s{physical}-r{iteration}-request-"
     windows = {
         rank: module.steady_window(
@@ -136,9 +159,11 @@ record = {
     "physical_rows": physical,
     "cp": cp,
     "dp": dp,
-    "step_ms": elapsed / 20 * 1000,
-    "new_tokens_s_gpu": budget * 20 / elapsed / cp,
-    "computed_rows_s_gpu": physical * 20 / elapsed / cp,
+    "warmup_cohorts": 1,
+    "formal_cohorts": 1,
+    "step_ms": elapsed / 10 * 1000,
+    "new_tokens_s_gpu": budget * 10 / elapsed / cp,
+    "computed_rows_s_gpu": physical * 10 / elapsed / cp,
     "trials": trials,
     "prefix_sha256": config["prefix_sha256"],
     "benchmark_sha256": hashlib.sha256(

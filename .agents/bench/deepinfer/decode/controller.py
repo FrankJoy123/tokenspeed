@@ -18,7 +18,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""CUSTOM95: one engine/prefix, full warmup, two independent formal cohorts."""
+"""One persistent Decode engine, 200 full warm steps and two formal cohorts."""
 
 import argparse
 import asyncio
@@ -27,7 +27,17 @@ import json
 import time
 from pathlib import Path
 
-from audit import collect_node
+from analysis import (
+    BATCHES,
+    CONTEXT,
+    FORMAL_INTERVALS,
+    FORMAL_SKIP,
+    SAMPLING,
+    WARM_STEPS,
+    WORLD_SIZE,
+    output_budget,
+)
+from audit import collect_node, validate_run_identity
 from inputs import common_prompt, digest, request_tokens
 from tokenspeed_engine import FrontendListener
 from transformers import AutoTokenizer
@@ -54,8 +64,9 @@ def main():
         parser.add_argument(
             "--" + name, required=True, type=Path if name == "out" else str
         )
-    for name in ["context", "output", "rounds", "world-size", "port-base"]:
+    for name in ["context", "rounds", "world-size", "port-base"]:
         parser.add_argument("--" + name, required=True, type=int)
+    parser.add_argument("--run-identity", type=Path, required=True)
     parser.add_argument("--batches", nargs="+", type=int, required=True)
     parser.add_argument("--profile-batches", nargs="*", type=int, required=True)
     parser.add_argument("--acceptance-mode", choices=["fixed"], required=True)
@@ -63,35 +74,49 @@ def main():
     out = args.out
     out.mkdir(parents=True, exist_ok=True)
     assert not (out / "state.json").exists(), "Choose a fresh output directory"
+    assert (
+        args.context == CONTEXT and args.rounds == 2 and args.world_size == WORLD_SIZE
+    )
+    assert not args.profile_batches, "Profiling is outside this measurement protocol"
+    assert args.batches and len(set(args.batches)) == len(args.batches)
+    assert all(batch in BATCHES for batch in args.batches)
+    import hashlib
+
+    fixed = validate_run_identity(json.loads(args.run_identity.read_text()))
+    assert (
+        fixed["model"]["checkpoint"] == args.model
+    ), "Checkpoint differs from frozen identity"
+    (out / "run-identity.json").write_bytes(args.run_identity.read_bytes())
     save(
         out / "config.json",
         {
+            "protocol": "decode",
+            "protocol_version": 1,
             "batches": args.batches,
-            "world_size": args.world_size,
-            "output": args.output,
-            "protocol": "CUSTOM95",
+            "world_size": WORLD_SIZE,
+            "rounds": 2,
+            "context": CONTEXT,
+            "sampling": SAMPLING,
+            "warm_steps": WARM_STEPS,
+            "formal_skip": FORMAL_SKIP,
+            "formal_intervals": FORMAL_INTERVALS,
+            "actual_width": 6,
+            "run_identity_sha256": hashlib.sha256(
+                args.run_identity.read_bytes()
+            ).hexdigest(),
+            "output_budgets": {
+                f"b{batch}-r{cohort}": output_budget(batch, cohort)
+                for batch in args.batches
+                for cohort in (0, 1, 2)
+            },
         },
     )
-    import hashlib
-
     save(
         out / "source-sha256.json",
         {
             f.name: hashlib.sha256(f.read_bytes()).hexdigest()
             for f in Path(__file__).parent.glob("*.py")
         },
-    )
-    assert (
-        args.output == 1152
-        and args.context == 131072
-        and args.rounds == 2
-        and args.world_size == 16
-        and not args.profile_batches
-    )
-    assert (
-        args.batches
-        and len(set(args.batches)) == len(args.batches)
-        and all(b in (1, 2, 4, 8, 16, 32) for b in args.batches)
     )
 
     def state(stage, **fields):
@@ -135,7 +160,7 @@ def main():
                 "prime_prompt_sha256": digest(prime_prompt),
                 "alignment_guard_tokens": 256,
                 "suffix_tokens": 6656,
-                "suffix_key": "r1 legacy NEW-W4A8:37:batch:rank:index; r0/r2 CUSTOM-OFFICIAL-SAMPLING:37:cohort:batch:rank:index",
+                "suffix_key": "DECODE:37:cohort:batch:rank:index",
                 "cohort_input_uniqueness": 3 * args.world_size * sum(args.batches),
                 "routing": "natural",
                 "fixed_acceptance": 6,
@@ -145,7 +170,7 @@ def main():
         )
         all_suffix_hashes = set()
         encoder = MsgpackEncoder()
-        sampling = {"temperature": 0, "top_p": 1, "top_k": -1, "ignore_eos": True}
+        sampling = SAMPLING | {"ignore_eos": True}
 
         async def control(req):
             replies = await frontend.control([zmq_wire.encode_control(req)])
@@ -238,6 +263,7 @@ def main():
         summaries = []
         for batch in args.batches:
             for cohort in [0, 1, 2]:
+                budget = output_budget(batch, cohort)
                 state(
                     "warmup-running" if cohort == 0 else "formal-running",
                     batch=batch,
@@ -246,26 +272,40 @@ def main():
                 )
                 t = time.monotonic()
                 results = asyncio.run(
-                    generate(f"b{batch}-r{cohort}", batch, args.output, cohort=cohort)
+                    generate(
+                        f"b{batch}-r{cohort}",
+                        batch,
+                        budget["max_new_tokens"],
+                        cohort=cohort,
+                    )
                 )
                 generation_seconds = time.monotonic() - t
                 time.sleep(0.5)
-                node = collect_node(out, args.world_size)
+                node = collect_node(out, args.world_size, live=True)
                 assert node["ranks"] == list(range(8))
-                windows = {} if cohort == 0 else node["windows"][f"b{batch}-r{cohort}"]
-                assert all("error" not in row for row in windows.values()), windows
+                observations = node["warmups" if cohort == 0 else "windows"][
+                    f"b{batch}-r{cohort}"
+                ]
+                assert all(
+                    "error" not in row for row in observations.values()
+                ), observations
+                windows = {} if cohort == 0 else observations
                 row = {
                     "batch_per_rank": batch,
                     "round": cohort,
                     "warmup_round": cohort == 0,
-                    "formal_intervals": 0 if cohort == 0 else 60,
+                    "formal_intervals": 0 if cohort == 0 else FORMAL_INTERVALS,
+                    "warmup_observations": observations if cohort == 0 else {},
+                    "local_observed_ranks": node["ranks"],
+                    "global_16rank_audit_pending": True,
+                    "termination_budget": budget,
                     "windows": windows,
                     "context_tokens": args.context,
                     "cached_tokens_min": min(x.cached_tokens for x in results.values()),
                     "generation_wall_seconds": generation_seconds,
                     "cohort_wall_seconds": time.monotonic() - t,
-                    "output_tokens": args.output,
-                    "semantic_scope": "Full1152 warm r0 plus two independent full1152 formal request cohorts r1/r2; each formal discards110 full points and measures60 intervals",
+                    "output_tokens": budget["max_new_tokens"],
+                    "semantic_scope": "Raw warm cohort requires 200 full steps; each independent formal cohort discards100 full points then measures50 intervals from51 endpoints; token budgets are termination margins only",
                 }
                 save(out / f"b{batch}-r{cohort}-point.json", row)
                 summaries.append(row)

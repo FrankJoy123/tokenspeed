@@ -18,7 +18,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Reproduce the frozen CUSTOM95 seed strings and independent cohort tails."""
+"""Generate one common prefix and unique suffixes for the three Decode cohorts."""
 
 import hashlib
 import json
@@ -33,11 +33,7 @@ def request_tokens(
     prompt, vocab, batch, rank, index, tail_tokens=6656, seed=37, cohort=1
 ):
     assert cohort in (0, 1, 2)
-    key = (
-        f"NEW-W4A8:{seed}:{batch}:{rank}:{index}"
-        if cohort == 1
-        else f"CUSTOM-OFFICIAL-SAMPLING:{seed}:{cohort}:{batch}:{rank}:{index}"
-    ).encode()
+    key = f"DECODE:{seed}:{cohort}:{batch}:{rank}:{index}".encode()
     rng = random.Random(int.from_bytes(hashlib.sha256(key).digest(), "big"))
     return prompt[:-tail_tokens] + rng.choices(vocab, k=tail_tokens)
 
