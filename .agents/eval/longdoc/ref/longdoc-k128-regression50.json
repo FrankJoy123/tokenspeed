@@ -1,0 +1,376 @@
+{
+  "dataset": "ZhaoweiWang/MMLongBench",
+  "dataset_revision": "746b5c42518390e5c3b71d168d0dc49c78824142",
+  "source_path": "mmlb_data_example/documentQA/mmlongdoc_K128.jsonl",
+  "source_sha256": "57f3bb74a461f431d5fa5cb8cbef941dc495efd47805b178e9a446303689d676",
+  "prompt_source_sha256": "c5cad07895e38ac9eb82ae26b2e4ccbd70ffc83a84334f571661c0459d0d34e0",
+  "scorer_source_sha256": "23f3152cbb45eb2fa08d8f4e19593bfe0e4e76b01cbef39a3a94495741e58fbf",
+  "selection": {
+    "version": "regression50-v1",
+    "method": "Sort the frozen 200 sample IDs by SHA256(namespace + colon + ID), take first 50, then sort selected IDs lexicographically; no model scores used.",
+    "namespace": "dsv41-k128-regression50-v1",
+    "count": 50,
+    "candidate_count": 200,
+    "parent_manifest_sha256": "83c38b6f67fdc25d9a09d05047f5f6b936d2c2713734fd1fd457d3a600987b17",
+    "parent_manifest_path": "longdoc-k128-subset200.json"
+  },
+  "samples": [
+    {
+      "id": "mmlongdoc_103",
+      "document": "bariumswallowpresentation-090810084400-phpapp01_95",
+      "image_count": 57,
+      "author_input_tokens": 129864,
+      "row_sha256": "a2cf9b8db868884efea2b8a443b367060dc5297ea268f02ad1f263d6a57241cb"
+    },
+    {
+      "id": "mmlongdoc_124",
+      "document": "2210.02442v1",
+      "image_count": 51,
+      "author_input_tokens": 129499,
+      "row_sha256": "5aac84c8c492ce81c1f50844cb9ab024da6ac9ebe4b6b637f79d045155d58f45"
+    },
+    {
+      "id": "mmlongdoc_153",
+      "document": "2312.04350v3",
+      "image_count": 51,
+      "author_input_tokens": 129504,
+      "row_sha256": "1bfb019e5da31df6565f6cd78f30a5f675b6bb0bd6c3a9f25b596e317560d750"
+    },
+    {
+      "id": "mmlongdoc_166",
+      "document": "PH_2016.06.08_Economy-Final",
+      "image_count": 51,
+      "author_input_tokens": 129089,
+      "row_sha256": "b3f2a37f8c31ccebee51559c4dd5f6724ebd998bd0e6664c249f32f8587ff892"
+    },
+    {
+      "id": "mmlongdoc_169",
+      "document": "Independents-Report",
+      "image_count": 51,
+      "author_input_tokens": 129282,
+      "row_sha256": "0bbbf3de024eefd98a72514dd048d33060d11dd8deb518c5346b325c8d97d07b"
+    },
+    {
+      "id": "mmlongdoc_182",
+      "document": "honor_watch_gs_pro",
+      "image_count": 60,
+      "author_input_tokens": 129957,
+      "row_sha256": "93c509ddc26acf575394b51c955525c8448ad2c5202a661c4d3895893c30535e"
+    },
+    {
+      "id": "mmlongdoc_194",
+      "document": "379f44022bb27aa53efd5d322c7b57bf",
+      "image_count": 51,
+      "author_input_tokens": 129757,
+      "row_sha256": "9b3d270cd4c9bf73d85b58146890877295297d0d45c944b19d2889308fb93b68"
+    },
+    {
+      "id": "mmlongdoc_20",
+      "document": "honor_watch_gs_pro",
+      "image_count": 54,
+      "author_input_tokens": 129449,
+      "row_sha256": "9480e737bef768444ff96bd649b63ad62e5c513ebb9fd5d4e7936c4defb15a3b"
+    },
+    {
+      "id": "mmlongdoc_204",
+      "document": "finalmediafindingspdf-141228031149-conversion-gate02_95",
+      "image_count": 59,
+      "author_input_tokens": 129499,
+      "row_sha256": "5d5d24588269136261d6f031cb683816b601f97948529a73d70f51bd5e3ca606"
+    },
+    {
+      "id": "mmlongdoc_222",
+      "document": "0b85477387a9d0cc33fca0f4becaa0e5",
+      "image_count": 48,
+      "author_input_tokens": 130023,
+      "row_sha256": "6478adea38b9a487632337802fc8c072d9edb735467d536ce9245936c427993d"
+    },
+    {
+      "id": "mmlongdoc_245",
+      "document": "2305.13186v3",
+      "image_count": 51,
+      "author_input_tokens": 129836,
+      "row_sha256": "631d3cfb558385d40fb88935ec58bde5b8a271caf01ba7a23327c23a48ff3563"
+    },
+    {
+      "id": "mmlongdoc_299",
+      "document": "User_Manual_1500S_Classic_EN",
+      "image_count": 102,
+      "author_input_tokens": 130891,
+      "row_sha256": "365fdddfdc2a5133088fbe4758e08cd396a0be8c98463e1064b182da5a74eeac"
+    },
+    {
+      "id": "mmlongdoc_328",
+      "document": "a5879805d70c854ea4361e43a84e3bb2",
+      "image_count": 51,
+      "author_input_tokens": 129546,
+      "row_sha256": "29ed67f373da937a8a7e07d849d6e9a3080d5f2fae2fd186960d27d85837a106"
+    },
+    {
+      "id": "mmlongdoc_396",
+      "document": "PI_2017.10.04_Automation_FINAL",
+      "image_count": 51,
+      "author_input_tokens": 129627,
+      "row_sha256": "44aaa6f43e1a74426e1847cdaf9dfb95d6b8dd6c9e9d2162e34b71809f50e1a8"
+    },
+    {
+      "id": "mmlongdoc_483",
+      "document": "NETFLIX_2015_10K",
+      "image_count": 51,
+      "author_input_tokens": 129530,
+      "row_sha256": "3742fceaa58fd28225b30888797b726b7aa5746cc5ca72d367032d148ad3d3ce"
+    },
+    {
+      "id": "mmlongdoc_493",
+      "document": "3M_2018_10K",
+      "image_count": 51,
+      "author_input_tokens": 129492,
+      "row_sha256": "0718c550c21d76a181642ef2459cd8f0c2a160f1f5468948d3d00fb9d7526153"
+    },
+    {
+      "id": "mmlongdoc_501",
+      "document": "PG_2020.03.09_US-Germany_FINAL",
+      "image_count": 55,
+      "author_input_tokens": 130890,
+      "row_sha256": "1b891c1f033ffc255bc7cb7c5b5129a17e785c46c6e61dc297eccf5a26e655e6"
+    },
+    {
+      "id": "mmlongdoc_509",
+      "document": "2311.16502v3",
+      "image_count": 51,
+      "author_input_tokens": 129534,
+      "row_sha256": "de9453f810c566df1129a59a4f45562f67818fe49d4a0c13de951754018035fd"
+    },
+    {
+      "id": "mmlongdoc_554",
+      "document": "2309.17421v2",
+      "image_count": 51,
+      "author_input_tokens": 129583,
+      "row_sha256": "4aa74aec6daf5370f3143ff86765bccf3670c90b62de97cab37d6788033206b5"
+    },
+    {
+      "id": "mmlongdoc_561",
+      "document": "earthlinkweb-150213112111-conversion-gate02_95",
+      "image_count": 56,
+      "author_input_tokens": 130773,
+      "row_sha256": "6fbcc251c1a6ec6181d3fadda08cbe4a1e060c14698e4394768c874611fc6006"
+    },
+    {
+      "id": "mmlongdoc_575",
+      "document": "f86d073b0d735ac873a65d906ba82758",
+      "image_count": 49,
+      "author_input_tokens": 129571,
+      "row_sha256": "afa668f610cdd4cb348710dac19a3738467197afe405b243c42b858bdd28f60b"
+    },
+    {
+      "id": "mmlongdoc_609",
+      "document": "AMAZON_2017_10K",
+      "image_count": 51,
+      "author_input_tokens": 129544,
+      "row_sha256": "1261df8660f845b903d8aeb7a884d504f95b9112e6a373b30aa21ddf7fc4df63"
+    },
+    {
+      "id": "mmlongdoc_621",
+      "document": "BESTBUY_2023_10K",
+      "image_count": 51,
+      "author_input_tokens": 129501,
+      "row_sha256": "12f1dd29b30581583a64f4344415f2d58f8f756fb4094b981ce7c66f4e2fd27b"
+    },
+    {
+      "id": "mmlongdoc_683",
+      "document": "indonesiamobilemarketresearch-ag-150106055934-conversion-gate02_95",
+      "image_count": 58,
+      "author_input_tokens": 129862,
+      "row_sha256": "0378c70150e615b8c8c33ccf60bd734eec267f2ba1d6b289022a181f3f41ea60"
+    },
+    {
+      "id": "mmlongdoc_7",
+      "document": "fdac8d1e9ef56519371df7e6532df27d",
+      "image_count": 55,
+      "author_input_tokens": 130876,
+      "row_sha256": "c3ad73002fbb496f4165d5bcda7d21fd5d34ad3506333dca5df94e284f7fd5cb"
+    },
+    {
+      "id": "mmlongdoc_712",
+      "document": "afe620b9beac86c1027b96d31d396407",
+      "image_count": 51,
+      "author_input_tokens": 129712,
+      "row_sha256": "107587aae317b9fd70686b766455637b3e54a7d79fd6723bccac53537a506363"
+    },
+    {
+      "id": "mmlongdoc_717",
+      "document": "e79deb02a0c0e87511080836c5d4347b",
+      "image_count": 48,
+      "author_input_tokens": 129995,
+      "row_sha256": "576ae501c494f01d24564b56395c8f8bd59fcba58f7434b3efbabfb668571f1a"
+    },
+    {
+      "id": "mmlongdoc_73",
+      "document": "8dfc21ec151fb9d3578fc32d5c4e5df9",
+      "image_count": 51,
+      "author_input_tokens": 129605,
+      "row_sha256": "207e5630bc630a15e80cc3ea7701390e88f2f37f452bde309704ce00dad0882a"
+    },
+    {
+      "id": "mmlongdoc_730",
+      "document": "catvsdogdlpycon15se-150512122612-lva1-app6891_95",
+      "image_count": 57,
+      "author_input_tokens": 129891,
+      "row_sha256": "d98a1394360094135c9bcf7b4021f0af171ae085a0c06cdfe965c2b1df24c63a"
+    },
+    {
+      "id": "mmlongdoc_738",
+      "document": "t480_ug_en",
+      "image_count": 51,
+      "author_input_tokens": 129263,
+      "row_sha256": "501d406ee5a5d9686f914a66b7d11759aacbc061c3f79d6b012d61e930db7beb"
+    },
+    {
+      "id": "mmlongdoc_748",
+      "document": "8dfc21ec151fb9d3578fc32d5c4e5df9",
+      "image_count": 63,
+      "author_input_tokens": 131037,
+      "row_sha256": "cd5d30068ef95cd3f08a2139ce78089ccdc5e2e19d2ae17f90f3fbcb9c7aeb19"
+    },
+    {
+      "id": "mmlongdoc_751",
+      "document": "measuringsuccessonfacebooktwitterlinkedin-160317142140_95",
+      "image_count": 64,
+      "author_input_tokens": 130928,
+      "row_sha256": "ac2f2a13e49af38d8bf8005f0a11221348d25a759b6ed8992cefbd9cd894cc9a"
+    },
+    {
+      "id": "mmlongdoc_767",
+      "document": "3276a5b991c49cf5f9a4af0f7d6fce67",
+      "image_count": 48,
+      "author_input_tokens": 130091,
+      "row_sha256": "913812ab42463c80e98c1675e9997590ac302bb04b9dc571cc2a190a374529b0"
+    },
+    {
+      "id": "mmlongdoc_777",
+      "document": "2023.acl-long.386",
+      "image_count": 54,
+      "author_input_tokens": 130900,
+      "row_sha256": "2fd4b398c33ad66e5b028c9e09b15d32aa3ee54c1a3afeee155464029348d61a"
+    },
+    {
+      "id": "mmlongdoc_790",
+      "document": "11-21-16-Updated-Post-Election-Release",
+      "image_count": 52,
+      "author_input_tokens": 130145,
+      "row_sha256": "a4542ada70f6cdd41bfd117b334eeae170c91e255bc527d9183b13265e26d674"
+    },
+    {
+      "id": "mmlongdoc_808",
+      "document": "2210.02442v1",
+      "image_count": 51,
+      "author_input_tokens": 129553,
+      "row_sha256": "e7ce4ce561d32f51546e9f8e1a3441e12248cc05cde0f7b86bfb0bfa1895d295"
+    },
+    {
+      "id": "mmlongdoc_856",
+      "document": "2401.18059v1",
+      "image_count": 51,
+      "author_input_tokens": 129510,
+      "row_sha256": "be36b063ea47e6f52d833049bcb5a73262d6434a1ba6df2d802d6c9c7ca09c21"
+    },
+    {
+      "id": "mmlongdoc_864",
+      "document": "PG_2020.03.09_US-Germany_FINAL",
+      "image_count": 51,
+      "author_input_tokens": 129630,
+      "row_sha256": "5110e12302263b5a77ec27a4c80fe3fa62f7f43a6611465a00a4a5e9e58eb017"
+    },
+    {
+      "id": "mmlongdoc_87",
+      "document": "StudentSupport_Guidebook",
+      "image_count": 86,
+      "author_input_tokens": 130346,
+      "row_sha256": "f619feae2bbdb9701188d7cc8748de8e99148cd2110aab43c4d889c930246bbc"
+    },
+    {
+      "id": "mmlongdoc_874",
+      "document": "PIP_Seniors-and-Tech-Use_040314",
+      "image_count": 51,
+      "author_input_tokens": 128975,
+      "row_sha256": "1b93c0624d54baa9e44289531d2d6ed423f08f15b8ea7b8ddf321e3feee36b55"
+    },
+    {
+      "id": "mmlongdoc_876",
+      "document": "698bba535087fa9a7f9009e172a7f763",
+      "image_count": 52,
+      "author_input_tokens": 129514,
+      "row_sha256": "5896f84dfbeee715e800459743acb332cff16771bdd52c3cb27ac3ab257a01a2"
+    },
+    {
+      "id": "mmlongdoc_883",
+      "document": "2305.13186v3",
+      "image_count": 51,
+      "author_input_tokens": 129589,
+      "row_sha256": "a6c943efc0377b180a765ca7df772228359bc31b03e337abe413347406199d66"
+    },
+    {
+      "id": "mmlongdoc_891",
+      "document": "afe620b9beac86c1027b96d31d396407",
+      "image_count": 51,
+      "author_input_tokens": 129717,
+      "row_sha256": "8a3f7c4ca0369823726c976f00fc4243fd6459a9ef83b01745aed4385c8c771e"
+    },
+    {
+      "id": "mmlongdoc_896",
+      "document": "e79deb02a0c0e87511080836c5d4347b",
+      "image_count": 51,
+      "author_input_tokens": 129562,
+      "row_sha256": "efccee295ebc4016b461c3f2dcbe1e1eee293e75326949ca7ee9e9eb173d1cf2"
+    },
+    {
+      "id": "mmlongdoc_900",
+      "document": "catvsdogdlpycon15se-150512122612-lva1-app6891_95",
+      "image_count": 57,
+      "author_input_tokens": 129890,
+      "row_sha256": "80b04d14129c5a6e066dfdbe10e24a559a1308f139ba6972bdfad2c7db35b721"
+    },
+    {
+      "id": "mmlongdoc_902",
+      "document": "User_Manual_1500S_Classic_EN",
+      "image_count": 102,
+      "author_input_tokens": 130912,
+      "row_sha256": "c08103259156fe38b84bd8d1f5a5250fb078a33f71f4745b38b534ba69b7a804"
+    },
+    {
+      "id": "mmlongdoc_914",
+      "document": "earthlinkweb-150213112111-conversion-gate02_95",
+      "image_count": 56,
+      "author_input_tokens": 130760,
+      "row_sha256": "764723ecf9cdd33f2155b80be9ffc31a645e2afbaebcadba8b496138ef823d9c"
+    },
+    {
+      "id": "mmlongdoc_915",
+      "document": "2023.acl-long.386",
+      "image_count": 51,
+      "author_input_tokens": 129508,
+      "row_sha256": "c42c014a4946efa5fa9f80dde54dc6538561bbc7c95f2937c65d811154c96283"
+    },
+    {
+      "id": "mmlongdoc_927",
+      "document": "formwork-150318073913-conversion-gate01_95",
+      "image_count": 75,
+      "author_input_tokens": 129734,
+      "row_sha256": "d8f29232cc6dcce6716d30ffd498403b50c13de58bb33c859c623355f6808745"
+    },
+    {
+      "id": "mmlongdoc_956",
+      "document": "mi_phone",
+      "image_count": 51,
+      "author_input_tokens": 128785,
+      "row_sha256": "682bfaa1a5ff11f1cd4fd0a2ce0396ad5d1b9b7a9ad28433c8c948a07562d378"
+    }
+  ],
+  "images": {
+    "repo": "ZhaoweiWang/image_collection",
+    "revision": "8ac10b4891a920c328ac431e1589e5a7068f0e63",
+    "resize": false,
+    "inventory_sha256": "d3e18aa5586ed21c23b15149c3dcd5fbc9c696b8430720134c1cdae2db475373",
+    "unique_images": 1952
+  }
+}

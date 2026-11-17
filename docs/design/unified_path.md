@@ -2258,9 +2258,11 @@ memory use and performance in addition to kernel correctness.
 ## Query context parallelism
 
 `--query-context-parallel-size N` (`mapping.attn.qcp_*`, `N ==
-attn.tp_size == attn.kvp_size`) shards every extend forward of a PD prefill
-engine over the attention TP group, over the pages `--kv-parallel-size N`
-shards. One forward, one path: the scheduler plans the whole
+attn.tp_size`) shards extend rows over the attention TP group. The PD
+Prefill role accepts sharded KV (`--kv-parallel-size N`) or replicated KV
+when the model supports it. V4.1 also admits aggregated (`null`) engines for
+independent Prefill measurements; pure Decode rounds keep replicated rows
+and carry no query shard. One forward, one path: the scheduler plans the whole
 chunk on every rank, the executor builds a `QueryShardPlan` from the request
 lengths (`execution/query_shard.py`) and puts it on
 `ForwardContext.query_shard`. The shard is zigzag per request: every
@@ -2568,8 +2570,8 @@ backend declares `CudaGraphSupport(prefill_graph=False)` under a query shard
 and the executor never captures one (it also refuses to replay a prefill
 graph for a sharded forward). A graph-capable form needs equal padding on
 every rank so the gathers are even collectives inside the captured segment.
-Each rule lives once: the prefill role and `--kv-parallel-size` equal to the
-shard in `validate_context_parallel_roles`; MIXED rounds, attention DP and
+Each rule lives once: the admitted roles and, when KVP is enabled,
+`--kv-parallel-size` equal to the shard in `validate_context_parallel_roles`; MIXED rounds, attention DP and
 dense / MoE groups that are neither 1 nor the attention TP width in
 `validate_qcp`; the shard width (`N == attn.tp_size`) in `Mapping`; and the
 attention family (GPU DSA), device, and KV cache (bf16: the gathered write is

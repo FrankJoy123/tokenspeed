@@ -1,0 +1,6 @@
+{
+  "patches": {
+    "deepgemm.patch": "51ad067d2d0faebfd845a77b4571095cf1f214fbb9c9432f83faf7fb2476cab6",
+    "elastic-rdma-tuner.patch": "e4bf89c82a963d7e9f2a906135f2be6f70e838bca10f98c6419d09554dbadf0b"
+  }
+}

@@ -1,0 +1,947 @@
+--- a/csrc/kernels/legacy/api.cuh
++++ b/csrc/kernels/legacy/api.cuh
+@@ -256,9 +256,11 @@
+                               int num_ranks,
+                               int* mask_buffer,
+                               int* sync_buffer,
+-                              cudaStream_t stream);
++                              cudaStream_t stream,
++                              int64_t* layout_state, int64_t layout_key);
+
+ void dispatch(void* packed_recv_x,
++              float* packed_recv_global_scales,
+               void* packed_recv_x_scales,
+               int* packed_recv_src_info,
+               int64_t* packed_recv_layout_range,
+@@ -281,6 +283,7 @@
+               int rank,
+               int num_ranks,
+               bool use_fp8,
++              bool use_nvfp4,
+               bool round_scale,
+               bool use_ue8m0,
+               void* workspace,
+@@ -309,6 +312,7 @@
+              int rank,
+              int num_ranks,
+              bool use_logfmt,
++             bool use_fp8,
+              void* workspace,
+              int num_device_sms,
+              cudaStream_t stream,
+--- a/csrc/kernels/legacy/internode_ll.cu
++++ b/csrc/kernels/legacy/internode_ll.cu
+@@ -1,4 +1,5 @@
+ #include "compiled.cuh"
++#include <cuda_fp4.h>
+ #include "ibgda_device.cuh"
+ #include "launch.cuh"
+
+@@ -76,8 +77,16 @@
+                                                                            int rank,
+                                                                            int num_ranks,
+                                                                            int* mask_buffer_ptr,
+-                                                                           int* sync_buffer_ptr) {
++                                                                           int* sync_buffer_ptr,
++                                                                           int64_t* layout_state, int64_t layout_key) {
+     auto thread_id = static_cast<int>(threadIdx.x);
++    // The single CTA reads one uniform decision, including graph replay.
++    // All ranks must use the same layout sequence and one serialized stream.
++    __shared__ int skip_clean;
++    if (thread_id == 0)
++        skip_clean = layout_state != nullptr && layout_state[0] == layout_key;
++    __syncthreads();
++    if (skip_clean) return;
+
+     // Barrier before cleaning (in case of unfinished chunked EP)
+     if (sync_buffer_ptr == nullptr)
+@@ -98,6 +107,11 @@
+         nvshmemx_barrier_all_block();
+     else
+         barrier<kNumThreads>(thread_id, rank, num_ranks, mask_buffer_ptr, sync_buffer_ptr);
++    __syncthreads();
++    if (thread_id == 0 && layout_state != nullptr) {
++        layout_state[0] = layout_key;
++        layout_state[1] += 1;
++    }
+ }
+
+ void clean_low_latency_buffer(int* clean_0,
+@@ -108,7 +122,7 @@
+                               int num_ranks,
+                               int* mask_buffer_ptr,
+                               int* sync_buffer_ptr,
+-                              cudaStream_t stream) {
++                              cudaStream_t stream, int64_t* layout_state, int64_t layout_key) {
+     constexpr int kNumThreads = 256;
+
+     SETUP_LAUNCH_CONFIG(1, kNumThreads, stream);
+@@ -122,11 +136,12 @@
+                   rank,
+                   num_ranks,
+                   mask_buffer_ptr,
+-                  sync_buffer_ptr);
+-}
+-
+-template <bool kUseFP8, bool kUseUE8M0, int kHidden>
++                  sync_buffer_ptr, layout_state, layout_key);
++}
++
++template <bool kUseFP8, bool kUseUE8M0, bool kUseNVFP4, int kHidden>
+ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
++                                                    float* packed_recv_global_scales,
+                                                     void* packed_recv_x_scales,
+                                                     int* packed_recv_src_info,
+                                                     int64_t* packed_recv_layout_range,
+@@ -169,21 +184,22 @@
+     EP_STATIC_ASSERT(sizeof(packed_t) % sizeof(scale_t) == 0, "Invalid vector length");
+
+     // FP8 staffs
+-    constexpr int kNumPerChannels = 128;
++    constexpr int kNumPerChannels = kUseNVFP4 ? 16 : 128;
+     const int num_scales = kHidden / kNumPerChannels;
+-    const size_t hidden_bytes = kHidden * (kUseFP8 ? sizeof(__nv_fp8_storage_t) : sizeof(nv_bfloat16));
++    const size_t hidden_bytes = kUseNVFP4 ? kHidden / 2 : kHidden * (kUseFP8 ? sizeof(__nv_fp8_storage_t) : sizeof(nv_bfloat16));
+     const size_t hidden_int4 = hidden_bytes / sizeof(int4);
+
+     // Message package: index at source (int), 3 reserved int fields, hidden data, FP8 scales
+     // NOTES: currently we have 3 reserved int fields for future use
+-    using vec_t = std::conditional_t<kUseFP8, int2, int4>;
+-    const size_t num_bytes_per_msg = sizeof(int4) + (kUseFP8 ? (kHidden + num_scales * sizeof(float)) : (kHidden * sizeof(nv_bfloat16)));
++    using vec_t = std::conditional_t<kUseNVFP4, uint32_t, std::conditional_t<kUseFP8, int2, int4>>;
++    const size_t num_bytes_per_msg = sizeof(int4) + hidden_bytes + (kUseNVFP4 ? num_scales : (kUseFP8 ? num_scales * sizeof(float) : 0));
+     const size_t num_int4_per_msg = num_bytes_per_msg / sizeof(int4);
+     EP_DEVICE_ASSERT(num_bytes_per_msg % sizeof(int4) == 0);
+
+     // Expert counts
+     constexpr int kNumMaxWarpGroups = 32;
+     __shared__ int shared_num_tokens_sent_per_expert[kNumMaxWarpGroups];
++    __shared__ float shared_token_amax[32];
+
+     // Sending phase
+     if ((phases & LEGACY_LOW_LATENCY_SEND_PHASE) == 0)
+@@ -209,7 +225,33 @@
+             auto dst_expert_idx = warp_id < num_topk ? static_cast<int>(__ldg(topk_idx + token_idx * num_topk + warp_id)) : -1;
+             thread_id == 0 ? (*rdma_x_src_idx = token_idx) : 0;
+
+-            // FP8 cast
++            // Per-token tensor scale stays on the wire, avoiding a rank-wide amax collective.
++            float global_scale = 1.0f;
++            if constexpr (kUseNVFP4) {
++                float local_amax = 0.0f;
++                for (int i = thread_id; i < hidden_bf16_int4; i += num_threads) {
++                    auto values = __ldg(x_int4 + i);
++                    auto bf16 = reinterpret_cast<nv_bfloat16*>(&values);
++                    #pragma unroll
++                    for (int j = 0; j < kNumElemsPerRead; ++j)
++                        local_amax = fmaxf(local_amax, fabsf(static_cast<float>(bf16[j])));
++                }
++                local_amax = warp_reduce_max<32>(local_amax);
++                if (lane_id == 0)
++                    shared_token_amax[warp_id] = local_amax;
++                asm volatile("bar.sync 1, %0;" ::"r"(num_threads));
++                if (thread_id == 0) {
++                    float token_amax = 0.0f;
++                    for (int warp = 0; warp < num_warps - 1; ++warp)
++                        token_amax = fmaxf(token_amax, shared_token_amax[warp]);
++                    shared_token_amax[0] = fmaxf(token_amax, 1.0e-12f) / (6.0f * 448.0f);
++                    reinterpret_cast<float*>(rdma_x_src_idx)[1] = shared_token_amax[0];
++                }
++                asm volatile("bar.sync 1, %0;" ::"r"(num_threads));
++                global_scale = shared_token_amax[0];
++            }
++
++            // FP8/NVFP4 cast
+             EP_STATIC_ASSERT(hidden_bf16_int4 % 32 == 0, "Must use the full warp to reduce");
+             #pragma unroll
+             for (int i = thread_id; i < hidden_bf16_int4; i += num_threads) {
+@@ -243,6 +285,28 @@
+                         fp8x2_values[j / 2] = __nv_cvt_float2_to_fp8x2(fp32x2, __NV_SATFINITE, __NV_E4M3);
+                     }
+                     rdma_x_vec[i] = int2_value;
++                } else if constexpr (kUseNVFP4) {
++                    auto bf16 = reinterpret_cast<nv_bfloat16*>(&int4_value);
++                    float values[kNumElemsPerRead];
++                    float amax = 0.0f;
++                    #pragma unroll
++                    for (int j = 0; j < kNumElemsPerRead; ++j) {
++                        values[j] = static_cast<float>(bf16[j]);
++                        amax = fmaxf(amax, fabsf(values[j]));
++                    }
++                    amax = warp_reduce_max<2>(amax);
++                    __nv_fp8_e4m3 block_scale(fminf(448.0f, amax / (6.0f * global_scale)));
++                    float scale = static_cast<float>(block_scale) * global_scale;
++                    float scale_inv = scale > 0.0f ? 1.0f / scale : 0.0f;
++                    if (lane_id % 2 == 0)
++                        reinterpret_cast<uint8_t*>(rdma_x_scales)[i / 2] = block_scale.__x;
++                    uint32_t packed = 0;
++                    #pragma unroll
++                    for (int j = 0; j < kNumElemsPerRead; j += 2) {
++                        float2 pair = {values[j] * scale_inv, values[j + 1] * scale_inv};
++                        packed |= static_cast<uint32_t>(__nv_cvt_float2_to_fp4x2(pair, __NV_E2M1, cudaRoundNearest)) << (j * 4);
++                    }
++                    rdma_x_vec[i] = packed;
+                 } else {
+                     // Reinterpret-cast is for C++14 compatibility
+                     rdma_x_vec[i] = *reinterpret_cast<vec_t*>(&int4_value);
+@@ -421,7 +485,7 @@
+         recv_token_begin_idx = shared_recv_token_begin_idx[warp_group_id];
+
+         // Copy tokens
+-        EP_DEVICE_ASSERT(num_scales <= 64);
++        EP_DEVICE_ASSERT(kUseNVFP4 or num_scales <= 64);
+         for (int i = sub_warp_id; i < num_recv_tokens; i += num_warps_per_group) {
+             // Copy source info
+             const auto src_src_idx = reinterpret_cast<int*>(rdma_recv_x_uint8 + i * num_bytes_per_msg);
+@@ -435,7 +499,19 @@
+             const auto dst_data = recv_x_int4 + (recv_token_begin_idx + i) * hidden_int4;
+             UNROLLED_WARP_COPY(7, lane_id, hidden_int4, dst_data, src_data, ld_nc_global, st_na_global);
+
+-            // Copy scales
++            // Copy the per-token tensor scale and linear E4M3 block scales.
++            if constexpr (kUseNVFP4) {
++                if (lane_id == 0)
++                    packed_recv_global_scales[local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank + recv_token_begin_idx + i] =
++                        ld_nc_global(reinterpret_cast<const float*>(src_src_idx) + 1);
++                const auto source = reinterpret_cast<const uint8_t*>(src_data) + hidden_bytes;
++                auto dest = static_cast<uint8_t*>(packed_recv_x_scales) +
++                    (local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank + recv_token_begin_idx + i) * num_scales;
++                for (int j = lane_id; j < num_scales; j += 32)
++                    dest[j] = ld_nc_global(source + j);
++            }
++
++            // Copy FP8 scales
+             if constexpr (kUseFP8) {
+                 // Equivalent CuTe layout:
+                 //   (num_tokens, (num_packed, num_elems_per_pack)):(num_elems_per_pack, (num_tokens * num_elems_per_pack, 1))
+@@ -462,6 +538,7 @@
+ }
+
+ void dispatch(void* packed_recv_x,
++              float* packed_recv_global_scales,
+               void* packed_recv_x_scales,
+               int* packed_recv_src_info,
+               int64_t* packed_recv_layout_range,
+@@ -484,6 +561,7 @@
+               int rank,
+               int num_ranks,
+               bool use_fp8,
++              bool use_nvfp4,
+               bool round_scale,
+               bool use_ue8m0,
+               void* workspace,
+@@ -505,20 +583,25 @@
+     auto atomic_finish_counter_per_expert = atomic_counter_per_expert + num_experts;
+     EP_HOST_ASSERT(num_experts * sizeof(int) * 2 <= LEGACY_NUM_WORKSPACE_BYTES);
+
++    EP_HOST_ASSERT(not(use_fp8 and use_nvfp4));
++
+     // FP8 checks
+     if (use_ue8m0)
+         EP_HOST_ASSERT(round_scale and "UE8M0 SF requires `round_scale=True`");
+
+ #define DISPATCH_LAUNCH_CASE(hidden)                         \
+     {                                                        \
+-        auto dispatch_func = dispatch<false, false, hidden>; \
++        auto dispatch_func = dispatch<false, false, false, hidden>; \
+         if (use_fp8 and not use_ue8m0)                       \
+-            dispatch_func = dispatch<true, false, hidden>;   \
++            dispatch_func = dispatch<true, false, false, hidden>;   \
+         if (use_fp8 and use_ue8m0)                           \
+-            dispatch_func = dispatch<true, true, hidden>;    \
++            dispatch_func = dispatch<true, true, false, hidden>;    \
++        if (use_nvfp4)                                      \
++            dispatch_func = dispatch<false, false, true, hidden>; \
+         LAUNCH_KERNEL(&cfg,                                  \
+                       dispatch_func,                         \
+                       packed_recv_x,                         \
++                      packed_recv_global_scales,              \
+                       packed_recv_x_scales,                  \
+                       packed_recv_src_info,                  \
+                       packed_recv_layout_range,              \
+@@ -711,7 +794,41 @@
+     }
+ }
+
+-template <bool kUseLogFMT, int kHidden, int kNumMaxTopk, int kNumMaxUnrolls>
++// Compress a staged BF16 warp tile to E4M3 with FP32 1x128 scales.
++template <int kUnrolls>
++__forceinline__ __device__ int fp8_encode(void* buffer, float* scales, int lane) {
++    constexpr int kValues = kUnrolls * 8;
++    constexpr int kLanesPerScale = 128 / kValues;
++    float values[kValues];
++    float amax = 1.0e-12f;
++    auto input = static_cast<nv_bfloat16*>(buffer) + lane * kValues;
++    #pragma unroll
++    for (int j = 0; j < kValues; ++j) {
++        values[j] = static_cast<float>(input[j]);
++        amax = fmaxf(amax, fabsf(values[j]));
++    }
++    amax = warp_reduce_max<kLanesPerScale>(amax);
++    float scale = amax / 448.0f;
++    if (lane % kLanesPerScale == 0)
++        scales[lane / kLanesPerScale] = scale;
++    // Every lane has read its BF16 values before writing the overlapping FP8 tile.
++    __syncwarp();
++    auto output = static_cast<uint8_t*>(buffer) + lane * kValues;
++    #pragma unroll
++    for (int j = 0; j < kValues; ++j)
++        output[j] = __nv_fp8_e4m3(values[j] / scale).__x;
++    __syncwarp();
++    return 32 * kValues;
++}
++
++// Upper bound of the combine send-phase unroll. Each of the 32 warps stages
++// 3 x (32 x unroll x 16 B) in shared memory: unroll 4 needs ~200 KB (SM90/SM100),
++// while SM120 allows ~99 KB per block, so SM120 builds pass 2.
++#ifndef EP_LL_COMBINE_MAX_SEND_UNROLLS
++#define EP_LL_COMBINE_MAX_SEND_UNROLLS 4
++#endif
++
++template <bool kUseLogFMT, bool kUseFP8, int kHidden, int kNumMaxTopk, int kNumMaxUnrolls>
+ __global__ __launch_bounds__(1024, 1) void combine(void* combined_x,
+                                                    void* rdma_recv_x,
+                                                    int* rdma_recv_flag,
+@@ -754,7 +871,8 @@
+     constexpr int64_t hidden_bf16_int4 = kHidden / kNumElemsPerInt4;
+
+     // Use different unroll factors for send and recv phases
+-    constexpr int kNumSendUnrolls = kHidden % (32 * 4 * sizeof(int4) / sizeof(nv_bfloat16)) == 0 ? 4 : 2;
++    constexpr int kNumSendUnrolls =
++        (EP_LL_COMBINE_MAX_SEND_UNROLLS >= 4 and kHidden % (32 * 4 * sizeof(int4) / sizeof(nv_bfloat16)) == 0) ? 4 : 2;
+     constexpr int kNumRecvUnrolls = 2;
+     constexpr int hidden_bf16_int4_pad = align_up(static_cast<int>(hidden_bf16_int4), 32 * kNumSendUnrolls);
+     EP_STATIC_ASSERT(kHidden % (32 * 2 * sizeof(int4) / sizeof(nv_bfloat16)) == 0, "Invalid hidden");
+@@ -807,12 +925,13 @@
+         constexpr int kNumPrefetch = 1;
+         EP_STATIC_ASSERT(kNumStages == 3 and kNumPrefetch == 1, "Invalid stages");
+
+-        auto smem_ptr = smem_buffer + warp_id * (kNumStages * (kNumTMABufferBytes + 16) + kNumMetaBytes);
++        // The meta staging area is only read by the LogFMT path
++        auto smem_ptr = smem_buffer + warp_id * (kNumStages * (kNumTMABufferBytes + 16) + ((kUseLogFMT or kUseFP8) ? kNumMetaBytes : 0));
+         uint32_t tma_phase = 0;
+         auto tma_buffers = PatternVisitor([=](const int& i) { return reinterpret_cast<int4*>(smem_ptr + i * (kNumTMABufferBytes + 16)); });
+         auto full_barriers = PatternVisitor(
+             [=](const int& i) { return reinterpret_cast<uint64_t*>(smem_ptr + i * (kNumTMABufferBytes + 16) + kNumTMABufferBytes); });
+-        auto meta_buffers = kUseLogFMT ? reinterpret_cast<nv_bfloat162*>(smem_ptr + kNumStages * (kNumTMABufferBytes + 16)) : nullptr;
++        auto meta_buffers = (kUseLogFMT or kUseFP8) ? reinterpret_cast<nv_bfloat162*>(smem_ptr + kNumStages * (kNumTMABufferBytes + 16)) : nullptr;
+         EP_STATIC_ASSERT(kNumSendUnrolls * kNumStages <= 12, "TMA buffer size exceed limit");
+
+         // Initialize m-barriers
+@@ -885,6 +1004,16 @@
+                                 tma_store_1d(
+                                     tma_buffers[stage_idx], reinterpret_cast<uint8_t*>(cpy_dst_int4_ptr) + tma_offset_bytes, num_tma_bytes);
+                             tma_offset_bytes += num_tma_bytes;
++                        } else if constexpr (kUseFP8) {
++                            constexpr int kNumInt4PerScale = 128 / kNumElemsPerInt4;
++                            int tile_begin = i - lane_id * kNumSendUnrolls;
++                            int bytes = fp8_encode<kNumSendUnrolls>(
++                                tma_buffers[stage_idx],
++                                reinterpret_cast<float*>(meta_buffers) + tile_begin / kNumInt4PerScale,
++                                lane_id);
++                            if (elect_one_sync())
++                                tma_store_1d(tma_buffers[stage_idx], reinterpret_cast<uint8_t*>(cpy_dst_int4_ptr) + tma_offset_bytes, bytes);
++                            tma_offset_bytes += bytes;
+                         } else {
+                             // BF16 original values
+                             if (elect_one_sync())
+@@ -894,7 +1023,7 @@
+                     }
+
+                     // Store metadata (min/max values) for LogFMT
+-                    if constexpr (kUseLogFMT) {
++                    if constexpr (kUseLogFMT or kUseFP8) {
+                         num_send_bytes = tma_offset_bytes;
+                         if (elect_one_sync())
+                             tma_store_1d(meta_buffers, cpy_dst_int4_ptr, kNumMetaBytes);
+@@ -1053,15 +1182,20 @@
+                             cast_info_buffers[stage_idx],
+                             lane_id);
+                     }
++                    if constexpr (kUseFP8) {
++                        for (int j = lane_id; j < kHidden / 128; j += 32)
++                            log_amax_buffers[stage_idx][j] = ld_nc_global(reinterpret_cast<float*>(buffer) + j);
++                        __syncwarp();
++                    }
+                     if (elect_one_sync()) {
+                         int num_casted = 0;
+                         if constexpr (kUseLogFMT) {
+                             const auto info = cast_info_buffers[stage_idx][num_decode_warps - 1];
+                             num_casted = (info >> 1) + (info & 1);
+                         }
+-                        int num_tma_bytes = num_casted * kNumLogFMTPerWarpBytes + (num_decode_warps - num_casted) * kNumBF16PerWarpBytes;
++                        int num_tma_bytes = kUseFP8 ? kHidden : num_casted * kNumLogFMTPerWarpBytes + (num_decode_warps - num_casted) * kNumBF16PerWarpBytes;
+                         tma_load_1d(
+-                            tma_ld_buffers[stage_idx], buffer + (kUseLogFMT ? kNumMetaBytes : 0), full_barriers[stage_idx], num_tma_bytes);
++                            tma_ld_buffers[stage_idx], buffer + ((kUseLogFMT or kUseFP8) ? kNumMetaBytes : 0), full_barriers[stage_idx], num_tma_bytes);
+                         mbarrier_arrive_and_expect_tx(full_barriers[stage_idx], num_tma_bytes);
+                     }
+                     __syncwarp();
+@@ -1088,7 +1222,17 @@
+                     const auto topk_weight = __shfl_sync(0xffffffff, topk_weights_by_lane, i);
+
+                     mbarrier_wait<true>(full_barriers[stage_idx], tma_phase, stage_idx);
+-                    if constexpr (kUseLogFMT) {
++                    if constexpr (kUseFP8) {
++                        constexpr int kValues = kNumRecvUnrolls * kNumElemsPerInt4;
++                        int column = decode_warp_idx * (kNumBF16PerWarpBytes / 2) + lane_id * kValues;
++                        auto input = tma_ld_buffers[stage_idx] + column;
++                        #pragma unroll
++                        for (int j = 0; j < kValues; ++j) {
++                            __nv_fp8_e4m3 value;
++                            value.__x = input[j];
++                            combined_values[j] += static_cast<float>(value) * log_amax_buffers[stage_idx][(column + j) / 128] * topk_weight;
++                        }
++                    } else if constexpr (kUseLogFMT) {
+                         const auto info = cast_info_buffers[stage_idx][decode_warp_idx];
+                         bool enable_cast = info & 1;
+                         int num_casted_prefix = info >> 1;
+@@ -1158,6 +1302,7 @@
+              int rank,
+              int num_ranks,
+              bool use_logfmt,
++             bool use_fp8,
+              void* workspace,
+              int num_device_sms,
+              cudaStream_t stream,
+@@ -1165,7 +1310,9 @@
+              bool zero_copy) {
+     constexpr int kNumMaxTopk = 11;
+     const int num_warp_groups = ceil_div(num_experts, num_device_sms);
+-    const int num_warps_per_group = 32 / num_warp_groups;
++    // FP8 needs one scale word per 128 channels in each send warp's staging.
++    // Thirty warps keep the two-unroll SM120 path within its 99 KiB limit.
++    const int num_warps_per_group = (use_fp8 ? 30 : 32) / num_warp_groups;
+     const int num_recv_per_sm = ceil_div(num_combined_tokens, num_device_sms);
+     EP_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0 and num_recv_per_sm >= 0);
+
+@@ -1179,7 +1326,8 @@
+     EP_HOST_ASSERT(num_topk <= kNumMaxTopk);
+
+     // Online cast cannot use zero-copy
+-    EP_HOST_ASSERT(not(zero_copy and use_logfmt));
++    EP_HOST_ASSERT(not(use_logfmt and use_fp8));
++    EP_HOST_ASSERT(not(zero_copy and (use_logfmt or use_fp8)));
+
+     constexpr int kNumStages = 3;
+     constexpr int kNumMaxUnrolls = 4;
+@@ -1187,8 +1335,8 @@
+
+     // Send buffer size
+     const int num_meta_bytes = hidden / 128 * 4;
+-    const int num_send_tma_bytes = 32 * sizeof(int4) * kNumMaxUnrolls + 16;
+-    const int smem_send_size = num_warps * (kNumStages * num_send_tma_bytes + num_meta_bytes);
++    const int num_send_tma_bytes = 32 * sizeof(int4) * min(kNumMaxUnrolls, EP_LL_COMBINE_MAX_SEND_UNROLLS) + 16;
++    const int smem_send_size = num_warps * (kNumStages * num_send_tma_bytes + ((use_logfmt or use_fp8) ? num_meta_bytes : 0));
+
+     // Receive buffer size
+     const int num_recv_tma_bytes = 16 + hidden * 2;
+@@ -1200,7 +1348,8 @@
+ #define COMBINE_LAUNCH_CASE(hidden)                                                                                                \
+     {                                                                                                                              \
+         auto combine_func =                                                                                                        \
+-            use_logfmt ? combine<true, hidden, kNumMaxTopk, kNumMaxUnrolls> : combine<false, hidden, kNumMaxTopk, kNumMaxUnrolls>; \
++            use_logfmt ? combine<true, false, hidden, kNumMaxTopk, kNumMaxUnrolls> : combine<false, false, hidden, kNumMaxTopk, kNumMaxUnrolls>; \
++        if (use_fp8) combine_func = combine<false, true, hidden, kNumMaxTopk, kNumMaxUnrolls>; \
+         SET_SHARED_MEMORY_FOR_TMA(combine_func);                                                                                   \
+         LAUNCH_KERNEL(&cfg,                                                                                                        \
+                       combine_func,                                                                                                \
+--- a/csrc/legacy/buffer.hpp
++++ b/csrc/legacy/buffer.hpp
+@@ -1428,7 +1428,22 @@
+         return {combined_x, combined_topk_weights, event};
+     }
+
+-    void clean_low_latency_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts) {
++    void clean_low_latency_buffer(int capacity, int hidden, int experts) {
++        clean_low_latency_buffer_impl(capacity, hidden, experts, nullptr, 0);
++    }
++
++    void clean_low_latency_buffer_cached(int capacity, int hidden, int experts, const torch::Tensor& state) {
++        EP_HOST_ASSERT(state.is_cuda() && state.is_contiguous());
++        EP_HOST_ASSERT(state.scalar_type() == torch::kInt64 && state.numel() == 2);
++        EP_HOST_ASSERT(capacity > 0 && capacity < (1 << 20));
++        EP_HOST_ASSERT(hidden > 0 && hidden < (1 << 20));
++        EP_HOST_ASSERT(experts > 0 && experts < (1 << 23));
++        const int64_t key = int64_t(capacity) | (int64_t(hidden) << 20) | (int64_t(experts) << 40);
++        clean_low_latency_buffer_impl(capacity, hidden, experts, state.data_ptr<int64_t>(), key);
++    }
++
++    void clean_low_latency_buffer_impl(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts,
++                                       int64_t* layout_state, int64_t layout_key) {
+         EP_HOST_ASSERT(low_latency_mode);
+
+         auto layout = LowLatencyLayout(rdma_buffer_ptr, num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts);
+@@ -1450,10 +1465,11 @@
+                                                num_ranks,
+                                                mask_buffer_ptr,
+                                                sync_buffer_ptr,
+-                                               at::cuda::getCurrentCUDAStream());
++                                               at::cuda::getCurrentCUDAStream(), layout_state, layout_key);
+     }
+
+     std::tuple<torch::Tensor,
++               std::optional<torch::Tensor>,
+                std::optional<torch::Tensor>,
+                torch::Tensor,
+                torch::Tensor,
+@@ -1467,6 +1483,7 @@
+                          int num_max_dispatch_tokens_per_rank,
+                          int num_experts,
+                          bool use_fp8,
++                         bool use_nvfp4,
+                          bool round_scale,
+                          bool use_ue8m0,
+                          bool async,
+@@ -1474,6 +1491,7 @@
+         EP_HOST_ASSERT(low_latency_mode);
+
+         // Tensor checks
++        EP_HOST_ASSERT(not(use_fp8 and use_nvfp4));
+         // By default using `ptp128c` FP8 cast
+         EP_HOST_ASSERT(x.dim() == 2 and x.is_contiguous() and x.scalar_type() == torch::kBFloat16);
+         EP_HOST_ASSERT(x.size(1) % sizeof(int4) == 0 and x.size(1) % 128 == 0);
+@@ -1513,8 +1531,8 @@
+             stream_wait(launch_stream, compute_stream);
+
+         // Allocate packed tensors
+-        auto packed_recv_x = torch::empty({num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank, hidden},
+-                                          x.options().dtype(use_fp8 ? torch::kFloat8_e4m3fn : torch::kBFloat16));
++        auto packed_recv_x = torch::empty({num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank, use_nvfp4 ? hidden / 2 : hidden},
++                                          x.options().dtype(use_nvfp4 ? torch::kUInt8 : (use_fp8 ? torch::kFloat8_e4m3fn : torch::kBFloat16)));
+         auto packed_recv_src_info =
+             torch::empty({num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank}, torch::dtype(torch::kInt32).device(torch::kCUDA));
+         auto packed_recv_layout_range = torch::empty({num_local_experts, num_ranks}, torch::dtype(torch::kInt64).device(torch::kCUDA));
+@@ -1525,7 +1543,14 @@
+         void* packed_recv_x_scales_ptr = nullptr;
+         EP_HOST_ASSERT((num_ranks * num_max_dispatch_tokens_per_rank) % 4 == 0 and "TMA requires the number of tokens to be multiple of 4");
+
+-        if (use_fp8) {
++        std::optional<torch::Tensor> packed_recv_global_scales;
++        if (use_nvfp4) {
++            packed_recv_x_scales = torch::empty({num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank, hidden / 16},
++                                               x.options().dtype(torch::kFloat8_e4m3fn));
++            packed_recv_global_scales = torch::empty({num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank},
++                                                    x.options().dtype(torch::kFloat32));
++            packed_recv_x_scales_ptr = packed_recv_x_scales->data_ptr();
++        } else if (use_fp8) {
+             // TODO: support unaligned cases
+             EP_HOST_ASSERT(hidden % 512 == 0);
+             if (not use_ue8m0) {
+@@ -1545,6 +1570,7 @@
+         auto launcher = [=, this](int phases) {
+             internode_ll::dispatch(
+                 packed_recv_x.data_ptr(),
++                packed_recv_global_scales.has_value() ? packed_recv_global_scales->data_ptr<float>() : nullptr,
+                 packed_recv_x_scales_ptr,
+                 packed_recv_src_info.data_ptr<int>(),
+                 packed_recv_layout_range.data_ptr<int64_t>(),
+@@ -1567,6 +1593,7 @@
+                 rank,
+                 num_ranks,
+                 use_fp8,
++                use_nvfp4,
+                 round_scale,
+                 use_ue8m0,
+                 workspace,
+@@ -1592,7 +1619,7 @@
+             recv_hook = [=]() { launcher(LEGACY_LOW_LATENCY_RECV_PHASE); };
+
+         // Return values
+-        return {packed_recv_x, packed_recv_x_scales, packed_recv_count, packed_recv_src_info, packed_recv_layout_range, event, recv_hook};
++        return {packed_recv_x, packed_recv_x_scales, packed_recv_global_scales, packed_recv_count, packed_recv_src_info, packed_recv_layout_range, event, recv_hook};
+     }
+
+     std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::function<void()>>> low_latency_combine(
+@@ -1605,6 +1632,7 @@
+         int num_max_dispatch_tokens_per_rank,
+         int num_experts,
+         bool use_logfmt,
++        bool use_fp8,
+         bool zero_copy,
+         bool async,
+         bool return_recv_hook,
+@@ -1687,6 +1715,7 @@
+                                   rank,
+                                   num_ranks,
+                                   use_logfmt,
++                                  use_fp8,
+                                   workspace,
+                                   num_device_sms,
+                                   launch_stream,
+@@ -1783,6 +1812,7 @@
+         .def("internode_dispatch", &Buffer::internode_dispatch)
+         .def("internode_combine", &Buffer::internode_combine)
+         .def("clean_low_latency_buffer", &Buffer::clean_low_latency_buffer)
++        .def("clean_low_latency_buffer_cached", &Buffer::clean_low_latency_buffer_cached)
+         .def("low_latency_dispatch", &Buffer::low_latency_dispatch)
+         .def("low_latency_combine", &Buffer::low_latency_combine)
+         .def("low_latency_update_mask_buffer", &Buffer::low_latency_update_mask_buffer)
+--- a/deep_ep/buffers/legacy.py
++++ b/deep_ep/buffers/legacy.py
+@@ -28,6 +28,8 @@
+         runtime: the C++ runtime.
+     """
+
++    # Versioned opt-in codec ABI; legacy BF16/FP8/LogFMT calls remain available.
++    wire_format_version = 1
+     num_sms: int = 20
+
+     def __init__(self,
+@@ -549,13 +551,21 @@
+         """
+         self.runtime.clean_low_latency_buffer(num_max_dispatch_tokens_per_rank, hidden, num_experts)
+
++    def clean_low_latency_buffer_cached(self, capacity: int, hidden: int, experts: int, state: torch.Tensor) -> None:
++        """Skip unchanged LL layouts on-device. State is shared, initially zero,
++        and must be reset after any non-LL operation. All ranks must execute
++        identical layouts on one serialized stream; normal mode is unsupported.
++        """
++        self.runtime.clean_low_latency_buffer_cached(capacity, hidden, experts, state)
++
+     # noinspection PyTypeChecker
+     def low_latency_dispatch(self, x: torch.Tensor, topk_idx: torch.Tensor,
+                              num_max_dispatch_tokens_per_rank: int, num_experts: int,
+                              cumulative_local_expert_recv_stats: Optional[torch.Tensor] = None,
+                              dispatch_wait_recv_cost_stats: Optional[torch.Tensor] = None,
+                              use_fp8: bool = True, round_scale: bool = False, use_ue8m0: bool = False,
+-                             async_finish: bool = False, return_recv_hook: bool = False) -> \
++                             async_finish: bool = False, return_recv_hook: bool = False,
++                             use_nvfp4: bool = False) -> \
+             Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor, Tuple, EventOverlap, Callable]:
+         """
+         A low-latency implementation for dispatching with IBGDA.
+@@ -577,7 +587,9 @@
+             dispatch_wait_recv_cost_stats: a cumulative time spent waiting to receive each token tensor for statistics,
+                 which should have shape `[num_ranks, num_ranks]` and be typed as `torch.int64`.
+                 This is useful for detecting and precisely localizing slow anomalies.
+-            use_fp8: whether to enable FP8 casting, with this, the received data will be a tuple of FP8 tensor and scaling factors.
++            use_fp8: whether to enable FP8 casting, mutually exclusive with use_nvfp4.
++            use_nvfp4: send packed E2M1 with linear E4M3 1x16 block scales and FP32
++                per-token reconstruction scales. Returns a tuple of these three tensors.
+             round_scale: whether round the scaling factors into power of 2.
+             use_ue8m0: whether use UE8M0 as scaling factor format (available only with `round_scale=True`).
+             async_finish: the current stream will not wait for the communication kernels to be finished if set.
+@@ -605,26 +617,30 @@
+             hook: the receiving hook function (valid only if `return_recv_hook` is set).
+         """
+         check_torch_deterministic()
++        if use_fp8 and use_nvfp4:
++            raise ValueError('FP8 and NVFP4 dispatch are mutually exclusive')
+
+         assert self.nvshmem_qp_depth >= (num_max_dispatch_tokens_per_rank + 1) * 2
+-        packed_recv_x, packed_recv_x_scales, packed_recv_count, packed_recv_src_info, packed_recv_layout_range, event, hook = \
++        packed_recv_x, packed_recv_x_scales, packed_recv_global_scales, packed_recv_count, packed_recv_src_info, packed_recv_layout_range, event, hook = \
+             self.runtime.low_latency_dispatch(x, topk_idx,
+                                               cumulative_local_expert_recv_stats,
+                                               dispatch_wait_recv_cost_stats,
+                                               num_max_dispatch_tokens_per_rank, num_experts,
+-                                              use_fp8, round_scale, use_ue8m0,
++                                              use_fp8, use_nvfp4, round_scale, use_ue8m0,
+                                               async_finish, return_recv_hook)
+         handle = (packed_recv_src_info, packed_recv_layout_range, num_max_dispatch_tokens_per_rank, x.size(1), num_experts)
+-        tensors_to_record = (x, topk_idx, packed_recv_x, packed_recv_x_scales, packed_recv_count, packed_recv_src_info,
++        tensors_to_record = (x, topk_idx, packed_recv_x, packed_recv_x_scales, packed_recv_global_scales, packed_recv_count, packed_recv_src_info,
+                              packed_recv_layout_range, cumulative_local_expert_recv_stats)
+-        return (packed_recv_x, packed_recv_x_scales) if use_fp8 else packed_recv_x, packed_recv_count, handle, \
++        recv_x = (packed_recv_x, packed_recv_x_scales, packed_recv_global_scales) if use_nvfp4 else \
++            ((packed_recv_x, packed_recv_x_scales) if use_fp8 else packed_recv_x)
++        return recv_x, packed_recv_count, handle, \
+             EventOverlap(event, tensors_to_record if async_finish else None), hook
+
+     # noinspection PyTypeChecker
+     def low_latency_combine(self, x: torch.Tensor, topk_idx: torch.Tensor, topk_weights: torch.Tensor,
+                             handle: tuple, use_logfmt: bool = False, zero_copy: bool = False, async_finish: bool = False,
+                             return_recv_hook: bool = False, out: Optional[torch.Tensor] = None,
+-                            combine_wait_recv_cost_stats: Optional[torch.Tensor] = None) -> \
++                            combine_wait_recv_cost_stats: Optional[torch.Tensor] = None, use_fp8: bool = False) -> \
+             Tuple[torch.Tensor, EventOverlap, Callable]:
+         """
+         A low-latency implementation for combining tokens (reduce **with weights**) with IBGDA.
+@@ -643,6 +659,8 @@
+                 tokens. The received tokens will be reduced with the weights in this tensor.
+             handle: the communication handle given by the `dispatch` function.
+             use_logfmt: whether to use an internal "LogFMT with dynamic per-64-channel cast" format (10 bits).
++            use_fp8: send E4M3 with FP32 1x128 scales and accumulate decoded values
++                with routing weights in FP32. Mutually exclusive with use_logfmt and zero_copy.
+             zero_copy: whether the tensor is already copied into the RDMA buffer, should be cooperative
+                 with `get_next_low_latency_combine_buffer`.
+             async_finish: the current stream will not wait for the communication kernels to be finished if set.
+@@ -665,7 +683,7 @@
+         assert self.nvshmem_qp_depth >= (num_max_dispatch_tokens_per_rank + 1) * 2
+         combined_x, event, hook = self.runtime.low_latency_combine(x, topk_idx, topk_weights, src_info, layout_range,
+                                                                    combine_wait_recv_cost_stats, num_max_dispatch_tokens_per_rank,
+-                                                                   num_experts, use_logfmt, zero_copy, async_finish, return_recv_hook, out)
++                                                                   num_experts, use_logfmt, use_fp8, zero_copy, async_finish, return_recv_hook, out)
+         tensors_to_record = (x, topk_idx, topk_weights, src_info, layout_range, combined_x)
+         return combined_x, EventOverlap(event, tensors_to_record if async_finish else None), hook
+
+--- a/setup.py
++++ b/setup.py
+@@ -64,7 +64,7 @@
+         revision = '+' + subprocess.check_output(cmd).decode('ascii').rstrip()
+     except:
+         revision = '+local'
+-    return f'{public_version}{revision}'
++    return f'{public_version}{revision}.wire1'
+
+
+ class CustomBuildPy(build_py):
+@@ -100,8 +100,8 @@
+     sources = ['csrc/python_api.cpp', 'csrc/kernels/legacy/layout.cu', 'csrc/kernels/legacy/intranode.cu']
+     include_dirs = [f'{current_dir}/deep_ep/include',
+                     f'{current_dir}/third-party/fmt/include',
+-                    '/usr/local/cuda/include/cccl']
+-    library_dirs = []
++                    os.path.join(os.environ.get('CUDA_HOME', '/usr/local/cuda'), 'include', 'cccl')]
++    library_dirs = [os.path.join(os.environ["CUDA_HOME"], "lib64", "stubs")]
+     nvcc_dlink = []
+     extra_link_args = ['-lcuda']
+
+@@ -120,6 +120,7 @@
+     # ``libnccl.so.2`` only, so resolve the real name dynamically.
+     sources.extend(['csrc/kernels/backend/nccl.cu'])
+     include_dirs.extend([f'{nccl_root_dir}/include'])
++    library_dirs.append(f"{nccl_root_dir}/lib")
+     nccl_lib = get_nccl_lib_name(nccl_root_dir)
+     extra_link_args.extend([f'-l:{nccl_lib}', f'-Wl,-rpath,{nccl_root_dir}/lib'])
+
+@@ -164,6 +165,10 @@
+         num_topk_idx_bits = int(os.environ['EP_NUM_TOPK_IDX_BITS'])
+         cxx_flags.append(f'-DEP_NUM_TOPK_IDX_BITS={num_topk_idx_bits}')
+         nvcc_flags.append(f'-DEP_NUM_TOPK_IDX_BITS={num_topk_idx_bits}')
++
++    # SM120 has ~99 KB of shared memory per block: cap the LL combine send unroll
++    if 'EP_LL_COMBINE_MAX_SEND_UNROLLS' in os.environ:
++        nvcc_flags.append(f"-DEP_LL_COMBINE_MAX_SEND_UNROLLS={int(os.environ['EP_LL_COMBINE_MAX_SEND_UNROLLS'])}")
+
+     # Put them together
+     extra_compile_args = {
+--- /dev/null
++++ b/tests/legacy/test_wire_formats.py
+@@ -0,0 +1,225 @@
++"""RDMA codec correctness and graph replay; run with torchrun (two ranks).
++
++Uses small buffers and synthetic expert outputs, without loading model weights.
++Run on a PCIe host with NVSHMEM_IB_TRAFFIC_CLASS set for its RoCE network.
++"""
++
++import argparse
++import os
++
++import torch
++import torch.distributed as dist
++
++from deep_ep import Buffer
++
++
++def fp8_roundtrip(x):
++    groups = x.float().reshape(*x.shape[:-1], x.shape[-1] // 128, 128)
++    scales = groups.abs().amax(-1).clamp(min=1.0e-12) / 448.0
++    values = (groups / scales.unsqueeze(-1)).to(torch.float8_e4m3fn).float()
++    return (values * scales.unsqueeze(-1)).reshape_as(x)
++
++
++def nvfp4_reference(x):
++    groups = x.float().reshape(x.shape[0], x.shape[1] // 16, 16)
++    global_scale = x.float().abs().amax(-1).clamp(min=1.0e-12) / (6.0 * 448.0)
++    scales = (groups.abs().amax(-1) / (6.0 * global_scale[:, None])).clamp(max=448)
++    scales = scales.to(torch.float8_e4m3fn).float() * global_scale[:, None]
++    scaled = groups / scales.clamp(min=1.0e-30).unsqueeze(-1)
++    lut = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6], device=x.device)
++    distances = (scaled.abs().unsqueeze(-1) - lut).abs()
++    indices = distances.argmin(-1)
++    adjacent = (indices + 1).clamp(max=7)
++    ties = distances.gather(-1, indices.unsqueeze(-1)) == distances.gather(
++        -1, adjacent.unsqueeze(-1)
++    )
++    indices = torch.where(ties.squeeze(-1) & (adjacent % 2 == 0), adjacent, indices)
++    values = lut[indices] * scaled.sign() * scales.unsqueeze(-1)
++    return values.reshape_as(x).to(torch.bfloat16)
++
++
++def decode_nvfp4(payload, lut):
++    data, scales, globals_ = payload
++    codes = torch.stack((data & 15, data >> 4), -1).flatten(-2).long()
++    values = lut[codes].reshape(*scales.shape, 16)
++    return (
++        (values * scales.float().unsqueeze(-1) * globals_[..., None, None])
++        .flatten(-2)
++        .to(torch.bfloat16)
++    )
++
++
++def reference(x, ids, weights, dispatch, combine):
++    received = (
++        nvfp4_reference(x)
++        if dispatch == "nvfp4"
++        else (fp8_roundtrip(x).to(torch.bfloat16) if dispatch == "fp8" else x)
++    )
++    outputs = []
++    for i in range(ids.shape[1]):
++        coefficient = ((ids[:, i] % 5).float() + 1) * 0.125
++        value = (received.float() * coefficient[:, None]).to(torch.bfloat16)
++        if combine == "fp8":
++            value = fp8_roundtrip(value)
++        outputs.append(value.float() * weights[:, i : i + 1])
++    return torch.stack(outputs).sum(0).to(torch.bfloat16)
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--hidden", type=int, default=2048)
++    parser.add_argument("--experts", type=int, default=32)
++    parser.add_argument("--combine-dtypes", default="bf16,fp8")
++    args = parser.parse_args()
++    local_rank = int(os.environ["LOCAL_RANK"])
++    torch.cuda.set_device(local_rank)
++    dist.init_process_group("gloo")
++    rank, ranks = dist.get_rank(), dist.get_world_size()
++    assert Buffer.wire_format_version >= 1
++    capacity, tokens, topk = 8, 4, 4
++    local_experts = args.experts // ranks
++    # Match this small test capacity; IBGDA requires a minimum depth of 128.
++    required_depth = max(128, 2 * (capacity + 1))
++    depth = 1 << (required_depth - 1).bit_length()
++    os.environ.setdefault("NVSHMEM_QP_DEPTH", str(depth))
++    assert int(os.environ["NVSHMEM_QP_DEPTH"]) >= required_depth
++    rdma_bytes = Buffer.get_low_latency_rdma_size_hint(
++        capacity, args.hidden, ranks, args.experts
++    )
++    buffer = Buffer(
++        dist.group.WORLD,
++        0,
++        rdma_bytes,
++        low_latency_mode=True,
++        num_qps_per_rank=local_experts,
++        allow_nvlink_for_low_latency_mode=False,
++        allow_mnnvl=False,
++    )
++    x = (
++        (
++            torch.arange(tokens * args.hidden, device="cuda")
++            .float()
++            .reshape(tokens, args.hidden)
++            % 51
++            - 25
++        )
++        * (rank + 1)
++        * 0.03125
++    ).to(torch.bfloat16)
++    x.mul_(torch.tensor([0.0, 0.03125, 1.0, 64.0], device="cuda")[:, None])
++    ids = (
++        (
++            torch.arange(tokens, device="cuda")[:, None] * 7
++            + torch.arange(topk, device="cuda")[None, :] * 5
++            + rank
++        )
++        % args.experts
++    ).to(torch.int64)
++    weights = (
++        torch.tensor([0.1, 0.2, 0.3, 0.4], device="cuda")
++        .expand(tokens, topk)
++        .contiguous()
++    )
++    coefficients = (
++        (torch.arange(local_experts, device="cuda") + rank * local_experts) % 5 + 1
++    ).float()[:, None, None] * 0.125
++    decode_lut = torch.tensor(
++        [0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -3, -4, -6], device="cuda"
++    )
++    base_x = x.clone()
++
++    for dispatch in ("bf16", "fp8", "nvfp4"):
++        for combine in args.combine_dtypes.split(","):
++            x.copy_(base_x)
++
++            def step():
++                received, count, handle, event, hook = buffer.low_latency_dispatch(
++                    x,
++                    ids,
++                    capacity,
++                    args.experts,
++                    use_fp8=dispatch == "fp8",
++                    use_nvfp4=dispatch == "nvfp4",
++                    return_recv_hook=True,
++                )
++                hook()
++                if dispatch == "nvfp4":
++                    received = decode_nvfp4(received, decode_lut)
++                elif dispatch == "fp8":
++                    data, scales = received
++                    received = (
++                        (
++                            data.float().reshape(
++                                local_experts, ranks * capacity, args.hidden // 128, 128
++                            )
++                            * scales.unsqueeze(-1)
++                        )
++                        .flatten(-2)
++                        .to(torch.bfloat16)
++                    )
++                expert_output = (received.float() * coefficients).to(torch.bfloat16)
++                output, event, hook = buffer.low_latency_combine(
++                    expert_output,
++                    ids,
++                    weights,
++                    handle,
++                    use_fp8=combine == "fp8",
++                    use_logfmt=combine == "logfmt",
++                    return_recv_hook=True,
++                )
++                hook()
++                return output
++
++            actual = step()
++            torch.testing.assert_close(
++                actual,
++                reference(x, ids, weights, dispatch, combine),
++                rtol=0.004,
++                atol=0.003,
++            )
++            # Warm native and Torch kernels before recording allocations/communication.
++            step()
++            dist.barrier()
++            graph = torch.cuda.CUDAGraph()
++            with torch.cuda.graph(graph):
++                captured = step()
++            for multiplier in (-0.75, 0.125):
++                x.mul_(multiplier)
++                graph.replay()
++                torch.cuda.synchronize()
++                torch.testing.assert_close(
++                    captured,
++                    reference(x, ids, weights, dispatch, combine),
++                    rtol=0.004,
++                    atol=0.003,
++                )
++            # An idle rank still participates, sends no routes, and receives peer tokens.
++            if rank == 0:
++                saved = x
++                x = x[:0]
++                ids_saved, weights_saved = ids, weights
++                ids, weights = ids[:0], weights[:0]
++            idle_output = step()
++            if rank == 0:
++                assert idle_output.shape == (0, args.hidden)
++                x, ids, weights = saved, ids_saved, weights_saved
++            else:
++                torch.testing.assert_close(
++                    idle_output,
++                    reference(x, ids, weights, dispatch, combine),
++                    rtol=0.004,
++                    atol=0.003,
++                )
++            torch.cuda.synchronize()
++            dist.barrier()
++            if rank == 0:
++                print(
++                    f"PASS {dispatch} dispatch / {combine} combine: eager, graph replay, idle rank",
++                    flush=True,
++                )
++    del buffer
++    dist.destroy_process_group()
++
++
++if __name__ == "__main__":
++    main()

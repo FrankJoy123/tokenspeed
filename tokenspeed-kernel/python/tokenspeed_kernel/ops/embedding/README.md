@@ -25,3 +25,11 @@ can also share.
 them as a GEMM's group-32 MXFP8 activation: the codes and canonical scales that
 quantizing the dequantized BF16 rows (1e-4 amax floor) would produce, without
 materializing BF16.
+
+## Packed MXFP4 lookup
+
+`mxfp4_embedding` gathers packed E2M1 codes with G32 UE8M0 scales and returns
+BF16 selected rows. `mxfp4_embedding_decode` decodes rows already gathered
+from host storage. Neither expands the resident table. Invalid row IDs
+produce zero contribution; persistent host allocation and sharding belong
+to the runtime Engram owner.

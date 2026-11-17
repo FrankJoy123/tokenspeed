@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/EdinburghNLP/MMLongBench",
+  "scorer_revision": "a857dffa00de3d78035ac6fd454738254f4e1620",
+  "scorer_path": "utils.py",
+  "scorer_sha256": "23f3152cbb45eb2fa08d8f4e19593bfe0e4e76b01cbef39a3a94495741e58fbf",
+  "scorer_url": "https://raw.githubusercontent.com/EdinburghNLP/MMLongBench/a857dffa00de3d78035ac6fd454738254f4e1620/utils.py"
+}

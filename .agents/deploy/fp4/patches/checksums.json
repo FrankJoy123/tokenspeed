@@ -1,0 +1,5 @@
+{
+  "patches": {
+    "deepep-nvfp4-fp8-wire1.patch": "9caa9b2000de577f30fe275a26385d858e800dc20b45853f32fceaf6db5f48cc"
+  }
+}

@@ -67,6 +67,10 @@ LightSeek's work is advanced by the support of [sponsors and partners](https://l
   <em>TokenSpeed vs. TensorRT-LLM Pareto curves on agentic workloads (Kimi K2.5, B200)</em>
 </p>
 
+## SM120 reproduction
+
+QCP8 Prefill and EP16 Decode recipes, benchmark methods, and multimodal regression: [.agents/README.md](.agents/README.md).
+
 ## Documentation
 
 Start here:

@@ -1,0 +1,19 @@
+{
+  "dataset": "MMMU/MMMU_Pro",
+  "dataset_revision": "0d7426df4ccb3d8704a992fe6850abee7c262127",
+  "official_scorer_revision": "268471d0d488258990025331c7528359c324aa25",
+  "files": {
+    "mmmu-pro/evaluate.py": {
+      "url": "https://raw.githubusercontent.com/MMMU-Benchmark/MMMU/268471d0d488258990025331c7528359c324aa25/mmmu-pro/evaluate.py",
+      "sha256": "47e0928d9b786098a984d4c66ebee0e8cecd67732b955fbb6a31c2db78feb4cd"
+    },
+    "mmmu-pro/prompts.yaml": {
+      "url": "https://raw.githubusercontent.com/MMMU-Benchmark/MMMU/268471d0d488258990025331c7528359c324aa25/mmmu-pro/prompts.yaml",
+      "sha256": "bc50ae312cbb94677b8c6e2c04f54f906741ebe20b9bbdd10c2debba18d9bc64"
+    },
+    "LICENSE": {
+      "url": "https://raw.githubusercontent.com/MMMU-Benchmark/MMMU/268471d0d488258990025331c7528359c324aa25/LICENSE",
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+    }
+  }
+}

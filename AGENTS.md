@@ -154,8 +154,10 @@ change.
 
 ## Hardware and model support scope
 
-* NVIDIA GPU support is currently limited to `sm90`, `sm100`, `sm103`, and
-  `sm107`.
+* NVIDIA GPU support includes `sm90`, `sm100`, `sm103`, `sm107`, and the
+  opt-in DeepSeek V4.1 Flash paths on `sm120`. SM120 full-model serving uses
+  QCP8/EP8 Prefill or TP1/DP16/EP16 Decode; other layouts need separate
+  correctness and performance qualification.
 * AMD GPU support is currently limited to `gfx950`, `gfx1250`, and portable
   kernels on `gfx1201`.
 * NPU support targets only one or two specific models. There are currently no

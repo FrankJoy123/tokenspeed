@@ -1,0 +1,5 @@
+# CPU preparation and pinned official MMMU-Pro scorer; Python 3.12.
+pyarrow==23.0.1
+numpy==1.26.4
+pandas==3.0.1
+requests==2.34.2

@@ -1,0 +1,23 @@
+{
+  "distribution": "tokenspeed-deepgemm-sm120",
+  "version": "2.5.0+sm120.14073b4",
+  "namespace": "deep_gemm_sm120",
+  "source": {
+    "url": "https://github.com/deepseek-ai/DeepGEMM.git",
+    "commit": "14073b4e1e706506e193231209738c848d092a1f"
+  },
+  "headers": [
+    {
+      "path": "third-party/cutlass",
+      "url": "https://github.com/NVIDIA/cutlass.git",
+      "commit": "f3fde58372d33e9a5650ba7b80fc48b3b49d40c8"
+    },
+    {
+      "path": "third-party/fmt",
+      "url": "https://github.com/fmtlib/fmt.git",
+      "commit": "553ec11ec06fbe0beebfbb45f9dc3c9eabd83d28"
+    }
+  ],
+  "patch": "deepgemm.patch",
+  "patch_sha256": "51ad067d2d0faebfd845a77b4571095cf1f214fbb9c9432f83faf7fb2476cab6"
+}

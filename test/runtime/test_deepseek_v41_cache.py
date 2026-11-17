@@ -2608,7 +2608,7 @@ def test_native_decode_receives_compact_window_and_real_lengths(monkeypatch, pos
         for_graph_replay=False,
     )
     monkeypatch.setattr(dsv41, "cache_scatter", lambda *args: None)
-    monkeypatch.setattr(dsv41, "new_attention_schedule", object)
+    monkeypatch.setattr(dsv41, "new_attention_schedule", lambda *, previous: object())
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
     captured = []
 
@@ -4764,7 +4764,7 @@ def test_model_qcp_prefill_config(kvp_size):
     args.speculative_num_steps = 4
     assert DeepseekV41Config.generate(args, model, False).qcp_size == 4
     args.disaggregation_mode = "decode"
-    with pytest.raises(ValueError, match="PD prefill role"):
+    with pytest.raises(ValueError, match="normal or PD prefill engine"):
         DeepseekV41Config.generate(args, model, False)
 
 

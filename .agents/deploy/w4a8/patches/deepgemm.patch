@@ -1,0 +1,187 @@
+diff --git a/csrc/jit/compiler.hpp b/csrc/jit/compiler.hpp
+index 42beaf5..b05deb8 100644
+--- a/csrc/jit/compiler.hpp
++++ b/csrc/jit/compiler.hpp
+@@ -46,8 +46,8 @@ public:
+         DG_HOST_ASSERT(not cuobjdump_path.empty());
+
+         // Cache settings
+-        cache_dir_path = std::filesystem::path(get_env<std::string>("HOME")) / ".deep_gemm";
+-        if (const auto env_cache_dir_path = get_env<std::string>("DG_JIT_CACHE_DIR"); not env_cache_dir_path.empty())
++        cache_dir_path = std::filesystem::path(get_env<std::string>("HOME")) / ".deep_gemm_sm120";
++        if (const auto env_cache_dir_path = get_env<std::string>("DG_SM120_JIT_CACHE_DIR"); not env_cache_dir_path.empty())
+             cache_dir_path = env_cache_dir_path;
+
+         // The compiler flags applied to all derived compilers
+diff --git a/csrc/jit_kernels/heuristics/mega_moe.hpp b/csrc/jit_kernels/heuristics/mega_moe.hpp
+index 049084e..bea9921 100644
+--- a/csrc/jit_kernels/heuristics/mega_moe.hpp
++++ b/csrc/jit_kernels/heuristics/mega_moe.hpp
+@@ -91,7 +91,7 @@ static std::tuple<int, int, int, int, int> get_block_config_for_mega_moe(
+     // Check whether our `block_m` lies in `kCandidateBlockM`
+     DG_HOST_ASSERT(std::any_of(
+         layout::kCandidateBlockM, layout::kCandidateBlockM + layout::kNumCandidateBlockMs,
+-        [=](const auto& candidate) { return candidate == block_m; })
++        [block_m_copy = block_m](const auto& candidate) { return candidate == block_m_copy; })
+     );
+
+     // Return configs
+diff --git a/deep_gemm/SM120_SOURCE.json b/deep_gemm/SM120_SOURCE.json
+new file mode 100644
+index 0000000..4f234ed
+--- /dev/null
++++ b/deep_gemm/SM120_SOURCE.json
+@@ -0,0 +1,8 @@
++{
++  "upstream_url": "https://github.com/deepseek-ai/DeepGEMM.git",
++  "upstream_commit": "14073b4e1e706506e193231209738c848d092a1f",
++  "upstream_version": "2.5.0",
++  "distribution": "tokenspeed-deepgemm-sm120",
++  "python_namespace": "deep_gemm_sm120",
++  "jit_cache_environment": "DG_SM120_JIT_CACHE_DIR"
++}
+diff --git a/deep_gemm/include/deep_gemm/impls/sm120_fp4_mqa_logits.cuh b/deep_gemm/include/deep_gemm/impls/sm120_fp4_mqa_logits.cuh
+index b3d16b9..746f12c 100644
+--- a/deep_gemm/include/deep_gemm/impls/sm120_fp4_mqa_logits.cuh
++++ b/deep_gemm/include/deep_gemm/impls/sm120_fp4_mqa_logits.cuh
+@@ -325,10 +325,13 @@ void sm120_fp4_mqa_logits(const uint32_t seq_len, const uint32_t seq_len_kv,
+                     }
+                 }
+
++                // Order shared-memory reads before the producer reuses this stage.
++                cutlass::arch::fence_view_async_shared();
+                 empty_kv_barriers[kv_stage_idx]->arrive();
+             }
+             num_total_kv_blocks += num_kv_blocks;
+
++            cutlass::arch::fence_view_async_shared();
+             empty_q_barriers[q_stage_idx]->arrive();
+             CUTE_TIE(get_next_block_q_idx(), block_q_idx, q_iter_idx);
+         }
+diff --git a/setup.py b/setup.py
+index c4d74ae..843242b 100644
+--- a/setup.py
++++ b/setup.py
+@@ -25,7 +25,7 @@ DG_USE_LOCAL_VERSION = int(os.getenv('DG_USE_LOCAL_VERSION', '1')) == 1
+ DG_JIT_USE_RUNTIME_API = int(os.environ.get('DG_JIT_USE_RUNTIME_API', '0')) == 1
+
+ # Compiler flags
+-cxx_flags = ['-std=c++17', '-O3', '-fPIC', '-Wno-psabi', '-Wno-deprecated-declarations',
++cxx_flags = ['-std=c++20', '-O3', '-fPIC', '-Wno-psabi', '-Wno-deprecated-declarations',
+              f'-D_GLIBCXX_USE_CXX11_ABI={int(torch.compiled_with_cxx11_abi())}']
+ if DG_JIT_USE_RUNTIME_API:
+     cxx_flags.append('-DDG_JIT_USE_RUNTIME_API')
+@@ -52,25 +52,10 @@ base_wheel_url = 'https://github.com/DeepSeek-AI/DeepGEMM/releases/download/{tag
+
+
+ def get_package_version():
+-    with open(Path(current_dir) / 'deep_gemm' / '__init__.py', 'r') as f:
+-        version_match = re.search(r'^__version__\s*=\s*(.*)$', f.read(), re.MULTILINE)
+-    public_version = ast.literal_eval(version_match.group(1))
+-
+-    revision = ''
+-    if DG_USE_LOCAL_VERSION:
+-        # noinspection PyBroadException
+-        try:
+-            status_cmd = ['git', 'status', '--porcelain']
+-            status_output = subprocess.check_output(status_cmd).decode('ascii').strip()
+-            if status_output:
+-                print(f'Warning: Git working directory is not clean. Uncommitted changes:\n{status_output}')
+-                assert False, 'Git working directory is not clean'
+-
+-            cmd = ['git', 'rev-parse', '--short', 'HEAD']
+-            revision = '+' + subprocess.check_output(cmd).decode('ascii').rstrip()
+-        except Exception:
+-            revision = '+local'
+-    return f'{public_version}{revision}'
++    with open(Path(current_dir) / 'deep_gemm' / '__init__.py', 'r') as source:
++        match = re.search(r'^__version__\s*=\s*(.*)$', source.read(), re.MULTILINE)
++    # A distinct distribution and local version identify the pinned SM120 build.
++    return f'{ast.literal_eval(match.group(1))}+sm120.14073b4'
+
+
+ def get_platform():
+@@ -103,7 +88,7 @@ def get_ext_modules():
+     if DG_SKIP_CUDA_BUILD:
+         return []
+
+-    return [CUDAExtension(name='deep_gemm._C',
++    return [CUDAExtension(name='deep_gemm_sm120._C',
+                           sources=sources,
+                           include_dirs=build_include_dirs,
+                           libraries=build_libraries,
+@@ -128,7 +113,7 @@ class CustomBuildPy(build_py):
+     def generate_pyi_file(self):
+         generate_pyi_file(name='_C', root='./csrc', output_dir='./stubs')
+         pyi_source = os.path.join(current_dir, 'stubs', '_C.pyi')
+-        pyi_target = os.path.join(self.build_lib, 'deep_gemm', '_C.pyi')
++        pyi_target = os.path.join(self.build_lib, 'deep_gemm_sm120', '_C.pyi')
+
+         if os.path.exists(pyi_source):
+             print(f"Copying .pyi file from {pyi_source} to {pyi_target}")
+@@ -140,15 +125,15 @@ class CustomBuildPy(build_py):
+     def generate_default_envs(self):
+         code = '# Pre-installed environment variables\n'
+         code += 'persistent_envs = dict()\n'
+-        for name in ('DG_JIT_CACHE_DIR', 'DG_JIT_PRINT_COMPILER_COMMAND', 'DG_JIT_CPP_STANDARD'):
++        for name in ('DG_JIT_PRINT_COMPILER_COMMAND', 'DG_JIT_CPP_STANDARD'):
+             code += f"persistent_envs['{name}'] = '{os.environ[name]}'\n" if name in os.environ else ''
+
+-        with open(os.path.join(self.build_lib, 'deep_gemm', 'envs.py'), 'w') as f:
++        with open(os.path.join(self.build_lib, 'deep_gemm_sm120', 'envs.py'), 'w') as f:
+             f.write(code)
+
+     def prepare_includes(self):
+         # Create temporary build directory instead of modifying package directory
+-        build_include_dir = os.path.join(self.build_lib, 'deep_gemm/include')
++        build_include_dir = os.path.join(self.build_lib, 'deep_gemm_sm120/include')
+         os.makedirs(build_include_dir, exist_ok=True)
+
+         # Copy third-party includes to the build directory
+@@ -167,39 +152,20 @@ class CustomBuildPy(build_py):
+
+ class CachedWheelsCommand(_bdist_wheel):
+     def run(self):
+-        if DG_FORCE_BUILD or DG_USE_LOCAL_VERSION:
+-            return super().run()
+-
+-        wheel_url, wheel_filename = get_wheel_url()
+-        print(f'Try to download wheel from URL: {wheel_url}')
+-        # noinspection PyBroadException
+-        try:
+-            with urllib.request.urlopen(wheel_url, timeout=1) as response:
+-                with open(wheel_filename, 'wb') as out_file:
+-                    data = response.read()
+-                    out_file.write(data)
+-
+-            # Make the archive
+-            if not os.path.exists(self.dist_dir):
+-                os.makedirs(self.dist_dir)
+-            impl_tag, abi_tag, plat_tag = self.get_tag()
+-            archive_basename = f'{self.wheel_dist_name}-{impl_tag}-{abi_tag}-{plat_tag}'
+-            wheel_path = os.path.join(self.dist_dir, archive_basename + '.whl')
+-            os.rename(wheel_filename, wheel_path)
+-        except (urllib.error.HTTPError, urllib.error.URLError):
+-            print('Precompiled wheel not found. Building from source...')
+-            # If the wheel could not be downloaded, build from source
+-            super().run()
++        # The independent namespace has no prebuilt upstream binary.
++        return super().run()
+
+
+ if __name__ == '__main__':
+     # noinspection PyTypeChecker
+     setuptools.setup(
+-        name='deep_gemm',
++        name='tokenspeed-deepgemm-sm120',
+         version=get_package_version(),
+-        packages=find_packages('.'),
++        packages=[p.replace('deep_gemm', 'deep_gemm_sm120', 1) for p in find_packages('.')],
++        package_dir={'deep_gemm_sm120': 'deep_gemm'},
+         package_data={
+-            'deep_gemm': [
++            'deep_gemm_sm120': [
++                'SM120_SOURCE.json',
+                 'include/deep_gemm/**/*',
+                 'include/cute/**/*',
+                 'include/cutlass/**/*',
