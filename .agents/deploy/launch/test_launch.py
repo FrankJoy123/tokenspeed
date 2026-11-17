@@ -92,7 +92,7 @@ def environment(tmp_path):
 if sys.argv[1:3] == ['-m', 'tokenspeed.runtime.entrypoints.engine']:
     print(json.dumps({'args': sys.argv[1:], 'env': {key: os.environ.get(key) for key in [
         'TOKENSPEED_SPEC_SIMULATED_ACCEPT_LEN', 'TOKENSPEED_MOE_ROUTING_SIMULATION',
-        'TOKENSPEED_V41_FORCE_PHYSICAL_ROUTING', 'DECODE_BENCH_OBSERVE', 'DECODE_BENCH_RUN',
+        'TOKENSPEED_V41_FORCE_PHYSICAL_ROUTING', 'DECODE_BENCH_OBSERVE', 'DECODE_BENCH_RUN', 'PREFILL_BENCH_OBSERVE',
         'TOKENSPEED_SM120_DEEPEP_WIRE', 'TOKENSPEED_SM120_DEEPEP_CAPACITY']}}))
 else:
     os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
@@ -180,6 +180,7 @@ def test_decode_uses_two_nodes_and_clears_performance_simulation(tmp_path, envir
         "TOKENSPEED_V41_FORCE_PHYSICAL_ROUTING",
         "DECODE_BENCH_OBSERVE",
         "DECODE_BENCH_RUN",
+        "PREFILL_BENCH_OBSERVE",
     ]:
         environment[key] = "1"
     result = launch("w4a8", "decode", environment)

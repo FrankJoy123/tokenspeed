@@ -37,7 +37,9 @@ from analysis import (
     WARM_STEPS,
     WIDTH,
     WORLD_SIZE,
+    align_global_dispatches,
     distribution,
+    global_full_prefix,
     output_budget,
 )
 from analysis import warmup as warmup_window
@@ -143,6 +145,65 @@ def collect_node(root, world_size, *, live=False):
         "ranks": sorted(by_rank),
         "writers": writers,
         "source_sha256": json.loads((root / "source-sha256.json").read_text()),
+        "acceptance_scope": "local preview; final all-rank intersection pending",
+    }
+
+
+def collect_global(roots, config, world_size=WORLD_SIZE):
+    """Final selection from immutable raw records, never from local previews."""
+    require(world_size == WORLD_SIZE, "requires 16 ranks")
+    by_rank, source = {}, None
+    for root in roots:
+        samples, _ = read_samples(root)
+        require(not (by_rank.keys() & samples.keys()), "duplicate rank across nodes")
+        by_rank.update(samples)
+        identity = json.loads((Path(root) / "source-sha256.json").read_text())
+        if source is None:
+            source = identity
+        require(identity == source, "observer source differs across nodes")
+    indexed = align_global_dispatches(by_rank)
+    windows, warmups = {}, {}
+    for batch in config["batches"]:
+        for cohort in (0, 1, 2):
+            tag = f"b{batch}-r{cohort}"
+            prefix = tag + "-lane"
+            common = global_full_prefix(indexed, prefix, batch)
+            target = warmups if cohort == 0 else windows
+            rows = target.setdefault(tag, {})
+            for rank, samples in common.items():
+                result = (
+                    warmup_window(samples, prefix, batch, world_size=world_size)
+                    if cohort == 0
+                    else strict_window(samples, prefix, batch, world_size=world_size)
+                )
+                members = [
+                    s
+                    for s in by_rank[rank]
+                    if any(rid.startswith(prefix) for rid in s["request_ids"])
+                ]
+                result.update(
+                    global_full_first_step=samples[0]["step"],
+                    global_full_last_step=samples[-1]["step"],
+                    global_full_steps=[s["step"] for s in samples],
+                    selection_scope="all16 actual-full same-dispatch intersection",
+                    cohort_first_step=min(s["step"] for s in members),
+                    cohort_last_step=max(s["step"] for s in members),
+                    cohort_first_ns=min(s["completed_ns"] for s in members),
+                    cohort_last_ns=max(s["completed_ns"] for s in members),
+                )
+                rows[rank] = result
+    return {
+        "windows": windows,
+        "warmups": warmups,
+        "ranks": list(range(WORLD_SIZE)),
+        "source_sha256": source,
+        "acceptance_scope": "all16 actual-full same-dispatch intersection",
+        "counter_alignment": {
+            "first": 0,
+            "last": max(indexed[0]),
+            "same_counter_coverage": True,
+            "same_step_global_metadata_mismatches": 0,
+        },
     }
 
 
@@ -542,7 +603,15 @@ def audit_runs(roots, world_size=WORLD_SIZE):
             "node fixed identities differ",
         )
         audit_identity(root, fixed, node)
-    result = combine_nodes(nodes, config)
+    global_node = collect_global(roots, config, world_size)
+    result = combine_nodes([global_node], config)
+    result["selection_scope"] = global_node["acceptance_scope"]
+    result["counter_alignment"] = global_node["counter_alignment"]
+    result["raw_file_sha256"] = {
+        f"node{index}/{path.name}": sha(path)
+        for index, root in enumerate(roots)
+        for path in sorted(root.glob("steps-*.jsonl"))
+    }
     result["input_audit"] = audit_inputs(roots[0], config)
     result["run_identity_sha256"] = identity_sha
     return result

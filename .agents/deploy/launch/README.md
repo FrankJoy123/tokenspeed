@@ -12,6 +12,8 @@
 python -m pytest -q .agents/deploy/launch/test_launch.py
 ```
 
+`TOKENSPEED_SM120_DEEPEP_NICS`记录按可见GPU顺序请求的环境映射；Elastic通过底层NCCL communicator通信，不能仅凭`EP_NIC_NAME`/`NVSHMEM_HCA_LIST`赋值认定逐rank HCA绑定。初始化communicator前显式设置并保存`NCCL_IB_HCA`允许列表，核对本次初始化日志中的实际GIN provider/HCA。可单独使用`NCCL_DEBUG=INFO`及`NCCL_DEBUG_SUBSYS=INIT,NET,ENV`收集启动信息，并记录该观测配置；旧运行若未记录，不倒推其选择。
+
 `TOKENSPEED_HOST_BINARY` 覆盖值会被拒绝；使用当前 venv 中与 engine wheel 配套的原生 host，构建身份记录其实际路径及 SHA256。
 
 HTTP 评测入口使用当前 runtime 锁定的公开 SMG 1.16.0.post20261115。在入口主机上先运行（地址必须可被三个节点访问）：

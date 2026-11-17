@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "identity": "../../ref/w4a8-identity.json",
+  "dataset": "longdoc",
+  "status": "three_complete_rounds_independently_audited",
+  "questions_per_round": 50,
+  "rounds": 3,
+  "requests": 150,
+  "metric": "Frozen deterministic DocQA; length truncation counts zero",
+  "per_round_percent": [
+    60.12518843534757,
+    61.73597111171162,
+    60.19683204391231
+  ],
+  "mean_percent": 60.6859971969905,
+  "sample_std_percentage_points": 0.9100094053679567,
+  "errors_per_round": [
+    0,
+    0,
+    0
+  ],
+  "truncated_per_round": [
+    0,
+    0,
+    0
+  ],
+  "rebuilt_unique_request_hashes": 50,
+  "request_hashes_verified": 150,
+  "independently_rescored_responses": 150,
+  "protocol": {
+    "concurrency": 4,
+    "max_tokens": 4096,
+    "temperature": 0,
+    "seed": 968340402,
+    "reasoning_effort": "none",
+    "automatic_request_retries": 0,
+    "top_p": 1,
+    "top_k": "not_sent",
+    "timeout_seconds": 7200
+  },
+  "manifest_sha256": "3c9fe98d52b7720089b0d2d6f3d9eede53f79fa325de8261a7add367cc725148",
+  "image_inventory_sha256": "d3e18aa5586ed21c23b15149c3dcd5fbc9c696b8430720134c1cdae2db475373",
+  "client_sha256": "d8ff5cbf89fce1a54f4827b827a90d43459c252ffda33bc0b6a997e74b6deb63",
+  "scorer_sha256": "06a1393dbffa182317a3e31253e5d0b0d3afba1c851b6ca1ad9e0af677fc57d0",
+  "smg": {
+    "version": "1.16.0.post20261115",
+    "worker_wedge_secs": 3,
+    "request_timeout_secs": 7200,
+    "inline_multimodal": true,
+    "retries_enabled": false
+  },
+  "response_file_sha256": [
+    "3ec5bc1a9d8ca899c497edb3d84cdab236c6a9832fa792c295520547210814c2",
+    "58b462bbd7d5fe70ec75cd8a9d8fbbfc6cabb1b24a32103b59aa2e1a12991f82",
+    "1317ae92ed884e3133bd99ba5310e21c468c3a78db7f56cd79402200eadb4f36"
+  ],
+  "agent_semantic_review": {
+    "metric": "Non-blind Agent semantic review; separate from deterministic DocQA",
+    "per_round_percent": [
+      67.75986394557823,
+      67.25986394557823,
+      64.12993197278911
+    ],
+    "mean_percent": 66.38321995464852,
+    "sample_std_percentage_points": 1.9673535642822462,
+    "responses": 150,
+    "unique_candidates": 66,
+    "exact_candidate_decisions_reused": 44,
+    "directly_judged_candidates": 22,
+    "blinded": false,
+    "reuse_condition": "Same question, ground-truth bytes and extracted candidate bytes",
+    "new_inference_requests": 0
+  }
+}

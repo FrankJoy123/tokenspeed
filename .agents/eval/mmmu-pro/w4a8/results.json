@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "identity": "../../ref/w4a8-identity.json",
+  "dataset": "mmmu-pro",
+  "status": "three_complete_rounds_independently_audited",
+  "questions_per_round": 32,
+  "images": 41,
+  "rounds": 3,
+  "requests": 96,
+  "metric": "Official parser; errors and length truncation count zero",
+  "per_round_percent": [
+    50.0,
+    53.125,
+    53.125
+  ],
+  "mean_percent": 52.083333333333336,
+  "sample_std_percentage_points": 1.8042195912175805,
+  "errors_per_round": [
+    0,
+    0,
+    0
+  ],
+  "truncated_per_round": [
+    3,
+    1,
+    1
+  ],
+  "rebuilt_unique_request_hashes": 32,
+  "request_hashes_verified": 96,
+  "independently_rescored_responses": 96,
+  "protocol": {
+    "concurrency": 4,
+    "max_tokens": 4096,
+    "temperature": 0,
+    "seed": 968340402,
+    "reasoning_effort": "none",
+    "automatic_request_retries": 0,
+    "top_p": 1,
+    "top_k": 1,
+    "timeout_seconds": 7200.0,
+    "prompt_style": "direct"
+  },
+  "manifest_sha256": "53ae71d65282331ed8ad7c1b72a3fe42bf11fadf750656b82d3900c3fe4dd15e",
+  "client_sha256": "c394d797f1fe284f21248a1226e057615c19df7581a964506e28ba1f20358140",
+  "scorer_sha256": "47e0928d9b786098a984d4c66ebee0e8cecd67732b955fbb6a31c2db78feb4cd",
+  "scorer_revision": "268471d0d488258990025331c7528359c324aa25",
+  "smg": {
+    "version": "1.16.0.post20261115",
+    "worker_wedge_secs": 0,
+    "request_timeout_secs": 7200,
+    "inline_multimodal": true,
+    "retries_enabled": false
+  },
+  "response_file_sha256": [
+    "c5654800ae82ae136f514cc614cce2108ee98c54e204c0d4a5c63e65f18937d5",
+    "07e37d0c98421f490bf44aa91913fa0845b0076d087176ff2416b6d6a3b1eff8",
+    "8f92651c4dddcf876b5b9dc3455679906c7f6e9645debbe86a9eb765c1473d9f"
+  ],
+  "correct_per_round": [
+    16,
+    17,
+    17
+  ]
+}

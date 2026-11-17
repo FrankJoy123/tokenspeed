@@ -1,0 +1,249 @@
+{
+  "formal_scores_profiled": false,
+  "prefill": {
+    "source_commit": "5fcb40a13f86f6c892696bcb3f774aa0ea1e6a51",
+    "scenario": "Independent post-formal QCP8/EP8 16K natural-routing BF16-selector diagnostic; CPU+GPU8steps; default autotune",
+    "profiler_comparison": {
+      "profile_mean_interval_ms": 1285.159649125,
+      "diagnostic_preprofile_r1_mean_ms": 1276.606513,
+      "separate_original_formal_16k_mean_ms": 1277.8812282000001,
+      "observed_profile_vs_diag_r1_percent": 0.6699900116364343,
+      "observed_profile_vs_original_percent": 0.5695694376270044
+    },
+    "captured_forward_count": 8,
+    "representative_intervals": 6,
+    "roi_duration_ns": 7703253040,
+    "ranks": [
+      {
+        "rank": 0,
+        "observed_gpu_union_ns": 7622150878,
+        "observed_gpu_activity_fraction": 0.9894716996080918,
+        "gap_ns": 81102162,
+        "max_gap_ns": 62112
+      },
+      {
+        "rank": 1,
+        "observed_gpu_union_ns": 7646465803,
+        "observed_gpu_activity_fraction": 0.9926281485620262,
+        "gap_ns": 56787237,
+        "max_gap_ns": 56897
+      },
+      {
+        "rank": 2,
+        "observed_gpu_union_ns": 7646053525,
+        "observed_gpu_activity_fraction": 0.9925746285753584,
+        "gap_ns": 57199515,
+        "max_gap_ns": 271904
+      },
+      {
+        "rank": 3,
+        "observed_gpu_union_ns": 7646869971,
+        "observed_gpu_activity_fraction": 0.992680615746721,
+        "gap_ns": 56383069,
+        "max_gap_ns": 160128
+      },
+      {
+        "rank": 4,
+        "observed_gpu_union_ns": 7646372346,
+        "observed_gpu_activity_fraction": 0.9926160164148002,
+        "gap_ns": 56880694,
+        "max_gap_ns": 72032
+      },
+      {
+        "rank": 5,
+        "observed_gpu_union_ns": 7645577086,
+        "observed_gpu_activity_fraction": 0.9925127795100964,
+        "gap_ns": 57675954,
+        "max_gap_ns": 60480
+      },
+      {
+        "rank": 6,
+        "observed_gpu_union_ns": 7646150679,
+        "observed_gpu_activity_fraction": 0.9925872406496983,
+        "gap_ns": 57102361,
+        "max_gap_ns": 71328
+      },
+      {
+        "rank": 7,
+        "observed_gpu_union_ns": 7646841436,
+        "observed_gpu_activity_fraction": 0.992676911467522,
+        "gap_ns": 56411604,
+        "max_gap_ns": 68768
+      }
+    ],
+    "raw_trace_evidence_sha256": "aa285a2740064d0d6b9b89ae802056f7efd86b5fe8255f60a183a966172d99a5",
+    "extra_decoder_tail": {
+      "owner_rank": 0,
+      "tail_rows": 512,
+      "attention_grid": [
+        512,
+        64,
+        1
+      ],
+      "attention_calls": 160,
+      "attention_total_ns": 706409579,
+      "index_scan_grid": [
+        128,
+        16,
+        1
+      ],
+      "index_scan_calls": 160,
+      "index_scan_total_ns": 990670710,
+      "scope": "Whole eight captured forwards; query chunks, not extra logical input tokens. Kernel totals do not equal critical-path cost."
+    },
+    "limits": [
+      "Observed activity is not SM occupancy or saturation.",
+      "All eight imports reported CPU complete-event nesting overflow; raw/import category counts and GPU geometry separately checked.",
+      "Representative 16K trace does not explain the 4K slow interval or DP8 smooth decline.",
+      "Reference and profile windows cover different requests; observed delta is not a pure profiler overhead estimate.",
+      "No UI inspection or hardware-counter capture."
+    ]
+  },
+  "schema_version": 1,
+  "decode": {
+    "status": "direct_critical_path_identified_with_limits",
+    "scope": "Independent diagnostic; original formal measurements and global audit remain unchanged. This is not a new performance score or a fix.",
+    "measured_source_commit": "5e0e2839cf92d054adad09812fff9441b5ac947e",
+    "production_algorithm_or_communication_changes": false,
+    "native_comparison": {
+      "slow_step_pair": [
+        560,
+        561
+      ],
+      "normal_step_pair": [
+        620,
+        621
+      ],
+      "slow_ms": 180.412725,
+      "normal_ms": 113.974391,
+      "increase_ms": 66.438334,
+      "all16_slow_ms_range": [
+        180.398221,
+        180.44204
+      ]
+    },
+    "critical_path": {
+      "operator": "DeepEP elastic 80-row dispatch and its PDL release",
+      "same_graph_node_and_launch_shape": true,
+      "dispatch_residence_ms": {
+        "normal": 1.566885,
+        "slow": 67.74665
+      },
+      "dispatch_release_shift_ms": 66.437684,
+      "downstream_fc1_start_shift_ms": 66.437685,
+      "difference_from_native_increase_us": 0.649,
+      "fc1_duration_us": {
+        "normal": 48.097,
+        "slow": 50.496
+      },
+      "epilogue_residence_ms": 66.681879,
+      "epilogue_interpretation": "Overlaps producer dispatch and waits for PDL release; do not add its residence to dispatch.",
+      "index_scan_ms": {
+        "normal": 18.698686,
+        "slow": 18.711452
+      },
+      "observed15_dispatch_residence_ms_range": [
+        67.734061,
+        67.75219
+      ],
+      "observed15_dispatch_entry_elapsed_spread_us": 31.485
+    },
+    "gpu_geometry": {
+      "slow_window_ms": 180.412725,
+      "all_stream_union_ms": 178.595794,
+      "uncovered_total_ms": 1.816931,
+      "largest_gap_us": 9.344,
+      "interpretation": "No large device-wide idle gap in this captured interval. Activity coverage is not occupancy or useful compute."
+    },
+    "negative_evidence": {
+      "gc": {
+        "all16_overlap_in_slow_or_previous2steps": false,
+        "separate_no_cupti_after100_slow_ms": 183.134469,
+        "separate_slow_also_has_no_gc_overlap": true,
+        "scope": "Excludes direct GC pause for these observed intervals, not every original formal peak."
+      },
+      "cpu": {
+        "visible_quota_cores": 200,
+        "observed_throttle_count_delta": 0,
+        "observed_throttle_time_delta_ns": 0,
+        "largest_sampled_worker_runnable_wait_us_by_node": [
+          99.93,
+          217.201
+        ],
+        "scope": "Actual worker cgroup matches sampler. Visible controller only; hidden ancestors, nonrunnable waits and unidentified proxy roles remain unobserved. 1s schedstat is not a scheduler trace."
+      },
+      "rdma": {
+        "sampled_error_retry_field_deltas": 0,
+        "slow_window_ecn_percentile_pct_by_node": [
+          35.8208955,
+          16.4179104
+        ],
+        "scope": "Port-wide approximately1s observations; not perQP or sub-step. Request counters stayed flat, so their coverage is unproven. No PFC-specific counters. ECN/CNP does not by itself identify congestion as this tail cause."
+      }
+    },
+    "capture_completeness": {
+      "torch_activities_requested": [
+        "GPU"
+      ],
+      "cpu_torch_activity": false,
+      "native_ranks": 16,
+      "complete_gpu_trace_ranks": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14
+      ],
+      "missing_gpu_trace_rank": 15,
+      "actual_common_warm_full_points": 216,
+      "actual_common_diagnostic_full_points": 576,
+      "required_diagnostic_full_points": 600,
+      "required_count_met": false,
+      "second_cohort_started": false,
+      "qualification": "Failed partial diagnostic generation; surviving complete traces can support bounded local analysis, not16rank capture qualification."
+    },
+    "profiler_boundary_failure": {
+      "failure": "GIN barrier timeout followed by CUDA719 during profile stop/export",
+      "profiling_stop_to_error_approx_seconds": 63,
+      "export_elapsed_approx_seconds_by_node": [
+        73,
+        47
+      ],
+      "interpretation": "Separate observer-boundary failure; not proof of the original unprofiled tail cause."
+    },
+    "validation": {
+      "official_trace_processor": "Perfetto v59.1",
+      "official_roi_geometry_equals_raw_integer_union": true,
+      "raw_rank0_sha256": "6c7aaefe54115358149db85e4f4160b38a7c4e346d586f67230e6a3ea35a965a",
+      "import_overflow_warning_count_rank0": 12902,
+      "overflow_warning_scope": "Overlapping complete-event hierarchy/layout ambiguity retained; no lost-event claim from these warnings.",
+      "ui_review_performed": false,
+      "pre_capture_clock_min_bracket_ns_by_node": [
+        100,
+        100
+      ],
+      "post_capture20pair_calibration_available": false,
+      "coarse_paired_sampler_clock_span_us_by_node": [
+        5.39,
+        9.99
+      ]
+    },
+    "limitations": [
+      "Internal initial/final barrier, GIN transfer/progress and missing rank15 GPU late arrival are not distinguished.",
+      "Normal and slow intervals use different decode positions and natural token routes; identical graph and launch shape does not prove identical payload or route load.",
+      "Profiler perturbs execution. This selected interval begins about1.94s after firstGPU event and over30s before stop; the boundary guard is not proof of zero initialization influence.",
+      "Original formal slow requests were not traced individually. This capture identifies a directly observed same-scale collective-delay mechanism, not each original peak.",
+      "Later provider/HCA qualification logs belong to that separate test and do not retrofit the formal or diagnostic network identity."
+    ]
+  }
+}

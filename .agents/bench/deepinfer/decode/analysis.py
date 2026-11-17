@@ -98,6 +98,7 @@ def full_prefix(samples, prefix, batch, world_size):
             and set(ids) == expected
             and sample["input_rows"] == WIDTH * batch
             and sample["output_lengths"] == [WIDTH] * batch
+            and sample["prefill_lengths"] == [CONTEXT] * batch
         )
         if not valid:
             if run:
@@ -114,8 +115,60 @@ def full_prefix(samples, prefix, batch, world_size):
             raise RuntimeError("compile monitor unavailable or invalid")
         if run and count < run[-1]["compiles"]:
             raise RuntimeError("compile counter reset")
+        if type(sample["completed_ns"]) is not int or sample["completed_ns"] <= 0:
+            raise RuntimeError("invalid raw completion timestamp")
         run.append(sample)
     return run
+
+
+def align_global_dispatches(by_rank):
+    """Verify raw counter alignment before using a step as a cross-rank key.
+
+    No rank offset, timestamp alignment or duration participates in alignment.
+    Every archived worker must cover the same uninterrupted counter from zero,
+    with identical gathered batch metadata at every dispatch.
+    """
+    if set(by_rank) != set(range(WORLD_SIZE)):
+        raise RuntimeError("global selection requires all 16 ranks exactly once")
+    indexed = {}
+    reference_steps = None
+    for rank, samples in by_rank.items():
+        steps = [sample["step"] for sample in samples]
+        if not steps or steps != list(range(steps[-1] + 1)):
+            raise RuntimeError(f"rank {rank} missing/reordered global dispatch counter")
+        if reference_steps is None:
+            reference_steps = steps
+        if steps != reference_steps:
+            raise RuntimeError("different global dispatch counter coverage")
+        indexed[rank] = {sample["step"]: sample for sample in samples}
+    for step in reference_steps:
+        reference = indexed[0][step]
+        for rank in range(WORLD_SIZE):
+            if any(
+                indexed[rank][step][key] != reference[key]
+                for key in ("global_batch", "global_decodes")
+            ):
+                raise RuntimeError(f"global metadata differs at dispatch {step}")
+    return indexed
+
+
+def global_full_prefix(indexed, prefix, batch):
+    """Intersection of actual full points on all ranks, at identical raw steps.
+
+    Per-rank validation rejects gaps and a later resumption even if a later
+    segment is long or faster. The intersection then fixes one shared window.
+    """
+    runs = {
+        rank: full_prefix(list(rows.values()), prefix, batch, WORLD_SIZE)
+        for rank, rows in indexed.items()
+    }
+    common = set.intersection(
+        *({sample["step"] for sample in run} for run in runs.values())
+    )
+    steps = sorted(common)
+    if not steps or any(b != a + 1 for a, b in zip(steps, steps[1:])):
+        raise RuntimeError("missing or nonconsecutive all-rank full-load sequence")
+    return {rank: [rows[step] for step in steps] for rank, rows in indexed.items()}
 
 
 def warmup(samples, prefix, batch, *, world_size):

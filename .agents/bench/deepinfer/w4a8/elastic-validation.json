@@ -1,0 +1,55 @@
+{
+  "source_commit": "5e0e2839cf92d054adad09812fff9441b5ac947e",
+  "source_tree_sha256": "8c4eddb9fd2c3a3ab4c85904b773546b50a44b1891e88709cbc894d881f7bcbb",
+  "public_test_sha256": "cc1c1fb28c519195af48bf64123e7c5e6ff086df4fd80f3ed44339551b0fa5f1",
+  "world_size": 16,
+  "nodes": 2,
+  "gpus_per_node": 8,
+  "distinct_existing_cases": 9,
+  "passed_rank_case_executions": 144,
+  "failures": 0,
+  "errors": 0,
+  "skips": 0,
+  "tolerance": {
+    "rtol": 0,
+    "atol": 0
+  },
+  "coverage": [
+    "FP8-representable rank-labelled weighted identity",
+    "balanced/skew/idle/masked routing",
+    "384-expert/topk6 and128-expert/topk3",
+    "eager and CUDA graph with changed routes and doubled inputs",
+    "serial target/draft/target reuse"
+  ],
+  "packages": {
+    "torch": "2.14.0+cu130",
+    "tokenspeed": "0.1.1",
+    "tokenspeed-engine": "0.1.1",
+    "tokenspeed-scheduler": "0.1.58",
+    "tokenspeed-kernel": "0.1.5.dev20261117+gitacc2c8c8",
+    "flashinfer-python": "0.7.4",
+    "tokenspeed-deepgemm": "2.8.2.post20261115",
+    "tokenspeed-deepgemm-sm120": "2.5.0+sm120.14073b4",
+    "tokenspeed-deepep": "2.1.0.post20260810",
+    "tokenspeed-triton": "3.9.10.post20261028",
+    "tokenspeed-mooncake": "0.3.13.post20261026",
+    "nvidia-cutlass-dsl": "4.8.0",
+    "nvidia-nvshmem-cu13": "3.4.5",
+    "nvidia-nccl-cu13": "2.30.7",
+    "transformers": "5.12.0",
+    "xgrammar": "0.2.8",
+    "msgspec": "0.22.0"
+  },
+  "pytest": "9.1.1",
+  "provider_observed_in_this_test": "GIN_IB_GDAKI type3 on all16 ranks",
+  "gin_contexts_per_buffer": 8,
+  "gin_connections_per_buffer": 2,
+  "contexts_per_gin_connection": 4,
+  "lifecycle": {
+    "before_after_identity_and1353_python_parity": true,
+    "pip_check": 0,
+    "both_gpu_compute_lists_empty": true,
+    "remaining_exact_owned_live_processes": 0
+  },
+  "limits": "Finite original9-case numerical coverage, not a model/performance result and not exclusion of rare visibility races. INFO observations belong only to this test; requested NIC map is not proof of per-GIN-connection physical binding."
+}

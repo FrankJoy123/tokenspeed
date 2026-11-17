@@ -29,3 +29,9 @@ GPU selects `EP_NIC_NAME` and `NVSHMEM_HCA_LIST` before buffer construction.
 Without this variable the vendor keeps its own selection. Wire1 also accepts
 the old `TOKENSPEED_WIRE1_NICS` alias; the common variable takes precedence.
 No hardware names or topology are assumed by the adapter.
+
+The map records requested environment hints, not proof of Elastic's per-rank
+HCA binding. Elastic uses the underlying NCCL communicator. Configure its HCA
+allowlist before communicator initialization and record the selected provider
+and HCAs from NCCL initialization/network logs for the actual run. Environment
+unit tests validate parsing and assignment; they do not validate hardware binding.

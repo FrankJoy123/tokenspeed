@@ -1,0 +1,142 @@
+{
+  "schema_version": 1,
+  "configuration": {
+    "prefill": {
+      "qcp": 8,
+      "ep": 8
+    },
+    "decode": {
+      "tp": 1,
+      "dp": 16,
+      "ep": 16
+    },
+    "speculative_algorithm": "DSPARK",
+    "num_draft_tokens": 6,
+    "num_steps": 5,
+    "acceptance": "real model acceptance; no fixed-acceptance simulation"
+  },
+  "source": {
+    "measured_commit": "acc2c8c8e75623bbef7694eea131bee526d86cdd",
+    "production_bytes_equal_to_commit": "5e0e2839cf92d054adad09812fff9441b5ac947e",
+    "production_files_compared": 2604,
+    "later_v7": {
+      "commit": "5fcb40a13f86f6c892696bcb3f774aa0ea1e6a51",
+      "change_scope": "Initialize the dedicated v41_decoder_counts Gloo group at model construction when QCP and the SM120 expert consumer need it; ordinary non-QCP DP execution is unchanged.",
+      "full_model_quality_rerun": false,
+      "scope_note": "The measurements below were made with the recorded acc2 source bytes; V7 is a later startup initialization change, not the measured quality source."
+    }
+  },
+  "model": {
+    "profile": "w4a8",
+    "metadata_sha256": {
+      "config.json": "8be45ce0476004a3f529fd896115a4a2e800a129ad2d3ec05b16050f52e21879",
+      "tokenizer.json": "c90dfa01249db1be4245780a052ede752e1361c612ac6d08e2bdada7d599476b",
+      "tokenizer_config.json": "6ac8c8dc065ed118161d02dd532749ae3f52c243deac27872134fae2f50d8547",
+      "encoding/encoding.py": "13231c592e958fb39e2af6001dae69d90e7a36b265702b9b390236fb387599e2",
+      "model.safetensors.index.json": "74b0686a3d2891980d5e303251b075a3bccae2c2ff650747db2620a649b98fa8"
+    },
+    "shard_count": 48,
+    "shard_header_inventory_sha256": "272a55028e76c3c859aed80884d17e634388e6a9b769e06c95a534cbc97cfb10",
+    "fingerprint_scope": "Metadata, tokenizer, encoding, index, all indexed shard sizes and headers; not a full tensor-payload digest."
+  },
+  "artifacts": {
+    "packages": {
+      "torch": "2.14.0+cu130",
+      "tokenspeed": "0.1.1",
+      "tokenspeed-kernel": "0.1.5.dev20261117+gitacc2c8c8",
+      "tokenspeed-engine": "0.1.1",
+      "tokenspeed-scheduler": "0.1.58",
+      "tokenspeed-smg": "1.16.0.post20261115",
+      "tokenspeed-smg-grpc-proto": "0.4.28.post20261109",
+      "tokenspeed-smg-grpc-servicer": "0.15.0.post20261110",
+      "tokenspeed-deepgemm": "2.8.2.post20261115",
+      "tokenspeed-deepgemm-sm120": "2.5.0+sm120.14073b4",
+      "tokenspeed-deepep": "2.1.0.post20260810",
+      "tokenspeed-triton": "3.9.10.post20261028",
+      "flashinfer-python": "0.7.4",
+      "tokenspeed-mooncake": "0.3.13.post20261026",
+      "nvidia-cutlass-dsl": "4.8.0",
+      "nvidia-nvshmem-cu13": "3.4.5",
+      "nvidia-nccl-cu13": "2.30.7",
+      "transformers": "5.12.0",
+      "safetensors": "0.8.0",
+      "triton": "3.8.0"
+    },
+    "modules": {
+      "tokenspeed": {
+        "entry_sha256": "26874f9f5095e39da01e0da92dbe180bab58232bbd700ba735358e41796623de",
+        "native_files": 0,
+        "native_manifest_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+      },
+      "tokenspeed_kernel": {
+        "entry_sha256": "5991051381a6c3920d2cf38674a7fbabd8579259b0af223e301db549935b6aef",
+        "native_files": 28,
+        "native_manifest_sha256": "e317cc2c5e49bbe623242dded149b8b43e5f82980190d32faa3a8be41a1bb856"
+      },
+      "tokenspeed_scheduler": {
+        "entry_sha256": "6993871d67c947bddd841c2cce0535ce367ea78b7686df9ddc0df533c6db1c89",
+        "native_files": 1,
+        "native_manifest_sha256": "0a5e42f2b2d971852f9ebd956702662bb6fbb4b5c30c663c964563bcee78ff97"
+      },
+      "tokenspeed_engine": {
+        "entry_sha256": "7acb345ef3c195e3eac5bf2cfbd2fbb9ff5869849e9685f51c377594d6b659dc",
+        "native_files": 2,
+        "native_manifest_sha256": "494617c23d7786a6a58d486e903aa5ed1678413ae06c35b6728bf71305dd0946"
+      },
+      "ts-host": {
+        "entry_sha256": "83a9811e4407c32a592e0cbd72cb266688d25b2ee1260c3542ab7e742601e033",
+        "native_files": 0,
+        "native_manifest_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+      }
+    },
+    "host_binary_sha256": "83a9811e4407c32a592e0cbd72cb266688d25b2ee1260c3542ab7e742601e033",
+    "dependency_fingerprints": {
+      "deep_gemm": {
+        "source_native_files": 921,
+        "source_native_manifest_sha256": "958153ea48d360ff7247dbfc2484cc224735ef21b7aeb7b181f23af42f60fa0b",
+        "native_files": 1,
+        "native_manifest_sha256": "7b65d604b5d52ce09270d47f08b2f3c7b33ea5fbde673f174d1841bc54cbc3bc"
+      },
+      "deep_gemm_sm120": {
+        "source_native_files": 845,
+        "source_native_manifest_sha256": "c9497fc44ae1686d23c322f3d35dde4a89d11496ee657adfa8c203f9bca7fa86",
+        "native_files": 1,
+        "native_manifest_sha256": "52fb386038c463a391e03578b712f30176d885367cd2db0b775e62a0ec62f808"
+      },
+      "deep_ep": {
+        "source_native_files": 34,
+        "source_native_manifest_sha256": "683cea418e2186366cbc798d8d9a02837cd32efefa7e4b7f9403f0da1e74369a",
+        "native_files": 1,
+        "native_manifest_sha256": "1ba69526a87f70cc17b618937d6f6492d184ad3a2766c069a6ec36dcfdb9877f"
+      },
+      "flashinfer": {
+        "source_native_files": 14218,
+        "source_native_manifest_sha256": "24ea0289a3bfff30f6e5e83b5ad6ad8c201b6f7033cf808f5ff10a9ad0ab4d5f",
+        "native_files": 0,
+        "native_manifest_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+      },
+      "mooncake": {
+        "source_native_files": 62,
+        "source_native_manifest_sha256": "5c2cb790e693381a58eb7783347aa7569fc80dcd197b7ce570e4e91488d50368",
+        "native_files": 8,
+        "native_manifest_sha256": "eec96e3191480c03b8a3ec7a861165f60afee2b4f08dee9683cf53bf7091838a"
+      },
+      "tokenspeed_triton": {
+        "source_native_files": 416,
+        "source_native_manifest_sha256": "eade6ef2291c47d2fb7d64f808dced074a7e7485857e7f0c55d66b6d7ea52f33",
+        "native_files": 13,
+        "native_manifest_sha256": "1c24c025c0a882cdeb22830ebecd200a9d4c246cf074ebbe0851a5fce49b31bf"
+      }
+    },
+    "smg_extension_sha256": "336dcee328f347c1f62b8fe59a2b9b101e315a46e49a94a5e5ac8816da464e44",
+    "version_evidence": "Explicit measured launch pins and verified installed candidate/wheel identity; duplicate system distribution listings are not selected-package versions."
+  },
+  "native_control": {
+    "idle_before_flush": true,
+    "workers_flushed_per_check": 2,
+    "engine_loads_checked": 17,
+    "flush_before_and_after_each_round": true,
+    "jit_retained": true,
+    "immutable_identity_before_after": true
+  }
+}

@@ -45,8 +45,10 @@ RUN_DIR="$RUN_DIR" MODEL_PATH="$MODEL_PATH"  bash "$BENCH/engine.sh" w4a8 "$NODE
 python "$BENCH/audit.py" --run-dir "$RUN_D0" "$RUN_D1"  --world-size 16 --out "$AUDIT_JSON"
 ```
 
-审核独立重建所有输入与真实缓存，核验16rank、warm200、两formal100+51、连续满载、宽度6及实际身份。遇窗口内编译、空洞、乱序、降载后重新满载或最终截断日志即拒绝，不向后挑干净窗口。
+最终审核独立重建所有输入与真实缓存，先核验全部16rank原始dispatch counter从0开始连续、覆盖相同，且同step的global batch/decodes元数据一致。不平移任何rank计数器。随后对同cohort、同step的实际满载条件取16rank交集：每rank请求集合、输入宽度和输出保留宽度均必须完整，实际width6。取交集首个连续序列，warm固定核验前200点；formal固定跳过100点后取51个共同端点。全部rank使用完全相同的step IDs，不能分别从各rank自己的首满载点起算。
+
+controller和`collect_node(..., live=True)`只给本节点preview，始终标注global audit pending，不能最终验收。完整两节点原件上的`audit.py`才执行上述全局规则。遇窗口内编译、空洞、乱序、降载后重新满载、计数器不能对齐或最终截断日志即拒绝，不向后挑干净或更快的窗口。重分析既有不可变原件时保留原日志，测量源码身份与重分析auditor/analysis文件SHA分别记录，不能把修正后的审计行为归于旧源码版本。
 
 保留各rank全部50间隔、两轮分布及慢点，报告rank0两轮100间隔合并均值和最慢rank诊断。令`t=ms/step÷1000`，DeepInfer固定宽度换算τ=1+5×0.75=4.75，每用户τ/t、每GPU Bτ/t；0.75是换算假设，不是实测接受率。实际6-token吞吐另记，不能当质量结论。退出测试并清除模拟接受环境后才能做真实DSPARK精度回归。
 
-CPU验证：`python -m unittest discover -s "$BENCH" -p 'test_*.py'`，覆盖真实200步、151端点、完整16rank、缓存/prime/身份、编译与慢点分布。
+CPU验证：`python -m unittest discover -s "$BENCH" -p 'test_*.py'`，覆盖真实200步、151端点、完整16rank、缓存/prime/身份、编译、慢点分布，以及一rank首点只保留4而下一点全6时的统一边界、计数器错位和后面更快序列的拒绝。

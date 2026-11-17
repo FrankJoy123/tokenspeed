@@ -959,6 +959,8 @@
       }
     }
   ],
+  "network_identity_scope": "Requested per-visible-device NIC environment map, NCCL HCA allowlist/GID and native package identities are frozen. INIT/NET provider and actual per-rank HCA selection were not captured; environment assignment is not proof of binding.",
+  "physical_rows_scope": "Encoder rows including default 128-row SWA replay per request: 4224 physical encoder rows for 4096 new tokens. Decoder-tail work is additional model work and does not increase the new-token throughput numerator.",
   "status": "accepted_current_measurement",
   "evidence_scope": "Complete request/cache audits and two independent raw-record audits; original logs and responses retained privately. Absolute host clocks omitted."
 }

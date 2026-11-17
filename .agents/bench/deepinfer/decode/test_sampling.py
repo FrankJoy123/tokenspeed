@@ -34,6 +34,8 @@ from analysis import (
     SAMPLING,
     TAU,
     WARM_STEPS,
+    align_global_dispatches,
+    global_full_prefix,
     output_budget,
     warmup,
     window,
@@ -63,6 +65,7 @@ class SamplingTests(unittest.TestCase):
                 "request_ids": [f"{tag}-lane{rank}-r{j}" for j in range(batch)],
                 "input_rows": 6 * batch,
                 "output_lengths": [6] * batch,
+                "prefill_lengths": [131072] * batch,
                 "compiles": 4,
                 "completed_ns": 1_000_000 + (i + offset) * 10_000_000,
                 "context_min": 131072 + i * 6,
@@ -104,6 +107,73 @@ class SamplingTests(unittest.TestCase):
         self.assertEqual(result["deepinfer_tokens_s_user"], TAU / 0.01)
         self.assertEqual(result["actual_tokens_s_gpu"], 6 / 0.01)
         validate_fixed_width(rows, result, 1)
+
+    def test_global_window_starts_after_last_ranks_first_actual_width6(self):
+        with tempfile.TemporaryDirectory() as temp:
+            roots, _ = self.fixture(Path(temp))
+            path = roots[1] / "steps-15.jsonl"
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+            first = next(
+                row
+                for row in rows
+                if row["request_ids"] == ["b1-r1-lane15-r0"] and row["all_decode"]
+            )
+            first["output_lengths"] = [4]
+            path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+            result = audit_runs(roots)
+            expected = list(range(first["step"] + 101, first["step"] + 152))
+            for row in result["windows"]["b1-r1"].values():
+                self.assertEqual(row["endpoint_steps"], expected)
+                self.assertEqual(row["discarded_full_points"], 100)
+            preview = collect_node(roots[0], 16, live=True)
+            self.assertEqual(
+                preview["windows"]["b1-r1"][0]["endpoint_steps"][0], expected[0] - 1
+            )
+            self.assertIn("pending", preview["acceptance_scope"])
+
+    def test_global_counter_alignment_requires_every_rank_and_dispatch(self):
+        raw = {rank: self.samples("b1-r1", rank=rank) for rank in range(16)}
+        for mutation in ("rank", "counter", "metadata"):
+            changed = copy.deepcopy(raw)
+            if mutation == "rank":
+                del changed[15]
+            elif mutation == "counter":
+                del changed[15][0]
+            else:
+                changed[15][10]["global_decodes"] = [0] * 16
+            with self.assertRaises(RuntimeError):
+                align_global_dispatches(changed)
+
+    def test_global_rule_rejects_gap_and_never_selects_later_faster_segment(self):
+        for key, value in (
+            ("output_lengths", [4]),
+            ("input_rows", 5),
+            ("prefill_lengths", [131071]),
+        ):
+            raw = {
+                rank: self.samples("b1-r1", count=400, rank=rank) for rank in range(16)
+            }
+            raw[15][120][key] = value
+            # A later segment being long and faster cannot repair the first one.
+            for rank in raw:
+                for index, row in enumerate(raw[rank][121:], 121):
+                    row["completed_ns"] = 1_300_000_000 + (index - 121) * 1_000_000
+            with self.assertRaisesRegex(RuntimeError, "resumed"):
+                global_full_prefix(align_global_dispatches(raw), "b1-r1-lane", 1)
+
+    def test_global_warm_count_and_compile_checks_cover_last_rank(self):
+        raw = {rank: self.samples("b1-r0", count=200, rank=rank) for rank in range(16)}
+        raw[15][0]["output_lengths"] = [4]
+        common = global_full_prefix(align_global_dispatches(raw), "b1-r0-lane", 1)
+        with self.assertRaisesRegex(RuntimeError, "200.*observed 199"):
+            warmup(common[0], "b1-r0-lane", 1, world_size=16)
+        raw = {rank: self.samples("b1-r1", rank=rank) for rank in range(16)}
+        raw[15][0]["output_lengths"] = [4]
+        for row in raw[15][151:]:
+            row["compiles"] = 5
+        common = global_full_prefix(align_global_dispatches(raw), "b1-r1-lane", 1)
+        with self.assertRaisesRegex(RuntimeError, "compilation inside"):
+            strict_window(common[15], "b1-r1-lane", 1)
 
     def test_no_search_past_broken_or_underloaded_prefix(self):
         for key, value in (
