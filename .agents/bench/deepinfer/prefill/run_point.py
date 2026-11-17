@@ -175,7 +175,6 @@ def main():
         "--force-deterministic-rsag",
         "--all2all-backend",
         "none",
-        "--disable-autotune",
         "--enable-prefix-caching",
         "--kvstore-write-policy",
         "write_through",

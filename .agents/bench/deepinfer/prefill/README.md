@@ -21,7 +21,7 @@ python "$BENCH/audit_point.py" --point "$PWD/_local/prefill-cp8-4k"
 
 使用新目录依次测8192/16384；DP8将`--layout`改为`dp8`。两条曲线可在两台独占的八卡节点并行，每节点各预算依次执行。脚本将DeepGEMM、DeepEP、Triton、CUDA、CUTE、kernel缓存以及FlashInfer workspace、XDG缓存放入本点输出目录的`cache/`。OOM或注册失败保留失败记录，不补零、删点或静默重试。
 
-入口固定R0自然路由、BF16 Indexer、SM120 DeepEP=1、Elastic FP8/BF16传输、capacity2048、shared-overlap0。R0/trivial使用默认专家映射，不指定副本分发算法。脚本清除Decode固定接受、路由模拟、旧物理路由、host trace和Indexer kernel override残留，实际选择写入`invocation.json`。
+入口固定R0自然路由、BF16 Indexer、SM120 DeepEP=1、Elastic FP8/BF16传输、capacity2048、shared-overlap0。保留TokenSpeed默认autotune，由启动阶段选择并缓存适用tactic；正式窗口仍拒绝编译污染。R0/trivial使用默认专家映射，不指定副本分发算法。脚本清除Decode固定接受、路由模拟、旧物理路由、host trace和Indexer kernel override残留，实际选择写入`invocation.json`。
 
 `sitecustomize.py`仅在`PREFILL_BENCH_OBSERVE=1`安装测试观察器，记录现有`ModelExecutionResult.sync`完成点、`ForwardOp.extend_replay_lens`、DP metadata和compile monitor，不增加GPU工作。NORMAL QCP的纯Decode队尾使用已有复制Decode路径。
 
