@@ -5,4 +5,4 @@ MXFP4 专家权重使用运行时 FP8 激活（`--moe-mxfp4-fp8-activation`）�
 1. [准备依赖](setup/README.md)，从同一源码构建四个组件。
 2. [核对补丁](patches/README.md)，不要混用未标识的本地第三方修改。
 3. [启动 P 与两个 D](launch/README.md)，两台 D 的 node rank 为0/1。
-4. 用[性能方法](../../bench/README.md)和[质量方法](../../eval/README.md)分别验证。
+4. [启动单机 DP8 Prefill Pareto](launch/README.md#dp8-prefill-pareto)，用[性能方法](../../bench/README.md)和[质量方法](../../eval/README.md)分别验证。
