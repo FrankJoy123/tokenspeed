@@ -62,7 +62,9 @@ def steady_window(
     dp_size: int,
     warmup_steps: int,
     measure_steps: int,
+    active_lanes: int,
 ) -> dict:
+    global_rows = [rows] * active_lanes + [0] * (dp_size - active_lanes)
     records = [
         s
         for s in samples
@@ -73,10 +75,10 @@ def steady_window(
     runs, run = [], []
     for record in records:
         full = (
-            record["all_extend"]
+            record["global_decodes"] == [0] * dp_size
             and record["num_extends"] == len(record["request_ids"])
             and record["prefill_rows"] == rows
-            and record["global_rows"] == [rows] * dp_size
+            and record["global_rows"] == global_rows
         )
         if not full or (run and record["step"] != run[-1]["step"] + 1):
             if run:
@@ -145,6 +147,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--engine-log", type=Path, required=True)
+    parser.add_argument("--active-lanes", type=int, required=True)
+    parser.add_argument("--queue-requests-per-lane", type=int, required=True)
     parser.add_argument("--prefix-tokens", type=int, required=True)
     parser.add_argument("--new-tokens", type=int, required=True)
     parser.add_argument("--computed-rows-per-request", type=int, required=True)
@@ -203,27 +207,10 @@ def main() -> None:
         4096,
         4224,
     )
-    # Per-queue supply is independent of the number of formal cohorts.
-    # Retain the current DeepInfer-style 31-step supply and CP queue mapping.
-    supply_steps = args.warmup_steps + 2 * (args.measure_steps + 1) + 4
-    per_rank = max(
-        64,
-        min(
-            math.ceil(
-                supply_steps
-                * args.prefill_rows_per_rank
-                / args.computed_rows_per_request
-            ),
-            512,
-        ),
-    )
-    if cp > 1:
-        units = (
-            args.prefill_rows_per_rank
-            // args.computed_rows_per_request
-            * args.new_tokens
-        ) // (2 * cp)
-        per_rank = next(n for n in range(per_rank, units + 1) if units % n == 0)
+    active = args.active_lanes
+    assert 1 <= active <= dp
+    per_rank = args.queue_requests_per_lane
+    total_requests = per_rank * active
     assert (
         per_rank * args.computed_rows_per_request
         >= (args.warmup_steps + args.measure_steps + 1) * args.prefill_rows_per_rank
@@ -255,7 +242,7 @@ def main() -> None:
     rng = random.Random(args.seed)
     prefix = rng.choices(vocab, k=args.prefix_tokens)
     # Different suffixes prevent a completed request from extending another's cache hit.
-    suffixes = [rng.choices(vocab, k=args.new_tokens) for _ in range(per_rank * dp)]
+    suffixes = [rng.choices(vocab, k=args.new_tokens) for _ in range(total_requests)]
     save(
         "configuration.json",
         {
@@ -264,7 +251,8 @@ def main() -> None:
             | {"out": str(args.out), "engine_log": str(args.engine_log)},
             "dp": dp,
             "requests_per_rank": per_rank,
-            "requests_per_round": per_rank * dp,
+            "requests_per_round": total_requests,
+            "active_attention_lanes": active,
             "output_tokens": 1,
             "eplb": False,
             "redundant_experts": args.extra_experts,
@@ -272,6 +260,9 @@ def main() -> None:
             "routing_scope": "Natural expert routing without redundant expert replicas or routing simulation.",
             "cp": cp,
             "prefix_sha256": hashlib.sha256(json.dumps(prefix).encode()).hexdigest(),
+            "suffix_pool_sha256": hashlib.sha256(
+                json.dumps(suffix_hashes).encode()
+            ).hexdigest(),
             "sampling": sampling | {"top_logprobs": 5},
             "differences_from_upstream": "TokenSpeed executor, explicit replica count, distinct suffixes instead of internal sequence fork, 128-row SWA prefix replay; no DeepInfer internal sampler_force_topk=1024; report both physical and logical rows.",
         },
@@ -306,7 +297,7 @@ def main() -> None:
 
             async def submit():
                 for i, suffix in enumerate(suffixes):
-                    r = request(f"{tag}-request-{i}", prefix + suffix, i % dp)
+                    r = request(f"{tag}-request-{i}", prefix + suffix, i % active)
                     results[r.rid] = Completion()
                     await driver.frontend.generate(
                         [bytes(f) for f in encoder.encode(r)]
@@ -354,11 +345,12 @@ def main() -> None:
                                 x.startswith(tag + "-request-")
                                 for x in sample["request_ids"]
                             )
-                            and sample["all_extend"]
+                            and sample["global_decodes"] == [0] * dp
                             and sample["num_extends"] == len(sample["request_ids"])
                             and sample["prefill_rows"] == args.prefill_rows_per_rank
                             and sample["global_rows"]
-                            == [args.prefill_rows_per_rank] * dp
+                            == [args.prefill_rows_per_rank] * active
+                            + [0] * (dp - active)
                         )
                         if not full:
                             count = 0
@@ -421,15 +413,15 @@ def main() -> None:
                 time.sleep(0.1)
             stage("priming", round=iteration)
             primes = driver.generate(
-                [request(f"{tag}-prime-{lane}", prefix, lane) for lane in range(dp)]
+                [request(f"{tag}-prime-{lane}", prefix, lane) for lane in range(active)]
             )
-            assert len(primes) == dp and all(
+            assert len(primes) == active and all(
                 p.finish_reason != "abort" and p.completion_tokens == 1 for p in primes
             )
             save(f"r{iteration}-primes.json", [dataclasses.asdict(p) for p in primes])
-            stage("queued-prefill", round=iteration, requests=per_rank * dp)
+            stage("queued-prefill", round=iteration, requests=total_requests)
             results = asyncio.run(queued_round(tag, profile=profiling))
-            assert len(results) == per_rank * dp
+            assert len(results) == total_requests
             for rid, result in results.items():
                 assert result.finish_reason != "abort", (
                     rid,
@@ -468,7 +460,7 @@ def main() -> None:
             by_rank = defaultdict(list)
             for sample in read_samples(args.engine_log):
                 by_rank[sample["rank"]].append(sample)
-            assert sorted(by_rank) == list(range(dp)), sorted(by_rank)
+            assert all(rank in by_rank for rank in range(active)), sorted(by_rank)
             windows = {
                 rank: steady_window(
                     records,
@@ -477,8 +469,10 @@ def main() -> None:
                     dp_size=dp,
                     warmup_steps=args.warmup_steps,
                     measure_steps=args.measure_steps,
+                    active_lanes=active,
                 )
                 for rank, records in by_rank.items()
+                if rank < active
             }
             assert all(
                 w["computed_rows"] == args.prefill_rows_per_rank * args.measure_steps
@@ -491,8 +485,10 @@ def main() -> None:
                 "requests": len(results),
                 "rank0": windows[0]
                 | {
-                    "new_tokens_s_gpu": windows[0]["new_tokens_s_gpu"] / cp,
-                    "computed_tokens_s_gpu": windows[0]["computed_tokens_s_gpu"] / cp,
+                    "new_tokens_s_gpu": windows[0]["new_tokens_s_gpu"] * active / 8,
+                    "computed_tokens_s_gpu": windows[0]["computed_tokens_s_gpu"]
+                    * active
+                    / 8,
                 },
                 "cp": cp,
                 "non_cached_tokens": args.new_tokens,
@@ -506,7 +502,7 @@ def main() -> None:
             save(f"r{iteration}-window.json", summary)
             save("summary.json", summaries)
             print(json.dumps(summary), flush=True)
-        stage("complete", rounds=args.rounds, requests=per_rank * dp * args.rounds)
+        stage("complete", rounds=args.rounds, requests=total_requests * args.rounds)
     except BaseException as error:
         stage("failed", error=repr(error))
         raise

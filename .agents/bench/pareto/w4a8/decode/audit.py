@@ -30,6 +30,7 @@ from analysis import (
     BATCHES,
     CACHED_PREFIX,
     CONTEXT,
+    FAST_INDEXER_ENV,
     FORMAL_INTERVALS,
     FORMAL_SKIP,
     SAMPLING,
@@ -267,12 +268,8 @@ def validate_run_identity(value):
         ),
         "missing model metadata/header manifest SHA",
     )
-    require(value["indexer"].get("precision") == "bf16", "requires BF16 Indexer")
-    for key in (
-        "TOKENSPEED_ENABLE_SM120_NATIVE_FP4_INDEXER",
-        "TOKENSPEED_ENABLE_SM120_FP4_CANDIDATE_INDEXER",
-    ):
-        require(value["indexer"].get(key) == "0", f"invalid {key}")
+    for key, expected in FAST_INDEXER_ENV.items():
+        require(value["indexer"].get(key) == expected, f"invalid {key}")
     network = value["network"]
     require(
         network.get("wire") == "elastic_fp8_bf16"
@@ -614,6 +611,7 @@ def audit_runs(roots, world_size=WORLD_SIZE):
     }
     result["input_audit"] = audit_inputs(roots[0], config)
     result["run_identity_sha256"] = identity_sha
+    result["indexer"] = fixed["indexer"]
     return result
 
 

@@ -24,5 +24,3 @@ cases on the intended EP16 hosts extends that coverage without loading a model;
 a finite pass does not exclude rare transport/visibility interleavings. Full
 model timing, real speculation and dataset quality remain owned by
 [the reproducibility recipes](../../../../.agents/README.md).
-
-The [current EP16 validation summary](../../../../.agents/bench/deepinfer/w4a8/elastic-validation.json) records the measured source/dependencies and test scope.

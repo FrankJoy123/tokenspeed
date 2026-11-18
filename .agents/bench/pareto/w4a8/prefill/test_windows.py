@@ -38,7 +38,7 @@ class PrefillWindowTests(unittest.TestCase):
             {
                 "request_ids": [f"cohort-request-{i}"],
                 "step": i,
-                "all_extend": True,
+                "global_decodes": [0],
                 "num_extends": 1,
                 "prefill_rows": 4224,
                 "global_rows": [4224],
@@ -56,6 +56,7 @@ class PrefillWindowTests(unittest.TestCase):
             request_prefix="cohort-request-",
             rows=4224,
             dp_size=1,
+            active_lanes=1,
             warmup_steps=5,
             measure_steps=10,
         )
@@ -75,7 +76,7 @@ class PrefillWindowTests(unittest.TestCase):
         for field, value in [
             ("global_rows", [4223]),
             ("prefill_rows", 4223),
-            ("all_extend", False),
+            ("global_decodes", [1]),
         ]:
             rows = self.rows()
             rows[8][field] = value
@@ -255,6 +256,7 @@ class PrefillAuditTests(unittest.TestCase):
             "redundant_experts": 0,
             "eplb": False,
             "dp": dp,
+            "active_attention_lanes": dp,
             "cp": 8 // dp,
             "requests_per_round": 64 * dp,
             "prefix_sha256": "fixture-prefix",
@@ -301,7 +303,7 @@ class PrefillAuditTests(unittest.TestCase):
                     "rank": rank,
                     "request_ids": [rid],
                     "step": step,
-                    "all_extend": True,
+                    "global_decodes": [0] * dp,
                     "num_extends": 1,
                     "prefill_rows": 4224,
                     "global_rows": [4224] * dp,

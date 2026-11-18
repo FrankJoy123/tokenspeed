@@ -29,6 +29,7 @@ export TOKENSPEED_EXPERIMENT_SM120_SHARED_OVERLAP=1
 export TOKENSPEED_CUDA_ARCH=120a FLASHINFER_CUDA_ARCH_LIST=12.0a
 export TOKENSPEED_DISABLE_PLUGINS=qwen_sm120 TOKENSPEED_KERNEL_DISABLE_PLUGINS=sm120
 export TOKENSPEED_ENABLE_SM120_NATIVE_FP4_INDEXER=0 TOKENSPEED_ENABLE_SM120_FP4_CANDIDATE_INDEXER=0
+export TOKENSPEED_EXPERIMENT_SM120_DG_INDEXER=1 TOKENSPEED_EXPERIMENT_SM120_DEEPSELECT=1
 unset PREFILL_BENCH_OBSERVE TOKENSPEED_PREFILL_BENCHMARK TOKENSPEED_V41_FORCE_PHYSICAL_ROUTING
 unset TOKENSPEED_MOE_ROUTING_SIMULATION TOKENSPEED_TRACE_HOST_STAGES
 unset TOKENSPEED_KERNEL_OVERRIDE_ATTENTION_DSV41_INDEX_TOPK
@@ -61,6 +62,7 @@ if [[ "$print_env" == 1 ]]; then
 import json,os
 keys=['TOKENSPEED_EXPERIMENT_SM120_DEEPEP','TOKENSPEED_EXPERIMENT_SM120_SHARED_OVERLAP',
       'TOKENSPEED_SM120_DEEPEP_WIRE','TOKENSPEED_SM120_DEEPEP_CAPACITY',
+      'TOKENSPEED_EXPERIMENT_SM120_DG_INDEXER','TOKENSPEED_EXPERIMENT_SM120_DEEPSELECT',
       'TOKENSPEED_ENABLE_SM120_NATIVE_FP4_INDEXER','TOKENSPEED_ENABLE_SM120_FP4_CANDIDATE_INDEXER',
       'TOKENSPEED_SPEC_SIMULATED_ACCEPT_LEN','TOKENSPEED_MOE_ROUTING_SIMULATION',
       'TOKENSPEED_V41_FORCE_PHYSICAL_ROUTING','TOKENSPEED_PREFILL_BENCHMARK',
@@ -70,10 +72,20 @@ print(json.dumps({key:os.environ.get(key) for key in keys}))
 PYENV
  exit 0
 fi
-"$VIRTUAL_ENV/bin/python" "$script_dir/../../../deploy/launch/preflight_model.py" \
+python - "$point/run-identity.json" <<'PYINDEXER'
+import json, os, sys
+from pathlib import Path
+
+identity = json.loads(Path(sys.argv[1]).read_text())["indexer"]
+for key in ("TOKENSPEED_EXPERIMENT_SM120_DG_INDEXER", "TOKENSPEED_EXPERIMENT_SM120_DEEPSELECT",
+            "TOKENSPEED_ENABLE_SM120_NATIVE_FP4_INDEXER", "TOKENSPEED_ENABLE_SM120_FP4_CANDIDATE_INDEXER"):
+    if identity.get(key) != os.environ.get(key):
+        raise SystemExit(f"{key} differs from the frozen run identity")
+PYINDEXER
+"$VIRTUAL_ENV/bin/python" "$script_dir/../../../../deploy/launch/preflight_model.py" \
  --model "$model" --profile w4a8 --output "$point/model-identity.json"
-"$VIRTUAL_ENV/bin/python" "$script_dir/../../../deploy/setup/identity.py" \
- --source "$script_dir/../../../.." --output "$point/runtime-identity.json"
+"$VIRTUAL_ENV/bin/python" "$script_dir/../../../../deploy/setup/identity.py" \
+ --source "${RUNTIME_SOURCE:-$script_dir/../../../../..}" --output "$point/runtime-identity.json"
 exec "$VIRTUAL_ENV/bin/python" -m tokenspeed.runtime.entrypoints.engine \
  --distributed-timeout-seconds "$distributed_timeout" \
  --model "$model" --trust-remote-code --dtype bfloat16 \

@@ -7,6 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from analysis import FAST_INDEXER_ENV
 from audit import validate_run_identity
 
 PACKAGES = (
@@ -42,8 +43,12 @@ def main():
     parser.add_argument("--gid-index", required=True, type=int)
     parser.add_argument("--socket-ifname", required=True)
     parser.add_argument("--out", required=True, type=Path)
+    parser.add_argument(
+        "--source", type=Path, help="Optional checkout used to build the runtime"
+    )
     args = parser.parse_args()
-    source = Path(__file__).resolve().parents[4]
+    recipe = Path(__file__).resolve().parents[5]
+    source = args.source.resolve() if args.source else recipe
     out = args.out.resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
     if out.exists():
@@ -62,7 +67,7 @@ def main():
     subprocess.run(
         [
             sys.executable,
-            str(source / ".agents/deploy/setup/identity.py"),
+            str(recipe / ".agents/deploy/setup/identity.py"),
             "--source",
             str(source),
             "--output",
@@ -77,7 +82,7 @@ def main():
     subprocess.run(
         [
             sys.executable,
-            str(source / ".agents/deploy/launch/preflight_model.py"),
+            str(recipe / ".agents/deploy/launch/preflight_model.py"),
             "--model",
             str(args.model),
             "--profile",
@@ -136,11 +141,7 @@ def main():
             "checkpoint": str(args.model),
             "headers_manifest_sha256": digest(model),
         },
-        "indexer": {
-            "precision": "bf16",
-            "TOKENSPEED_ENABLE_SM120_NATIVE_FP4_INDEXER": "0",
-            "TOKENSPEED_ENABLE_SM120_FP4_CANDIDATE_INDEXER": "0",
-        },
+        "indexer": FAST_INDEXER_ENV,
         "network": {
             "wire": "elastic_fp8_bf16",
             "capacity": 128,

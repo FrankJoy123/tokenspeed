@@ -68,7 +68,6 @@ def main():
         parser.add_argument("--" + name, required=True, type=int)
     parser.add_argument("--run-identity", type=Path, required=True)
     parser.add_argument("--batches", nargs="+", type=int, required=True)
-    parser.add_argument("--profile-batches", nargs="*", type=int, required=True)
     parser.add_argument("--acceptance-mode", choices=["fixed"], required=True)
     args = parser.parse_args()
     out = args.out
@@ -77,7 +76,6 @@ def main():
     assert (
         args.context == CONTEXT and args.rounds == 2 and args.world_size == WORLD_SIZE
     )
-    assert not args.profile_batches, "Profiling is outside this measurement protocol"
     assert args.batches and len(set(args.batches)) == len(args.batches)
     assert all(batch in BATCHES for batch in args.batches)
     import hashlib
@@ -316,7 +314,6 @@ def main():
             "complete",
             measurements=2 * len(args.batches),
             world_size=args.world_size,
-            profile_batches=[],
         )
     except BaseException as error:
         state("failed", error=repr(error))

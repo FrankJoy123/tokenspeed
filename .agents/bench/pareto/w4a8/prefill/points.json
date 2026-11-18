@@ -1,0 +1,409 @@
+[
+  {
+    "layout": "DP8",
+    "label": 512,
+    "indexer": "bf16",
+    "source_commit": "5fcb40a13f86f6c892696bcb3f774aa0ea1e6a51",
+    "prefix_sha256": "ae1d80328c2678477932d474ad244c62260ac95c368ac404872983972dc083a2",
+    "queue_requests_per_lane": 20,
+    "max_model_len": 135168,
+    "resident_sequences": 160,
+    "retraction_snapshot_ratio": null,
+    "interval_ms": [
+      1727.014787,
+      1725.98002,
+      1732.519196,
+      1725.162118,
+      1723.869117,
+      1727.272583,
+      1728.610388,
+      1724.641115,
+      1729.358935,
+      1730.460065
+    ],
+    "identity": {
+      "source_tree_sha256": "cdd6b3a58c63c3e901b787747641c7dfcc3727597c8295a6dace5e0285f36015",
+      "model_headers_manifest_sha256": "92ba50ebbd046decdf8d34c77097f5fbe5231fc9d4c041bac5211e0f6968ec30",
+      "host_binary_sha256": "83a9811e4407c32a592e0cbd72cb266688d25b2ee1260c3542ab7e742601e033",
+      "native_fingerprints_sha256": "8118ac40e06c1959b50de813553d6960f23f5c2f0df74a6634b27cf1c95f592b",
+      "installed_packages_sha256": "070983be0ad7457086d942566c82c133f688e66bf4c8ebd3a8dd97a9474f2065",
+      "versions": {
+        "torch": "2.14.0+cu130",
+        "flashinfer-python": "0.7.4",
+        "tokenspeed-deepgemm-sm120": "2.5.0+sm120.14073b4",
+        "tokenspeed-triton": "3.9.10.post20261028",
+        "nvidia-nccl-cu13": "2.30.7"
+      }
+    }
+  },
+  {
+    "layout": "DP8",
+    "label": 1024,
+    "indexer": "bf16",
+    "source_commit": "5fcb40a13f86f6c892696bcb3f774aa0ea1e6a51",
+    "prefix_sha256": "ae1d80328c2678477932d474ad244c62260ac95c368ac404872983972dc083a2",
+    "queue_requests_per_lane": 20,
+    "max_model_len": 135168,
+    "resident_sequences": 160,
+    "retraction_snapshot_ratio": null,
+    "interval_ms": [
+      1755.793638,
+      1754.317115,
+      1755.13457,
+      1758.051264,
+      1755.845856,
+      1756.454804,
+      1753.997352,
+      1757.166491,
+      1755.202268,
+      1755.905676
+    ],
+    "identity": {
+      "source_tree_sha256": "cdd6b3a58c63c3e901b787747641c7dfcc3727597c8295a6dace5e0285f36015",
+      "model_headers_manifest_sha256": "92ba50ebbd046decdf8d34c77097f5fbe5231fc9d4c041bac5211e0f6968ec30",
+      "host_binary_sha256": "83a9811e4407c32a592e0cbd72cb266688d25b2ee1260c3542ab7e742601e033",
+      "native_fingerprints_sha256": "8118ac40e06c1959b50de813553d6960f23f5c2f0df74a6634b27cf1c95f592b",
+      "installed_packages_sha256": "66486147a6ac18caf3fa572602fd6967698332a74f4b5c79c345c3b7bc804ae6",
+      "versions": {
+        "torch": "2.14.0+cu130",
+        "flashinfer-python": "0.7.4",
+        "tokenspeed-deepgemm-sm120": "2.5.0+sm120.14073b4",
+        "tokenspeed-triton": "3.9.10.post20261028",
+        "nvidia-nccl-cu13": "2.30.7"
+      }
+    }
+  },
+  {
+    "layout": "DP8",
+    "label": 2048,
+    "indexer": "bf16",
+    "source_commit": "5fcb40a13f86f6c892696bcb3f774aa0ea1e6a51",
+    "prefix_sha256": "ae1d80328c2678477932d474ad244c62260ac95c368ac404872983972dc083a2",
+    "queue_requests_per_lane": 20,
+    "max_model_len": 135168,
+    "resident_sequences": 160,
+    "retraction_snapshot_ratio": null,
+    "interval_ms": [
+      1802.806722,
+      1805.945939,
+      1807.694644,
+      2063.131658,
+      1802.127532,
+      1799.271001,
+      1800.09737,
+      1804.45981,
+      1803.846294,
+      1802.653023
+    ],
+    "identity": {
+      "source_tree_sha256": "cdd6b3a58c63c3e901b787747641c7dfcc3727597c8295a6dace5e0285f36015",
+      "model_headers_manifest_sha256": "92ba50ebbd046decdf8d34c77097f5fbe5231fc9d4c041bac5211e0f6968ec30",
+      "host_binary_sha256": "83a9811e4407c32a592e0cbd72cb266688d25b2ee1260c3542ab7e742601e033",
+      "native_fingerprints_sha256": "8118ac40e06c1959b50de813553d6960f23f5c2f0df74a6634b27cf1c95f592b",
+      "installed_packages_sha256": "070983be0ad7457086d942566c82c133f688e66bf4c8ebd3a8dd97a9474f2065",
+      "versions": {
+        "torch": "2.14.0+cu130",
+        "flashinfer-python": "0.7.4",
+        "tokenspeed-deepgemm-sm120": "2.5.0+sm120.14073b4",
+        "tokenspeed-triton": "3.9.10.post20261028",
+        "nvidia-nccl-cu13": "2.30.7"
+      }
+    }
+  },
+  {
+    "layout": "DP8",
+    "label": 4096,
+    "indexer": "native-fp4",
+    "source_commit": "5fcb40a13f86f6c892696bcb3f774aa0ea1e6a51",
+    "prefix_sha256": "ae1d80328c2678477932d474ad244c62260ac95c368ac404872983972dc083a2",
+    "queue_requests_per_lane": 64,
+    "max_model_len": 1048576,
+    "resident_sequences": 512,
+    "retraction_snapshot_ratio": null,
+    "interval_ms": [
+      1416.071973,
+      1416.604524,
+      1416.136736,
+      1418.596169,
+      1423.710024,
+      1415.445297,
+      1421.164297,
+      1415.085636,
+      1416.797025,
+      1421.603293
+    ],
+    "identity": {
+      "source_tree_sha256": "cdd6b3a58c63c3e901b787747641c7dfcc3727597c8295a6dace5e0285f36015",
+      "model_headers_manifest_sha256": "92ba50ebbd046decdf8d34c77097f5fbe5231fc9d4c041bac5211e0f6968ec30",
+      "host_binary_sha256": "83a9811e4407c32a592e0cbd72cb266688d25b2ee1260c3542ab7e742601e033",
+      "native_fingerprints_sha256": "8118ac40e06c1959b50de813553d6960f23f5c2f0df74a6634b27cf1c95f592b",
+      "installed_packages_sha256": "070983be0ad7457086d942566c82c133f688e66bf4c8ebd3a8dd97a9474f2065",
+      "versions": {
+        "torch": "2.14.0+cu130",
+        "flashinfer-python": "0.7.4",
+        "tokenspeed-deepgemm-sm120": "2.5.0+sm120.14073b4",
+        "tokenspeed-triton": "3.9.10.post20261028",
+        "nvidia-nccl-cu13": "2.30.7"
+      }
+    }
+  },
+  {
+    "layout": "DP8",
+    "label": 8192,
+    "indexer": "native-fp4",
+    "source_commit": "5fcb40a13f86f6c892696bcb3f774aa0ea1e6a51",
+    "prefix_sha256": "ae1d80328c2678477932d474ad244c62260ac95c368ac404872983972dc083a2",
+    "queue_requests_per_lane": 64,
+    "max_model_len": 1048576,
+    "resident_sequences": 512,
+    "retraction_snapshot_ratio": null,
+    "interval_ms": [
+      3229.790327,
+      3225.249265,
+      3232.044921,
+      3229.993869,
+      3234.520931,
+      3232.67673,
+      3238.439826,
+      3232.364511,
+      3228.403344,
+      3239.415364
+    ],
+    "identity": {
+      "source_tree_sha256": "cdd6b3a58c63c3e901b787747641c7dfcc3727597c8295a6dace5e0285f36015",
+      "model_headers_manifest_sha256": "92ba50ebbd046decdf8d34c77097f5fbe5231fc9d4c041bac5211e0f6968ec30",
+      "host_binary_sha256": "83a9811e4407c32a592e0cbd72cb266688d25b2ee1260c3542ab7e742601e033",
+      "native_fingerprints_sha256": "8118ac40e06c1959b50de813553d6960f23f5c2f0df74a6634b27cf1c95f592b",
+      "installed_packages_sha256": "070983be0ad7457086d942566c82c133f688e66bf4c8ebd3a8dd97a9474f2065",
+      "versions": {
+        "torch": "2.14.0+cu130",
+        "flashinfer-python": "0.7.4",
+        "tokenspeed-deepgemm-sm120": "2.5.0+sm120.14073b4",
+        "tokenspeed-triton": "3.9.10.post20261028",
+        "nvidia-nccl-cu13": "2.30.7"
+      }
+    }
+  },
+  {
+    "layout": "DP8",
+    "label": 16384,
+    "indexer": "bf16",
+    "source_commit": "5e0e2839cf92d054adad09812fff9441b5ac947e",
+    "prefix_sha256": "ae1d80328c2678477932d474ad244c62260ac95c368ac404872983972dc083a2",
+    "queue_requests_per_lane": 124,
+    "max_model_len": 1048576,
+    "resident_sequences": 992,
+    "retraction_snapshot_ratio": null,
+    "interval_ms": [
+      7979.653794,
+      7982.65997,
+      7982.267846,
+      7981.952268,
+      7985.305813,
+      7978.826527,
+      7970.960518,
+      7977.183771,
+      7975.254638,
+      7981.327401
+    ],
+    "identity": {
+      "source_tree_sha256": "8c4eddb9fd2c3a3ab4c85904b773546b50a44b1891e88709cbc894d881f7bcbb",
+      "model_headers_manifest_sha256": "92ba50ebbd046decdf8d34c77097f5fbe5231fc9d4c041bac5211e0f6968ec30",
+      "host_binary_sha256": "83a9811e4407c32a592e0cbd72cb266688d25b2ee1260c3542ab7e742601e033",
+      "native_fingerprints_sha256": "8118ac40e06c1959b50de813553d6960f23f5c2f0df74a6634b27cf1c95f592b",
+      "installed_packages_sha256": "070983be0ad7457086d942566c82c133f688e66bf4c8ebd3a8dd97a9474f2065",
+      "versions": {
+        "torch": "2.14.0+cu130",
+        "flashinfer-python": "0.7.4",
+        "tokenspeed-deepgemm-sm120": "2.5.0+sm120.14073b4",
+        "tokenspeed-triton": "3.9.10.post20261028",
+        "nvidia-nccl-cu13": "2.30.7"
+      }
+    }
+  },
+  {
+    "layout": "QCP8",
+    "label": 512,
+    "indexer": "native-fp4",
+    "source_commit": "5fcb40a13f86f6c892696bcb3f774aa0ea1e6a51",
+    "prefix_sha256": "ae1d80328c2678477932d474ad244c62260ac95c368ac404872983972dc083a2",
+    "queue_requests_per_lane": 64,
+    "max_model_len": 1048576,
+    "resident_sequences": 64,
+    "retraction_snapshot_ratio": null,
+    "interval_ms": [
+      263.742124,
+      262.699572,
+      264.753073,
+      264.735752,
+      262.912327,
+      263.515489,
+      264.27137,
+      263.949078,
+      261.986723,
+      262.261313
+    ],
+    "identity": {
+      "source_tree_sha256": "cdd6b3a58c63c3e901b787747641c7dfcc3727597c8295a6dace5e0285f36015",
+      "model_headers_manifest_sha256": "92ba50ebbd046decdf8d34c77097f5fbe5231fc9d4c041bac5211e0f6968ec30",
+      "host_binary_sha256": "83a9811e4407c32a592e0cbd72cb266688d25b2ee1260c3542ab7e742601e033",
+      "native_fingerprints_sha256": "8118ac40e06c1959b50de813553d6960f23f5c2f0df74a6634b27cf1c95f592b",
+      "installed_packages_sha256": "070983be0ad7457086d942566c82c133f688e66bf4c8ebd3a8dd97a9474f2065",
+      "versions": {
+        "torch": "2.14.0+cu130",
+        "flashinfer-python": "0.7.4",
+        "tokenspeed-deepgemm-sm120": "2.5.0+sm120.14073b4",
+        "tokenspeed-triton": "3.9.10.post20261028",
+        "nvidia-nccl-cu13": "2.30.7"
+      }
+    }
+  },
+  {
+    "layout": "QCP8",
+    "label": 1024,
+    "indexer": "native-fp4",
+    "source_commit": "5fcb40a13f86f6c892696bcb3f774aa0ea1e6a51",
+    "prefix_sha256": "ae1d80328c2678477932d474ad244c62260ac95c368ac404872983972dc083a2",
+    "queue_requests_per_lane": 64,
+    "max_model_len": 1048576,
+    "resident_sequences": 64,
+    "retraction_snapshot_ratio": null,
+    "interval_ms": [
+      552.891076,
+      551.078163,
+      551.758756,
+      552.115157,
+      552.523754,
+      550.313005,
+      550.492026,
+      551.010619,
+      552.055554,
+      552.432957
+    ],
+    "identity": {
+      "source_tree_sha256": "cdd6b3a58c63c3e901b787747641c7dfcc3727597c8295a6dace5e0285f36015",
+      "model_headers_manifest_sha256": "92ba50ebbd046decdf8d34c77097f5fbe5231fc9d4c041bac5211e0f6968ec30",
+      "host_binary_sha256": "83a9811e4407c32a592e0cbd72cb266688d25b2ee1260c3542ab7e742601e033",
+      "native_fingerprints_sha256": "8118ac40e06c1959b50de813553d6960f23f5c2f0df74a6634b27cf1c95f592b",
+      "installed_packages_sha256": "070983be0ad7457086d942566c82c133f688e66bf4c8ebd3a8dd97a9474f2065",
+      "versions": {
+        "torch": "2.14.0+cu130",
+        "flashinfer-python": "0.7.4",
+        "tokenspeed-deepgemm-sm120": "2.5.0+sm120.14073b4",
+        "tokenspeed-triton": "3.9.10.post20261028",
+        "nvidia-nccl-cu13": "2.30.7"
+      }
+    }
+  },
+  {
+    "layout": "QCP8",
+    "label": 2048,
+    "indexer": "bf16",
+    "source_commit": "5fcb40a13f86f6c892696bcb3f774aa0ea1e6a51",
+    "prefix_sha256": "ae1d80328c2678477932d474ad244c62260ac95c368ac404872983972dc083a2",
+    "queue_requests_per_lane": 128,
+    "max_model_len": 1048576,
+    "resident_sequences": 128,
+    "retraction_snapshot_ratio": null,
+    "interval_ms": [
+      1279.562877,
+      1277.420709,
+      1277.723497,
+      1275.593162,
+      1276.93512,
+      1279.266029,
+      1279.78665,
+      1277.371077,
+      1278.277891,
+      1276.87527
+    ],
+    "identity": {
+      "source_tree_sha256": "cdd6b3a58c63c3e901b787747641c7dfcc3727597c8295a6dace5e0285f36015",
+      "model_headers_manifest_sha256": "92ba50ebbd046decdf8d34c77097f5fbe5231fc9d4c041bac5211e0f6968ec30",
+      "host_binary_sha256": "83a9811e4407c32a592e0cbd72cb266688d25b2ee1260c3542ab7e742601e033",
+      "native_fingerprints_sha256": "8118ac40e06c1959b50de813553d6960f23f5c2f0df74a6634b27cf1c95f592b",
+      "installed_packages_sha256": "070983be0ad7457086d942566c82c133f688e66bf4c8ebd3a8dd97a9474f2065",
+      "versions": {
+        "torch": "2.14.0+cu130",
+        "flashinfer-python": "0.7.4",
+        "tokenspeed-deepgemm-sm120": "2.5.0+sm120.14073b4",
+        "tokenspeed-triton": "3.9.10.post20261028",
+        "nvidia-nccl-cu13": "2.30.7"
+      }
+    }
+  },
+  {
+    "layout": "QCP8",
+    "label": 4096,
+    "indexer": "bf16",
+    "source_commit": "5fcb40a13f86f6c892696bcb3f774aa0ea1e6a51",
+    "prefix_sha256": "ae1d80328c2678477932d474ad244c62260ac95c368ac404872983972dc083a2",
+    "queue_requests_per_lane": 160,
+    "max_model_len": 135168,
+    "resident_sequences": 160,
+    "retraction_snapshot_ratio": 0,
+    "interval_ms": [
+      2547.271089,
+      2549.968917,
+      2534.545116,
+      2531.410654,
+      2541.314281,
+      2536.511782,
+      2558.419358,
+      2532.166478,
+      2526.04192,
+      2608.012262
+    ],
+    "identity": {
+      "source_tree_sha256": "cdd6b3a58c63c3e901b787747641c7dfcc3727597c8295a6dace5e0285f36015",
+      "model_headers_manifest_sha256": "92ba50ebbd046decdf8d34c77097f5fbe5231fc9d4c041bac5211e0f6968ec30",
+      "host_binary_sha256": "83a9811e4407c32a592e0cbd72cb266688d25b2ee1260c3542ab7e742601e033",
+      "native_fingerprints_sha256": "8118ac40e06c1959b50de813553d6960f23f5c2f0df74a6634b27cf1c95f592b",
+      "installed_packages_sha256": "070983be0ad7457086d942566c82c133f688e66bf4c8ebd3a8dd97a9474f2065",
+      "versions": {
+        "torch": "2.14.0+cu130",
+        "flashinfer-python": "0.7.4",
+        "tokenspeed-deepgemm-sm120": "2.5.0+sm120.14073b4",
+        "tokenspeed-triton": "3.9.10.post20261028",
+        "nvidia-nccl-cu13": "2.30.7"
+      }
+    }
+  },
+  {
+    "layout": "QCP8",
+    "label": 8192,
+    "indexer": "bf16",
+    "source_commit": "5fcb40a13f86f6c892696bcb3f774aa0ea1e6a51",
+    "prefix_sha256": "ae1d80328c2678477932d474ad244c62260ac95c368ac404872983972dc083a2",
+    "queue_requests_per_lane": 320,
+    "max_model_len": 135168,
+    "resident_sequences": 320,
+    "retraction_snapshot_ratio": 0,
+    "interval_ms": [
+      5106.036524,
+      5088.749355,
+      5096.007946,
+      5094.936392,
+      5094.056286,
+      5087.896099,
+      5099.160196,
+      5090.774917,
+      5098.4685,
+      5095.633192
+    ],
+    "identity": {
+      "source_tree_sha256": "cdd6b3a58c63c3e901b787747641c7dfcc3727597c8295a6dace5e0285f36015",
+      "model_headers_manifest_sha256": "92ba50ebbd046decdf8d34c77097f5fbe5231fc9d4c041bac5211e0f6968ec30",
+      "host_binary_sha256": "83a9811e4407c32a592e0cbd72cb266688d25b2ee1260c3542ab7e742601e033",
+      "native_fingerprints_sha256": "8118ac40e06c1959b50de813553d6960f23f5c2f0df74a6634b27cf1c95f592b",
+      "installed_packages_sha256": "66486147a6ac18caf3fa572602fd6967698332a74f4b5c79c345c3b7bc804ae6",
+      "versions": {
+        "torch": "2.14.0+cu130",
+        "flashinfer-python": "0.7.4",
+        "tokenspeed-deepgemm-sm120": "2.5.0+sm120.14073b4",
+        "tokenspeed-triton": "3.9.10.post20261028",
+        "nvidia-nccl-cu13": "2.30.7"
+      }
+    }
+  }
+]

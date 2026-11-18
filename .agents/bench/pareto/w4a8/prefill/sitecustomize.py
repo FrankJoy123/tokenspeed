@@ -106,8 +106,10 @@ def install(ModelExecutor):
                     if dp_metadata
                     else [sum(lengths)]
                 ),
-                "all_extend": (
-                    dp_metadata.all_extend if dp_metadata else extends == len(lengths)
+                "global_decodes": (
+                    list(dp_metadata.global_num_decodes)
+                    if dp_metadata
+                    else [len(lengths) - extends]
                 ),
                 "dispatched_ns": time.perf_counter_ns(),
             }

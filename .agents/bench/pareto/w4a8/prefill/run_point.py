@@ -25,7 +25,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import math
 import os
 import subprocess
 import time
@@ -48,6 +47,8 @@ def benchmark_environment(inherited, *, script_dir, expert_routing, indexer):
         "TOKENSPEED_V41_FORCE_PHYSICAL_ROUTING",
         "TOKENSPEED_TRACE_HOST_STAGES",
         "TOKENSPEED_KERNEL_OVERRIDE_ATTENTION_DSV41_INDEX_TOPK",
+        "TOKENSPEED_EXPERIMENT_SM120_DG_INDEXER",
+        "TOKENSPEED_EXPERIMENT_SM120_DEEPSELECT",
     ]:
         env.pop(name, None)
     if expert_routing != "natural":
@@ -96,11 +97,21 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--layout", choices=["dp8", "cp8"], required=True)
     parser.add_argument(
-        "--budget", type=int, choices=[4096, 8192, 16384, 32768, 65536], required=True
+        "--label",
+        type=int,
+        choices=[512, 1024, 2048, 4096, 8192, 16384],
+        required=True,
+        help="New tokens per step averaged over eight GPUs",
     )
+    parser.add_argument("--queue-requests-per-lane", type=int)
+    parser.add_argument("--max-model-len", type=int, default=135168)
+    parser.add_argument("--retraction-snapshot-ratio", type=float)
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--python", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument(
+        "--source", type=Path, help="Optional checkout used to build the runtime"
+    )
     parser.add_argument("--expert-routing", choices=["natural"], required=True)
     parser.add_argument("--indexer", choices=["bf16", "native-fp4"], required=True)
     parser.add_argument("--profile-steps", type=int, required=True)
@@ -115,16 +126,20 @@ def main():
         timeout=10,
     ).strip(), "GPUs are occupied"
     script_dir = Path(__file__).resolve().parent
+    agents = script_dir.parents[3]
+    source = args.source.resolve() if args.source else agents.parent
     cp = 8 if args.layout == "cp8" else 1
     dp = 8 // cp
-    physical = args.budget // 4096 * 4224
-    count = max(64, math.ceil(31 * args.budget / 4096))
-    if cp > 1:
-        count = next(
-            n
-            for n in range(count, args.budget // (2 * cp) + 1)
-            if args.budget // (2 * cp) % n == 0
-        )
+    group_requests = args.label // 512
+    active = min(group_requests, dp)
+    requests_per_lane = group_requests // active
+    physical = requests_per_lane * 4224
+    count = args.queue_requests_per_lane
+    if count is None:
+        count = 20 * requests_per_lane
+    if count < 16 * requests_per_lane:
+        parser.error("Each active lane needs at least 16 target steps of requests")
+    max_model_len = args.max_model_len
     engine_args = [
         "--model",
         str(args.model.resolve()),
@@ -155,7 +170,7 @@ def main():
         "--disaggregation-mode",
         "null",
         "--max-model-len",
-        "1048576",
+        str(max_model_len),
         "--chunked-prefill-size",
         str(physical),
         "--max-prefill-tokens",
@@ -186,12 +201,16 @@ def main():
         "--seed",
         "336846783",
         "--dist-init-addr",
-        f"127.0.0.1:{31000+args.budget//4096+(20 if cp==8 else 0)}",
+        f"127.0.0.1:{31000+requests_per_lane+(20 if cp==8 else 0)}",
         "--distributed-timeout-seconds",
         "7200",
         "--enable-async-logging",
         "--enable-output-logprobs",
     ]
+    if args.retraction_snapshot_ratio is not None:
+        engine_args.extend(
+            ["--retraction-snapshot-ratio", str(args.retraction_snapshot_ratio)]
+        )
     env = benchmark_environment(
         os.environ,
         script_dir=script_dir,
@@ -206,15 +225,30 @@ def main():
     subprocess.run(
         [
             str(args.python.absolute()),
-            str(script_dir.parents[2] / "deploy/setup/identity.py"),
+            str(agents / "deploy/setup/identity.py"),
             "--source",
-            str(script_dir.parents[3]),
+            str(source),
             "--output",
             str(out / "runtime-identity.json"),
         ],
         env=env,
         check=True,
         timeout=120,
+    )
+    subprocess.run(
+        [
+            str(args.python.absolute()),
+            str(agents / "deploy/launch/preflight_model.py"),
+            "--model",
+            str(args.model.resolve()),
+            "--profile",
+            "w4a8",
+            "--output",
+            str(out / "model-identity.json"),
+        ],
+        env=env,
+        check=True,
+        timeout=180,
     )
     log = out / "engine.log"
     command = [
@@ -224,6 +258,10 @@ def main():
         str(out / "samples"),
         "--engine-log",
         str(log),
+        "--active-lanes",
+        str(active),
+        "--queue-requests-per-lane",
+        str(count),
         "--prefix-tokens",
         "126976",
         "--new-tokens",
@@ -253,7 +291,9 @@ def main():
     record = {
         "command": command,
         "layout": args.layout,
-        "budget": args.budget,
+        "new_tokens_per_active_lane": requests_per_lane * 4096,
+        "label_new_tokens_per_gpu_per_step": active * requests_per_lane * 512,
+        "active_attention_lanes": active,
         "expert_routing": args.expert_routing,
         "indexer": args.indexer,
         "selected_environment": {

@@ -262,7 +262,8 @@ class SamplingTests(unittest.TestCase):
                 "headers_manifest_sha256": "",
             },
             "indexer": {
-                "precision": "bf16",
+                "TOKENSPEED_EXPERIMENT_SM120_DG_INDEXER": "1",
+                "TOKENSPEED_EXPERIMENT_SM120_DEEPSELECT": "1",
                 "TOKENSPEED_ENABLE_SM120_NATIVE_FP4_INDEXER": "0",
                 "TOKENSPEED_ENABLE_SM120_FP4_CANDIDATE_INDEXER": "0",
             },
@@ -597,6 +598,8 @@ class SamplingTests(unittest.TestCase):
             self.assertEqual(rejected.returncode, 2)
             self.assertIn("TOKENSPEED_HOST_BINARY", rejected.stderr)
             self.assertEqual(actual["TOKENSPEED_EXPERIMENT_SM120_DEEPEP"], "1")
+            self.assertEqual(actual["TOKENSPEED_EXPERIMENT_SM120_DG_INDEXER"], "1")
+            self.assertEqual(actual["TOKENSPEED_EXPERIMENT_SM120_DEEPSELECT"], "1")
             self.assertEqual(actual["TOKENSPEED_SM120_DEEPEP_WIRE"], "elastic_fp8_bf16")
             self.assertEqual(actual["TOKENSPEED_SM120_DEEPEP_CAPACITY"], "128")
             self.assertEqual(actual["TOKENSPEED_SPEC_SIMULATED_ACCEPT_LEN"], "6")
