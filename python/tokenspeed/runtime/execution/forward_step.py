@@ -23,7 +23,8 @@ from __future__ import annotations
 import bisect
 import dataclasses
 import gc
-from collections.abc import Callable
+import os
+from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from typing import TYPE_CHECKING
 
@@ -32,6 +33,7 @@ import torch.distributed as dist
 import tqdm
 from tokenspeed_kernel.workspace import capture_session
 
+from tokenspeed.runtime.execution._draft_overlap import DecodeGraphOverlap
 from tokenspeed.runtime.execution.context import ForwardContext
 from tokenspeed.runtime.execution.cudagraph_memory import (
     CapturedLadder,
@@ -359,6 +361,13 @@ class ForwardStepRunner:
         self.draft_token_to_kv_pool = draft_token_to_kv_pool
         self.token_to_kv_pool = token_to_kv_pool
         self.drafter = drafter
+        self.dp_local_graph = config.enable_dp_local_cuda_graph
+        if self.dp_local_graph and drafter is None:
+            raise ValueError(
+                "--enable-dp-local-cuda-graph requires a supported drafter"
+            )
+        if drafter is not None:
+            drafter.configure_decode_graph_scope(local=self.dp_local_graph)
         self.sampling_backend = sampling_backend
         self.input_buffers = input_buffers
         self.capturable_grammar = capturable_grammar
@@ -508,6 +517,59 @@ class ForwardStepRunner:
         # decode_graph=False while leaving the prefill graph on — decode
         # capture never runs then, but the attribute must still exist.
         self.stream = self.device_module.Stream()
+        self.draft_overlap: DecodeGraphOverlap | None = None
+        overlap = os.environ.get("TOKENSPEED_DRAFT_GRAPH_OVERLAP")
+        if overlap not in (None, "0", "1"):
+            raise ValueError("TOKENSPEED_DRAFT_GRAPH_OVERLAP must be 0 or 1")
+        if overlap == "1":
+            self._enable_draft_overlap()
+        if self.drafter is not None:
+            self.drafter.decode_overlap = self.draft_overlap
+
+    def _enable_draft_overlap(self) -> None:
+        """Check stream and state ownership before enabling draft-tail overlap."""
+        from tokenspeed.runtime.execution.drafter.eagle import Eagle
+
+        config = self.config
+        if (
+            torch.device(self.device).type != "cuda"
+            or torch.version.hip is not None
+            or self.disable
+            or config.pp_size != 1
+            or self.dp_size != 1
+        ):
+            raise ValueError(
+                "Draft graph overlap requires NVIDIA decode graphs, DP1/PP1"
+            )
+        drafter = self.drafter
+        if config.spec_algo != "MTP" or type(drafter) is not Eagle:
+            raise ValueError("Draft graph overlap requires the Eagle MTP drafter")
+        drafter.validate_decode_overlap()
+        if config.grammar_backend != "none":
+            raise ValueError("Draft graph overlap does not support grammar")
+        if (
+            self._expert_load_rows is not None
+            or self._mega_moe_live_requests is not None
+        ):
+            raise ValueError(
+                "Draft graph overlap does not support shared MoE row masks"
+            )
+        target_layers = set(self.token_to_kv_pool.field_layer_range)
+        draft_layers = (
+            set(self.draft_token_to_kv_pool.field_layer_range)
+            if self.draft_token_to_kv_pool is not None
+            else set()
+        )
+        if (
+            not target_layers
+            or not draft_layers
+            or not target_layers.isdisjoint(draft_layers)
+            or self.attn_backend is self.draft_attn_backend
+        ):
+            raise ValueError(
+                "Draft graph overlap requires separate target/draft cache layers and metadata"
+            )
+        self.draft_overlap = DecodeGraphOverlap()
 
     # ------------------------------------------------------------------
     # Graph capture
@@ -601,6 +663,8 @@ class ForwardStepRunner:
         """
         global global_graph_memory_pool
 
+        if self.draft_overlap is not None:
+            self.draft_overlap.release()
         self.graphs.clear()
         self.output_buffers.clear()
         self._metadata_snapshots.clear()
@@ -756,7 +820,7 @@ class ForwardStepRunner:
         # For DP mode, global_num_tokens must be set so that the MoE
         # all-gather comm layers know token counts for all DP ranks.
         # During capture, use uniform dummy counts across ranks.
-        if self.dp_size > 1:
+        if self.dp_size > 1 and not self.dp_local_graph:
             ctx.global_num_tokens = [bs * self.max_tokens_per_req] * self.world_size
             # global_bs must ALSO be set at capture. The draft first step's
             # collective sizing (reported via report_collective_sizing) reads
@@ -899,7 +963,12 @@ class ForwardStepRunner:
             )
         with observer:
             # The kernel state captured launches need lives as long as the graph.
-            with capture_session(graph), graph_capture:
+            overlap_capture = (
+                self.draft_overlap.capture(graph)
+                if self.draft_overlap is not None
+                else nullcontext()
+            )
+            with overlap_capture, capture_session(graph), graph_capture:
                 out = run_once()
             # The drafter's own graphs at this batch share the pool and the measure.
             if self.drafter is not None and variant == CUDA_GRAPH_VARIANT_DEFAULT:
@@ -968,7 +1037,7 @@ class ForwardStepRunner:
                         else CaptureHiddenMode.NULL
                     ),
                 )
-                if self.dp_size > 1:
+                if self.dp_size > 1 and not self.dp_local_graph:
                     ctx.global_num_tokens = [
                         bs * self.max_tokens_per_req
                     ] * self.world_size
@@ -1044,6 +1113,47 @@ class ForwardStepRunner:
         allocation — address-stable across captures and replays.
         """
         return {gid: table[:bs] for gid, table in self._placeholder_tables.items()}
+
+    def decode_graph_for_profile(
+        self, *, bs: int, query_tokens: int, variant: str
+    ) -> torch.cuda.CUDAGraph | None:
+        """Look up a captured startup tier by its logical request/query extents.
+
+        None means the tier was not captured and must not be measured. Graph
+        keys and their native full-width encoding stay owned by the runner.
+        """
+        return self.graphs.get((self._query_variant(variant, query_tokens, bs), bs))
+
+    @contextmanager
+    def decode_profile_metadata(
+        self, *, bs: int, variant: str, block_tables: dict[str, torch.Tensor]
+    ) -> Iterator[Callable[[], None]]:
+        """Lend the normal metadata preparation path to startup measurements.
+
+        Before each replay, the caller fills the input buffers and invokes the
+        yielded callback. On exit, join GPU work and restore capture metadata,
+        including when measurement fails. Call only before live admission.
+        """
+
+        def prepare() -> None:
+            self._prepare_sampling_capture(bs=bs, variant=variant)
+            self._prepare_decode_metadata(
+                bs,
+                bs,
+                self.input_buffers.req_pool_indices_buf[:bs],
+                self.input_buffers.seq_lens_buf[:bs],
+                ForwardMode.DECODE,
+                use_graph=True,
+                settle=lambda: None,
+                block_tables=block_tables,
+            )
+            self.deepep_adapter.replay()
+
+        try:
+            yield prepare
+        finally:
+            torch.cuda.synchronize(self.device)
+            self._init_capture_metadata(bs)
 
     def _init_capture_metadata(self, bs: int):
         tables = self.placeholder_block_tables(bs)
@@ -1186,6 +1296,19 @@ class ForwardStepRunner:
             if global_bs is None or global_bs == 0:
                 return False
             if self.disable_padding:
+                if self.dp_local_graph:
+                    # Keep the graph/eager phase agreed even when graph shapes
+                    # differ. An idle peer uses the smallest captured graph.
+                    return all(
+                        n == 0
+                        or (
+                            n % self.max_tokens_per_req == 0
+                            and self._has_cuda_graph_for_bs(
+                                n // self.max_tokens_per_req
+                            )
+                        )
+                        for n in ctx.global_num_tokens
+                    )
                 return self._has_cuda_graph_for_bs(global_bs)
             return global_bs <= self.max_capture_bs
         if self.disable_padding:
@@ -1199,7 +1322,7 @@ class ForwardStepRunner:
         return self._padded_bs(bs, ctx)
 
     def _padded_bs(self, bs: int, ctx: ForwardContext) -> int:
-        graph_bs = self._global_graph_bs(ctx)
+        graph_bs = None if self.dp_local_graph else self._global_graph_bs(ctx)
         target_bs = graph_bs if graph_bs is not None else bs
         index = bisect.bisect_left(self.capture_bs, target_bs)
         return self.capture_bs[index]
@@ -1382,11 +1505,21 @@ class ForwardStepRunner:
             if (
                 self.drafter is not None
                 and report_key not in self._reported_query_graphs
-                and len(self.drafter.decode_graph_query_capacities(padded_bs)) > 1
+                and (
+                    self.dp_local_graph
+                    or len(self.drafter.decode_graph_query_capacities(padded_bs)) > 1
+                )
             ):
                 self._reported_query_graphs.add(report_key)
+                rank_info = (
+                    f"rank={self.global_rank}, live_requests={bs}, "
+                    if self.dp_local_graph
+                    else ""
+                )
                 logger.info(
-                    f"Adaptive decode graph replay: request_capacity={padded_bs}, "
+                    f"{'Local DP' if self.dp_local_graph else 'Adaptive'} "
+                    "decode graph replay: "
+                    f"{rank_info}request_capacity={padded_bs}, "
                     f"target_query_capacity={(self._decode_query_tokens or padded_bs * self.max_tokens_per_req)}, "
                     f"full_query_capacity={padded_bs * self.max_tokens_per_req}, "
                     f"variant={graph_key[0]}"
@@ -1401,32 +1534,44 @@ class ForwardStepRunner:
                             {"actual_seq_lengths_kv": seq_lens.to("cpu").tolist()}
                         ]
                     )
+            query_tokens = (
+                self._decode_query_tokens or padded_bs * self.max_tokens_per_req
+            )
+            packed = query_tokens != padded_bs * self.max_tokens_per_req
             if self._expert_load_rows is not None:
-                query_tokens = (
-                    self._decode_query_tokens or padded_bs * self.max_tokens_per_req
-                )
-                packed = query_tokens != padded_bs * self.max_tokens_per_req
-                # Packed verification uses one agreed capacity on all ranks.
-                self._expert_load_rows.mark_padded(
-                    padded_global_num_tokens=[query_tokens] * self.world_size,
-                    live_global_num_tokens=(
-                        [query_tokens] * self.world_size
-                        if packed
-                        else (
-                            ctx.global_num_tokens
-                            if ctx.global_num_tokens is not None
-                            else [ctx.input_num_tokens] * self.world_size
-                        )
-                    ),
-                )
-            live_requests = self._mega_moe_live_requests if padded_bs != bs else None
+                if self.dp_local_graph:
+                    # This graph's MoE input contains only its local rows.
+                    # No peer physical query sizes are known or needed here.
+                    rows = self._expert_load_rows.rows(query_tokens)
+                    rows.fill_(True)
+                    if not packed:
+                        rows[bs * self.max_tokens_per_req :].fill_(False)
+                else:
+                    self._expert_load_rows.mark_padded(
+                        padded_global_num_tokens=[query_tokens] * self.world_size,
+                        live_global_num_tokens=(
+                            [query_tokens] * self.world_size
+                            if packed
+                            else (
+                                ctx.global_num_tokens
+                                if ctx.global_num_tokens is not None
+                                else [ctx.input_num_tokens] * self.world_size
+                            )
+                        ),
+                    )
+            # MegaMoE's count pair assumes a uniform number of rows per
+            # request. Packed prefixes vary, so that mask could drop live rows.
+            live_requests = (
+                self._mega_moe_live_requests if padded_bs != bs and not packed else None
+            )
             if live_requests is not None:
                 live_requests[0].fill_(bs)
                 live_requests[1].fill_(padded_bs)
             try:
                 with (
-                    torch.inference_mode() if self.device == "npu" else nullcontext()
-                ), nvtx_range("graph_replay", color="red"):
+                    torch.inference_mode() if self.device == "npu" else nullcontext(),
+                    nvtx_range("graph_replay", color="red"),
+                ):
                     if self.drafter is not None:
                         self.drafter.replay_decode_graph(
                             graph, bs=bs, graph_bs=padded_bs

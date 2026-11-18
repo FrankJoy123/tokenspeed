@@ -33,6 +33,15 @@ people and average people is more than tenfold.
   where it might be tricky for humans to understand. Keep project- and
   component-level (design) docs focused on the high-level picture. Put docs in
   the right place and avoid duplicating the same content across many places.
+* Make data flow explicit and prefer a functional style. Return computed results
+  instead of using preparation functions with no return value to silently
+  populate object state. Pass inputs and per-operation working state explicitly;
+  keep necessary mutations localized behind clearly named operations.
+* Apply `const` to read-only methods, views, and immutable configuration where
+  appropriate. Do not use `mutable` merely to hide side effects in a query.
+* Keep names consistent when the same data passes through functions and layers.
+  Rename a value when its meaning or unit changes, and distinguish counts,
+  indices, exclusive bounds, and token/block/page units explicitly.
 * For code comments, use common/existing terms for easy human understanding;
   avoid obscure terms or coining unnecessary new concepts.
 * Parameters that select execution paths, algorithms, or correctness-critical
@@ -75,6 +84,17 @@ TokenSpeed values one scheduling path and one execution path. Prefill/decode
 disaggregation or not, speculation or not, CUDA graph or not, overlap or not:
 these are parameters of the same path, never a second path. Make the general
 path cover the case instead of adding a mode-specific branch.
+
+Rare recovery paths, the code that runs only when the ordinary path fails or
+meets a corner case, matter as much as the ordinary path, but keep them
+isolated from it. The ordinary path should read as if they did not exist: it
+hands over at the point where it fails, through one entry, instead of
+threading flags, parameters or mode checks for the rare case through its
+functions. Put recovery logic in its own functions or files, and give an API
+a separate entry for the recovery behavior rather than a boolean on the
+ordinary one. Every switch a rare case adds to the main logic costs each
+reader of it. Where one cannot be avoided, keep it to a single named
+predicate whose comment points to the recovery code.
 
 When attention needs new per-request state, first ask whether the LCM cache
 subsystem and the C++ scheduler can own it — as a cache group with its own

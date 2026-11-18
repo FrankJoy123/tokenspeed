@@ -1161,6 +1161,8 @@ setup(
             "_cuda/*.cu",
             "_cuda/*.cuh",
         ],
+        # Committed TunableOp results (tuned BLAS solutions), one per GPU.
+        "tokenspeed_kernel.ops.gemm._hipblaslt": ["configs/*.csv"],
         "tokenspeed_kernel.thirdparty.cuda": [
             "objs/**/*.so",
             "csrc/kimi3_router.cu",
