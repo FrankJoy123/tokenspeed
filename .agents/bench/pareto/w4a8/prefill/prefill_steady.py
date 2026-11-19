@@ -310,6 +310,25 @@ def main() -> None:
         )
         save("one-token-warmup.json", [dataclasses.asdict(r) for r in one_token_warmup])
 
+        if args.prefill_rows_per_rank > args.computed_rows_per_request:
+            stage("two-token-warmup", active_lanes=active)
+            two_token_warmup = driver.generate(
+                [
+                    request(f"two-token-warmup-{lane}", prefix[-2:], lane)
+                    for lane in range(active)
+                ]
+            )
+            assert len(two_token_warmup) == active and all(
+                result.finish_reason in ("stop", "length")
+                and result.prompt_tokens == 2
+                and result.completion_tokens == 1
+                for result in two_token_warmup
+            )
+            save(
+                "two-token-warmup.json",
+                [dataclasses.asdict(r) for r in two_token_warmup],
+            )
+
         async def queued_round(tag, *, round_suffixes, profile=False):
             encoder = MsgpackEncoder()
             results = {}

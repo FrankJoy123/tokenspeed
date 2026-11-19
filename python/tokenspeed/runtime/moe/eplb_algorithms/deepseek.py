@@ -262,4 +262,46 @@ def rebalance_experts(
     return phy2log, log2phy, logcnt
 
 
-__all__ = ["rebalance_experts"]
+def rebalance_experts_hot_local(
+    weight: torch.Tensor, num_physical_experts: int, num_gpus: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Balance home slots and put the same hottest experts on every GPU."""
+    layers, experts = weight.shape
+    if experts % num_gpus or num_physical_experts % num_gpus:
+        raise ValueError("hot_local requires whole home and replica budgets per GPU")
+    base_slots = experts // num_gpus
+    slots = num_physical_experts // num_gpus
+    extra = slots - base_slots
+    if not 0 <= extra <= experts:
+        raise ValueError(
+            "hot_local requires between zero and one replica per expert per GPU"
+        )
+    home, inverse, count = rebalance_experts(
+        weight,
+        experts,
+        num_groups=1,
+        num_nodes=1,
+        num_gpus=num_gpus,
+        enable_hierarchical=False,
+    )
+    if extra == 0:
+        return home, inverse, count
+    hot = weight.cpu().argsort(dim=-1, descending=True, stable=True)[:, :extra]
+    physical = torch.cat(
+        (
+            home.reshape(layers, num_gpus, base_slots),
+            hot[:, None, :].expand(-1, num_gpus, -1),
+        ),
+        dim=-1,
+    ).reshape(layers, num_physical_experts)
+    home = inverse[..., 0]
+    inverse_home = home // base_slots * slots + home % base_slots
+    inverse_extra = torch.full((layers, experts, num_gpus), -1, dtype=torch.int64)
+    positions = torch.arange(num_gpus) * slots + base_slots
+    copies = (positions + torch.arange(extra).unsqueeze(-1)).expand(layers, -1, -1)
+    inverse_extra.scatter_(1, hot.unsqueeze(-1).expand_as(copies), copies)
+    inverse = torch.cat((inverse_home.unsqueeze(-1), inverse_extra), dim=-1)
+    return physical, inverse, (inverse >= 0).sum(-1)
+
+
+__all__ = ["rebalance_experts", "rebalance_experts_hot_local"]

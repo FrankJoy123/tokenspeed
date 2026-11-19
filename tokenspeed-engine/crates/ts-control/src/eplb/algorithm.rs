@@ -34,6 +34,8 @@ pub enum Algorithm {
     /// Pack expert groups onto nodes first, then replicas onto each node's
     /// GPUs.
     DeepseekHierarchical,
+    /// Pack home experts and place the same hottest experts on every GPU.
+    HotLocal,
 }
 
 impl Algorithm {
@@ -43,6 +45,7 @@ impl Algorithm {
         match raw {
             "deepseek" => Ok(Self::Deepseek),
             "deepseek_hierarchical" => Ok(Self::DeepseekHierarchical),
+            "hot_local" => Ok(Self::HotLocal),
             "auto" => Ok(match num_groups {
                 Some(groups) if groups % num_nodes == 0 => Self::DeepseekHierarchical,
                 _ => Self::Deepseek,
@@ -260,6 +263,37 @@ pub fn rebalance_experts_hierarchical(
     Ok(pphy2log)
 }
 
+fn rebalance_experts_hot_local(
+    weight: &[Vec<f64>],
+    num_replicas: usize,
+    num_gpus: usize,
+) -> Result<Vec<Vec<usize>>, String> {
+    let experts = weight.first().map_or(0, Vec::len);
+    if num_gpus == 0 || experts == 0 || experts % num_gpus != 0 || num_replicas % num_gpus != 0 {
+        return Err("hot_local requires whole home and replica budgets per GPU".into());
+    }
+    let extra = num_replicas
+        .checked_sub(experts)
+        .map(|extra| extra / num_gpus)
+        .filter(|&extra| extra <= experts)
+        .ok_or("hot_local requires between zero and one replica per expert per GPU")?;
+    let home = rebalance_experts_hierarchical(weight, experts, 1, 1, num_gpus)?;
+    if extra == 0 {
+        return Ok(home);
+    }
+    Ok(home
+        .into_iter()
+        .zip(weight)
+        .map(|(layer, counts)| {
+            let hot = sorted_descending(counts);
+            layer
+                .chunks_exact(experts / num_gpus)
+                .flat_map(|gpu| gpu.iter().chain(&hot[..extra]).copied())
+                .collect()
+        })
+        .collect())
+}
+
 /// `rebalance_experts`: the placement for one load window,
 /// `[layers, num_replicas]`.
 pub fn rebalance_experts(
@@ -276,5 +310,27 @@ pub fn rebalance_experts(
             rebalance_experts_hierarchical(weight, num_replicas, groups, num_nodes, num_gpus)
         }
         Algorithm::Deepseek => rebalance_experts_hierarchical(weight, num_replicas, 1, 1, num_gpus),
+        Algorithm::HotLocal => rebalance_experts_hot_local(weight, num_replicas, num_gpus),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hot_local_keeps_home_slots_and_copies_hot_experts_on_every_gpu() {
+        let counts = vec![vec![5., 2., 9., 4., 1., 8., 3., 9.]];
+        let home = rebalance_experts(&counts, 8, None, 1, 4, Algorithm::Deepseek).unwrap();
+        let algorithm = Algorithm::resolve("hot_local", None, 1).unwrap();
+        let placed = rebalance_experts(&counts, 16, None, 1, 4, algorithm).unwrap();
+        for (rank, slots) in placed[0].chunks_exact(4).enumerate() {
+            assert_eq!(&slots[..2], &home[0][rank * 2..rank * 2 + 2]);
+            assert_eq!(&slots[2..], &[2, 7]);
+        }
+        assert_eq!(
+            rebalance_experts(&counts, 8, None, 1, 4, algorithm).unwrap(),
+            home
+        );
     }
 }

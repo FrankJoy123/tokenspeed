@@ -28,6 +28,7 @@ from tokenspeed.runtime.moe.eplb_algorithms import deepseek
 class EplbAlgorithm(Enum):
     deepseek = auto()
     deepseek_hierarchical = auto()
+    hot_local = auto()
 
 
 def rebalance_experts(
@@ -38,6 +39,12 @@ def rebalance_experts(
     num_nodes: int,
     algorithm: EplbAlgorithm,
 ):
+    if algorithm == EplbAlgorithm.hot_local:
+        return deepseek.rebalance_experts_hot_local(
+            tokens_per_expert.sum(dim=0),
+            num_physical_experts,
+            num_physical_experts // num_local_physical_experts,
+        )
     if algorithm in [EplbAlgorithm.deepseek, EplbAlgorithm.deepseek_hierarchical]:
         return deepseek.rebalance_experts(
             weight=tokens_per_expert.sum(dim=0),

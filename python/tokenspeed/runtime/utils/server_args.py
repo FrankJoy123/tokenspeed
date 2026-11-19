@@ -3895,7 +3895,7 @@ class ServerArgs:
             type=str,
             default=ServerArgs.eplb_algorithm,
             help="EPLB algorithm deriving the placement from a load record: "
-            "auto, deepseek or deepseek_hierarchical.",
+            "auto, deepseek, deepseek_hierarchical or hot_local.",
         )
         parser.add_argument(
             "--expert-distribution-recorder-mode",

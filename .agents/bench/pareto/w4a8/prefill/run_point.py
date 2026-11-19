@@ -118,6 +118,9 @@ def main():
     parser.add_argument("--expert-placement", default="trivial")
     parser.add_argument("--ep-dispatch", choices=["static", "dynamic"])
     parser.add_argument("--eplb-warmup-forwards", type=int, default=0)
+    parser.add_argument(
+        "--eplb-algorithm", choices=["auto", "hot_local"], default="auto"
+    )
     parser.add_argument("--eplb-interval", type=int)
     parser.add_argument("--eplb-layers-per-chunk", type=int)
     parser.add_argument("--indexer", choices=["bf16", "native-fp4"], required=True)
@@ -247,6 +250,8 @@ def main():
         engine_args.extend(
             (
                 "--enable-eplb",
+                "--eplb-algorithm",
+                args.eplb_algorithm,
                 "--expert-distribution-recorder-mode",
                 "stat",
                 "--eplb-rebalance-num-iterations",

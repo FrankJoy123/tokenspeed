@@ -664,6 +664,11 @@ For the SM120 V4.1 W4A8 experimental path, set
 slot lookup and load recording in one GPU launch. This uses the existing
 placement, live-row mask, and load buffers, including during graph replay.
 
+`--eplb-algorithm hot_local` balances the home expert slots and uses each
+rank's spare slots for the same hottest experts. With static dispatch, a
+hot expert can always be selected from the source rank. The home expert count
+and total physical slot count must each divide evenly across the EP ranks.
+
 The routing path is unchanged: slot ownership stays contiguous per rank, the
 replica choice is a pure function of the token, and a placement change alters
 only table entries and slot contents. Under `--numerics rl-bitwise` the
