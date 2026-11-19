@@ -50,7 +50,10 @@ class FlashInferSchedule:
         )
 
         self.cake_decode = None
+        self.cake_rows = frozenset({48})
         if os.environ.get("TOKENSPEED_SM120_CAKE_DECODE_MLA") == "1":
+            if os.environ.get("TOKENSPEED_SM120_CAKE_DECODE_MLA_WIDE") == "1":
+                self.cake_rows = frozenset({24, 48, 96, 192})
             self.cake_decode = wrapper(
                 kv_scale_format="ue8m0_g32",
                 kv_cache_format="fp8",
@@ -64,7 +67,8 @@ class FlashInferSchedule:
         if (
             self.cake_decode is not None
             and runner is self.dual
-            and args[0].shape == (48, 64, 512)
+            and args[0].shape[0] in self.cake_rows
+            and args[0].shape[1:] == (64, 512)
             and kwargs.get("out_lse") is None
         ):
             runner = self.cake_decode
