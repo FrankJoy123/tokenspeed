@@ -2906,13 +2906,29 @@ class DeepseekV41AttentionBackend(AttentionBackend):
             forward_mode,
             query_shard=key_rows.plan if key_rows is not None else None,
         )
+        compact_prefill = (
+            os.environ.get("TOKENSPEED_SM120_PREFILL_COMPACT_BF16X2") == "1"
+            and owner >= 0
+            and key_rows is None
+            and self.kvp_size == 1
+            and len(self.spec.attention_query_group) == 1
+            and fused_decode_groups is None
+        )
+        if compact_prefill:
+            from tokenspeed_kernel.ops.attention.dsv4._triton.compact_bf16x2 import (
+                compact_prefill_enabled,
+                try_compact_prefill,
+            )
+
+            compact_prefill = compact_prefill_enabled(q)
         # Quantize current rows exactly as cache storage, without publishing them
         # until every request has read its old sliding prefix.
         # The native reader addresses [old prefix | current] directly. Only a
         # single contiguous, unsharded request shares those row coordinates.
         native_request = (
             plan.requests[0]
-            if len(plan.requests) == 1
+            if not compact_prefill
+            and len(plan.requests) == 1
             and isinstance(plan.requests[0].rows, slice)
             and plan.requests[0].rows == slice(0, q.shape[0])
             and key_rows is None
@@ -3145,23 +3161,31 @@ class DeepseekV41AttentionBackend(AttentionBackend):
                 if output is not None:
                     output.copy_(result)
             else:
-                result = dsv41.selected_attention(
-                    batch_q,
-                    cache,
-                    None,
-                    None,
-                    global_cache,
-                    None,
-                    None,
-                    attn_sink,
-                    softmax_scale,
-                    output,
-                    query_chunk,
-                    None,
-                    workspace[:, None, :],
-                    indices.contiguous(),
-                    lse=None,
+                result = (
+                    try_compact_prefill(
+                        batch_q, workspace, indices, attn_sink, softmax_scale, output
+                    )
+                    if compact_prefill
+                    else None
                 )
+                if result is None:
+                    result = dsv41.selected_attention(
+                        batch_q,
+                        cache,
+                        None,
+                        None,
+                        global_cache,
+                        None,
+                        None,
+                        attn_sink,
+                        softmax_scale,
+                        output,
+                        query_chunk,
+                        None,
+                        workspace[:, None, :],
+                        indices.contiguous(),
+                        lse=None,
+                    )
             if out is None:
                 out = result
             elif fused_decode_groups is not None:
