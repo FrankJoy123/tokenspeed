@@ -22,6 +22,7 @@
 config, its cache geometry and groups, the cache ops a plan carries and
 their acknowledgments, and the block tables a forward reads."""
 
+import os
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, NamedTuple
@@ -648,6 +649,31 @@ def cache_ops_from_plan(
     return CacheOperations(tuple(device), tuple(storage))
 
 
+_BLOCK_TABLE_UPLOAD_STREAM = os.getenv("TOKENSPEED_BLOCK_TABLE_UPLOAD_STREAM") == "1"
+_block_table_upload_streams: dict[torch.device, torch.cuda.Stream] = {}
+
+
+def _upload_block_tables(staged: torch.Tensor, device: torch.device) -> torch.Tensor:
+    if (
+        not _BLOCK_TABLE_UPLOAD_STREAM
+        or device.type != "cuda"
+        or not staged.is_pinned()
+        or torch.cuda.is_current_stream_capturing()
+    ):
+        return staged.to(device, non_blocking=True)
+
+    consumer = torch.cuda.current_stream(device)
+    upload_stream = _block_table_upload_streams.get(consumer.device)
+    if upload_stream is None:
+        upload_stream = torch.cuda.Stream(device=consumer.device)
+        _block_table_upload_streams[consumer.device] = upload_stream
+    with torch.cuda.stream(upload_stream):
+        result = staged.to(device, non_blocking=True)
+    consumer.wait_stream(upload_stream)
+    result.record_stream(consumer)
+    return result
+
+
 class PackedBlockTables(NamedTuple):
     """One batch's per-group block tables, uploaded once.
 
@@ -902,7 +928,7 @@ def packed_block_tables_from_forward_op(
         np.copyto(windows, arr)
         row_at += rows
         value_at += rows * width
-    upload = upload.to(device, non_blocking=True)
+    upload = _upload_block_tables(upload, device)
     packed = torch.empty(total, dtype=torch.int32, device=device)
     expand_block_table_rows(
         upload[:fields].view(num_rows, BLOCK_TABLE_ROW_FIELDS), upload[fields:], packed
