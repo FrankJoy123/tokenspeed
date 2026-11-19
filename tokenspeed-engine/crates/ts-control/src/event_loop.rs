@@ -570,6 +570,7 @@ pub struct EventLoop<D: DataPlane, F: Frontend> {
     in_flight: VecDeque<(ForwardBatchView, Option<InputLogprobPlan>, D::Pending)>,
     cache_ops: CacheOps,
     controls: Controls,
+    sync_dp_scheduler_pause: bool,
     /// Admissions withheld from the scheduler while paused, in arrival order.
     withheld: Vec<Submission>,
     /// EPD: admissions waiting for their images' embeddings, in staging
@@ -628,6 +629,8 @@ impl<D: DataPlane, F: Frontend> EventLoop<D, F> {
         }
         Self {
             controls: Controls::new(config.controls.clone()),
+            sync_dp_scheduler_pause: std::env::var("TOKENSPEED_SYNC_DP_SCHEDULER_PAUSE")
+                .is_ok_and(|value| value == "1"),
             batch_logger: BatchLogger::new(config.batch_log.clone()),
             history: config
                 .request_token_history
@@ -796,8 +799,10 @@ impl<D: DataPlane, F: Frontend> EventLoop<D, F> {
         }
         // Every round on every rank, so the attention-DP ranks agree on the
         // flushes and weight operations they run together.
-        let (memory_resident, release_pending, nccl_release_pending) = self.gate()?;
-        let forward_allowed = memory_resident && !self.controls.forward_blocked();
+        let (memory_resident, release_pending, nccl_release_pending, dp_scheduler_paused) =
+            self.gate()?;
+        let forward_allowed =
+            memory_resident && !dp_scheduler_paused && !self.controls.forward_blocked();
 
         // The storage tick and the cache-op acknowledgments advance at the
         // head of the round, so this round's plan sees them.
@@ -1692,8 +1697,9 @@ impl<D: DataPlane, F: Frontend> EventLoop<D, F> {
     /// flushes, and the weight operation at the queue's head once every
     /// attention-DP rank holds one of the same kind. One blocking weight
     /// operation per round. Returns whether every rank's memory is resident
-    /// and whether any rank has a pending memory release or NCCL release.
-    fn gate(&mut self) -> Result<(bool, bool, bool), LoopError> {
+    /// and whether any rank has a pending memory release, NCCL release, or
+    /// a scheduler pause that blocks the group.
+    fn gate(&mut self) -> Result<(bool, bool, bool, bool), LoopError> {
         let _span = profile::span("EventLoop::gate");
         let flushes = self.controls.take_flushes();
         let head = self.controls.weight_head().and_then(control::gate_code);
@@ -1713,6 +1719,7 @@ impl<D: DataPlane, F: Frontend> EventLoop<D, F> {
             self.controls.drain(),
             Some(Drain::Release(tags)) if tags.iter().any(|tag| tag == "nccl")
         );
+        let mut dp_scheduler_paused = false;
         if let Some(world) = &self.ranks.dp {
             let code = head.unwrap_or(0);
             let internal_code = internal.unwrap_or(0);
@@ -1735,6 +1742,7 @@ impl<D: DataPlane, F: Frontend> EventLoop<D, F> {
                 key,
                 -key,
                 if reload_ready { -1 } else { 0 },
+                i64::from(self.sync_dp_scheduler_pause && self.controls.forward_blocked()),
             ];
             let reduced = self.ranks.mesh.all_reduce(world, &row, Reduce::Max)?;
             // A resume reaches DP engines independently. None may forward
@@ -1742,6 +1750,9 @@ impl<D: DataPlane, F: Frontend> EventLoop<D, F> {
             memory_resident = reduced[7] == 0;
             release_pending = reduced[8] != 0;
             nccl_release_pending = reduced[8] == 2;
+            // A paused frontend can queue a complete batch on every lane.
+            // Wait out staggered ResumeScheduler delivery before planning it.
+            dp_scheduler_paused = reduced[12] != 0;
             want_flush = reduced[0] > 0;
             all_have_head = reduced[1] == -1;
             let reload_heads = reduced[2] == RELOAD_GATE_CODE || -reduced[3] == RELOAD_GATE_CODE;
@@ -1815,7 +1826,12 @@ impl<D: DataPlane, F: Frontend> EventLoop<D, F> {
         } else if let Some(op) = ready_internal {
             self.complete_internal_op(op)?;
         }
-        Ok((memory_resident, release_pending, nccl_release_pending))
+        Ok((
+            memory_resident,
+            release_pending,
+            nccl_release_pending,
+            dp_scheduler_paused,
+        ))
     }
 
     /// Whether any member of this rank's replica says yes.
