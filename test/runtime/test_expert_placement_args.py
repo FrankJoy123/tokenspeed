@@ -139,8 +139,12 @@ class TestServerArgsPlacementValidation:
             ServerArgs(model="x", **{**full, "eplb_rebalance_num_iterations": 0})
         with pytest.raises(ValueError, match="layers-per-chunk"):
             ServerArgs(model="x", **{**full, "eplb_rebalance_layers_per_chunk": 0})
-        for algorithm in ("dynamic_with_zero_expert", "fake", None):
-            with pytest.raises(ValueError, match="static replica choice"):
+        dynamic = ServerArgs(
+            model="x", **{**full, "ep_dispatch_algorithm": "dynamic_with_zero_expert"}
+        )
+        assert dynamic.enable_eplb
+        for algorithm in ("fake", None):
+            with pytest.raises(ValueError, match="static or dynamic replica selection"):
                 ServerArgs(model="x", **{**full, "ep_dispatch_algorithm": algorithm})
         with pytest.raises(ValueError, match="ep_size=1"):
             ServerArgs(model="x", **{**full, "ep_size": 1, "attn_tp_size": 1})

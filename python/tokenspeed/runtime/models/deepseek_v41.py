@@ -164,7 +164,11 @@ from tokenspeed.runtime.layers.mlp import GatedMLP, gated_activation
 from tokenspeed.runtime.layers.moe.expert import MoELayer
 from tokenspeed.runtime.layers.moe.loader import build_moe_checkpoint_loader
 from tokenspeed.runtime.layers.moe.schema import ExpertCheckpointSchema
-from tokenspeed.runtime.layers.moe.topk import StandardTopKOutput
+from tokenspeed.runtime.layers.moe.topk import (
+    ExpertLocationDispatchInfo,
+    StandardTopKOutput,
+    topk_ids_logical_to_physical,
+)
 from tokenspeed.runtime.layers.moe.utils import get_moe_backend
 from tokenspeed.runtime.layers.paged_attention import QueryShardGather
 from tokenspeed.runtime.layers.parameter import ModelWeightParameter
@@ -1890,6 +1894,28 @@ class DeepseekV41MoE(DeepseekV4MoE):
             )
             expert_config.n_shared_experts = None
         use_sm120_deepep = os.environ.get("TOKENSPEED_EXPERIMENT_SM120_DEEPEP") == "1"
+        placement = get_global_expert_location_metadata()
+        dispatch_info = None
+        if placement is not None:
+            if (
+                not use_sm120_deepep
+                or mega_moe
+                or mapping.attn.tp_size != 1
+                or mapping.attn.has_qcp
+                or not current_platform().is_nvidia
+                or current_platform().arch_version != ArchVersion(12, 0)
+                or config.expert_dtype != "fp4"
+                or config.moe_quant_algo == "NVFP4"
+            ):
+                raise ValueError(
+                    "V4.1 expert placement requires SM120 W4A8 attention DP with outer EP dispatch"
+                )
+            dispatch_info = ExpertLocationDispatchInfo.init_new(
+                layer_index,
+                global_server_args_dict["ep_dispatch_algorithm"],
+                placement,
+                all_to_all_ep=True,
+            )
         cake_rows = int(os.environ.get("TOKENSPEED_SM120_PREFILL_CAKE_ROWS", "0"))
         if cake_rows < 0 or cake_rows > 32640 or cake_rows % 128:
             raise ValueError(
@@ -1908,12 +1934,11 @@ class DeepseekV41MoE(DeepseekV4MoE):
         ):
             raise ValueError("Prefill Cake requires DP8/EP8 with attention TP1")
         if use_sm120_cake and (
-            get_global_expert_location_metadata() is not None
-            or os.environ.get("TOKENSPEED_SM120_DEEPEP_WIRE", "elastic_fp8_bf16")
+            os.environ.get("TOKENSPEED_SM120_DEEPEP_WIRE", "elastic_fp8_bf16")
             != "elastic_fp8_bf16"
         ):
             raise ValueError(
-                "Prefill Cake requires static MXFP4 experts and the Elastic FP8 baseline"
+                "Prefill Cake requires MXFP4 experts and the Elastic FP8 baseline"
             )
         if use_sm120_cake and (
             not use_sm120_deepep or mega_moe or config.moe_quant_algo == "NVFP4"
@@ -1932,7 +1957,14 @@ class DeepseekV41MoE(DeepseekV4MoE):
             expert_config = copy(expert_config)
             expert_config.n_shared_experts = None
         super().__init__(
-            expert_config, mapping, quant_config, layer_index, prefix, aux_stream
+            expert_config,
+            mapping,
+            quant_config,
+            layer_index,
+            prefix,
+            aux_stream,
+            expert_dispatch_info=dispatch_info,
+            uses_outer_dispatch=use_sm120_deepep and not mega_moe,
         )
         self.gate.register_parameter("bias_vl", None)
         # Temporary opt-in experiment; baseline construction remains unchanged.
@@ -1990,6 +2022,22 @@ class DeepseekV41MoE(DeepseekV4MoE):
                     quant_config=quant_config,
                     prefix=add_prefix("shared_experts", prefix),
                 )
+
+    def get_moe_routed_weights(self) -> list[torch.Tensor]:
+        state = self.experts._moe_backend_state
+        if state is None:
+            raise RuntimeError("Expert weights must be processed before building EPLB")
+        if self.use_sm120_cake:
+            local = self.experts.w13_weight.shape[0]
+            # Cake flattens the K-block-major scale vectors for all experts
+            # and appends one shared/filler segment. Move only routed slots.
+            return [
+                self.experts.w13_weight,
+                self.experts.w13_weight_scale.view(local + 1, -1)[:local],
+                self.experts.w2_weight,
+                self.experts.w2_weight_scale.view(local + 1, -1)[:local],
+            ]
+        return [state.w13, state.sf13, state.w2, state.sf2]
 
     def warmup(self):
         super().warmup()
@@ -2070,7 +2118,13 @@ class DeepseekV41MoE(DeepseekV4MoE):
             with self.stream_fork.scope(
                 enable=self.sm120_shared_overlap and get_is_capture_mode()
             ) as fork:
-                topk_ids = topk.topk_ids.to(torch.int64)
+                info = self.expert_dispatch_info
+                topk_ids = topk_ids_logical_to_physical(
+                    topk.topk_ids, info, self.config.n_routed_experts
+                )
+                if info is not None and info.load is not None:
+                    info.load.record(topk_ids, start=start)
+                topk_ids = topk_ids.to(torch.int64)
                 topk_weights = topk.topk_weights.float()
                 if cake is not None:
                     routed = cake.run(x, topk_ids, topk_weights, capacity)
@@ -3462,6 +3516,8 @@ class DeepseekV41ForCausalLM(BaseCausalLM):
 
     model_cls = DeepseekV41Model
     logits_processor_cls = _DeepseekV41LogitsProcessor
+    supports_expert_placement = True
+    expert_placement_rank_local_inputs = True
 
     def __init__(
         self,
@@ -3552,6 +3608,14 @@ class DeepseekV41ForCausalLM(BaseCausalLM):
             num_logical_experts=config.text_config.n_routed_experts,
             num_groups=getattr(config.text_config, "n_group", 0),
         )
+
+    @property
+    def routed_experts_weights_of_layer(self) -> dict[int, list[torch.Tensor]]:
+        return {
+            layer_id: layer.ffn.get_moe_routed_weights()
+            for layer_id, layer in enumerate(self.model.layers)
+            if isinstance(layer, DeepseekV41DecoderLayer)
+        }
 
     def resolve_model(self, config, mapping, quant_config, prefix):
         host_table = global_server_args_dict["engram_host_table"]
@@ -3674,6 +3738,11 @@ class DeepseekV41ForCausalLM(BaseCausalLM):
 
     def _local_checkpoint_experts(self, layer_id: int) -> list[int]:
         """Logical checkpoint experts filling this rank's physical slots."""
+        placement = get_global_expert_location_metadata()
+        if placement is not None:
+            return placement.local_slot_logical_experts(
+                layer_id, self.mapping.moe.ep_rank
+            )
         count = self.model.config.n_routed_experts // self.mapping.moe.ep_size
         start = self.mapping.moe.ep_rank * count
         return list(range(start, start + count))
@@ -3843,6 +3912,7 @@ class DeepseekV41ForCausalLM(BaseCausalLM):
         params = dict(self.named_parameters())
         targets = self._checkpoint_targets()
         config = self.model.config
+        placement = get_global_expert_location_metadata()
         moe_loader = build_moe_checkpoint_loader(
             params_dict=params,
             expert_schema=ExpertCheckpointSchema(
@@ -3853,7 +3923,12 @@ class DeepseekV41ForCausalLM(BaseCausalLM):
                 extra_names={},
             ),
             fused_schema=None,
-            num_experts=config.n_routed_experts,
+            num_experts=(
+                config.n_routed_experts
+                if placement is None
+                else placement.num_physical_experts
+            ),
+            expert_placement=placement,
             ep_rank=self.mapping.moe.ep_rank,
             ep_size=self.mapping.moe.ep_size,
             fused_gate_up_as_w13=False,

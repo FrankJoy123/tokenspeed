@@ -86,6 +86,14 @@ PYINDEXER
  --model "$model" --profile w4a8 --output "$point/model-identity.json"
 "$VIRTUAL_ENV/bin/python" "$script_dir/../../../../deploy/setup/identity.py" \
  --source "${RUNTIME_SOURCE:-$script_dir/../../../../..}" --output "$point/runtime-identity.json"
+eplb=()
+if [[ -n "${PARETO_EPLB_DISPATCH:-}" ]]; then
+ eplb=(--enable-eplb --expert-distribution-recorder-mode stat
+       --ep-dispatch-algorithm "$PARETO_EPLB_DISPATCH"
+       --ep-num-redundant-experts "${PARETO_EPLB_REDUNDANT:?}"
+       --eplb-rebalance-num-iterations "${PARETO_EPLB_INTERVAL:?}"
+       --eplb-rebalance-layers-per-chunk "${PARETO_EPLB_LAYERS_PER_CHUNK:?}")
+fi
 exec "$VIRTUAL_ENV/bin/python" -m tokenspeed.runtime.entrypoints.engine \
  --distributed-timeout-seconds "$distributed_timeout" \
  --model "$model" --trust-remote-code --dtype bfloat16 \
@@ -101,4 +109,5 @@ exec "$VIRTUAL_ENV/bin/python" -m tokenspeed.runtime.entrypoints.engine \
  --seed 968340402 --chunked-prefill-size 8192 --max-prefill-tokens 8192 \
  --max-cudagraph-capture-size "$max_batch" --cudagraph-capture-sizes $(python -c 'import sys; print(" ".join(str(x) for x in [1,2,4,8,16,32,64,128,256] if x<=int(sys.argv[1])))' "$max_batch") \
  --weight-loader-prefetch-num-threads 128 --attention-backend deepseek_v41 \
- --comm-fusion-max-num-tokens 4096 --decode-log-interval 100000 --enable-async-logging
+ --comm-fusion-max-num-tokens 4096 --decode-log-interval 100000 --enable-async-logging \
+ "${eplb[@]}"

@@ -323,6 +323,12 @@ class ExpertLocationMetadata:
         """
         layer_id = prepared.layer_ids[index]
         device = self.physical_to_logical_map.device
+        # Counts name physical slots under the old placement. Once those slots
+        # hold different experts, interpreting their history with the new map
+        # would attribute routes to the wrong logical experts. Start this
+        # layer's new recording window on the same execution stream.
+        if self.physical_load is not None:
+            self.physical_load[layer_id].zero_()
         self.physical_to_logical_map[layer_id].copy_(
             prepared.physical_to_logical[index].to(self.physical_to_logical_map.dtype)
         )
@@ -412,7 +418,9 @@ class ExpertLocationMetadata:
 
     # -------------------------------- load recording ---------------------------------
 
-    def enable_load_recording(self, mapping: Mapping) -> None:
+    def enable_load_recording(
+        self, mapping: Mapping, *, rank_local_inputs: bool = False
+    ) -> None:
         """Allocate the per-physical-expert route counters the router bumps.
 
         int64: on replicated-input EP every rank counts every token's routes,
@@ -424,13 +432,15 @@ class ExpertLocationMetadata:
         Args:
             mapping: The parallel layout, which lays out the ranks' rows in
                 the MoE input.
+            rank_local_inputs: The model owns the EP exchange and routes only
+                this rank's attention-DP rows.
         """
         self.physical_load = torch.zeros(
             (self.num_layers, self.num_physical_experts),
             dtype=torch.int64,
             device=self.physical_to_logical_map.device,
         )
-        self.load_rows = ExpertLoadRowMask(mapping)
+        self.load_rows = ExpertLoadRowMask(mapping, rank_local_inputs=rank_local_inputs)
 
     def reserve_load_rows(self, max_rows: int) -> None:
         """Reserve the live-row mask for the largest MoE input any forward carries."""
@@ -752,8 +762,10 @@ def compute_logical_to_rank_dispatch_physical_map(
 ) -> torch.Tensor:
     """Pick, for every rank, the replica it dispatches each logical expert to.
 
-    Nearest first: a replica on the same GPU, then one on the same node, else a
-    seeded fair draw over all replicas so the remote ranks spread evenly. The
+    Nearest first: a replica on the same GPU, then one on the same node when
+    that narrows the candidates, else a seeded fair draw over all replicas.
+    When all replicas share a node, the draw avoids biasing its non-owners
+    toward the first replica. The
     tiers are vectorized over the whole table; only the draws loop, over the
     (layer, expert) pairs that need one, in a fixed order so every rank
     derives the same map.
@@ -804,6 +816,10 @@ def compute_logical_to_rank_dispatch_physical_map(
 
     first_on_gpu = first_replica_on(gpu_of, num_gpus)  # [L, E, G]
     first_on_node = first_replica_on(node_of, num_nodes)[..., nodes]  # [L, E, G]
+    # As in SGLang, same-node preference must remove remote candidates.
+    # If every replica is on one node, let its non-owning ranks draw fairly.
+    spans_nodes = node_of.masked_fill(~valid, num_nodes).amin(-1) != node_of.amax(-1)
+    first_on_node = first_on_node.masked_fill(~spans_nodes[..., None], -1)
     column = torch.where(first_on_gpu >= 0, first_on_gpu, first_on_node)
     chosen = replicas.gather(-1, column.clamp_min(0))
     # A single replica serves everyone; otherwise only the nearest tiers.
@@ -918,11 +934,13 @@ def build_expert_placement(
             "Expert placement was requested for a model without routed experts."
         )
     placement = compute_initial_expert_location_metadata(server_args, model_config)
+    rank_local_inputs = model_class.expert_placement_rank_local_inputs
     if server_args.expert_distribution_recorder_mode is not None:
-        placement.enable_load_recording(server_args.mapping)
-    if (
-        server_args.ep_dispatch_algorithm in STATIC_EP_DISPATCH_ALGORITHMS
-        and server_args.all2all_backend != "none"
+        placement.enable_load_recording(
+            server_args.mapping, rank_local_inputs=rank_local_inputs
+        )
+    if server_args.ep_dispatch_algorithm in STATIC_EP_DISPATCH_ALGORITHMS and (
+        server_args.all2all_backend != "none" or rank_local_inputs
     ):
         # All-to-all EP slices this rank's static map while the model is
         # built, inside the weight region a memory-saver discard releases and

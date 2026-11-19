@@ -154,9 +154,10 @@ def main() -> None:
     parser.add_argument("--computed-rows-per-request", type=int, required=True)
     parser.add_argument("--prefill-rows-per-rank", type=int, required=True)
     parser.add_argument("--rounds", type=int, choices=[1], required=True)
-    parser.add_argument("--extra-experts", type=int, choices=[0], required=True)
+    parser.add_argument("--extra-experts", type=int, required=True)
     parser.add_argument("--expert-routing", choices=["natural"], required=True)
     parser.add_argument("--warmup-steps", type=int, required=True)
+    parser.add_argument("--eplb-warmup-forwards", type=int, default=0)
     parser.add_argument("--measure-steps", type=int, required=True)
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--profile-steps", type=int, required=True)
@@ -171,6 +172,7 @@ def main() -> None:
         MsgpackEncoder,
         ProfileReq,
         ProfileReqType,
+        RebalanceExpertsReqInput,
     )
     from tokenspeed.runtime.entrypoints.wire_driver import (
         Completion,
@@ -188,9 +190,8 @@ def main() -> None:
     assert server.disaggregation_mode == "null"
     assert not server.disable_overlap_schedule and server.enable_async_logging
     assert server.speculative_algorithm is None and not server.enable_mixed_batch
-    assert (
-        not server.enable_eplb and server.ep_num_redundant_experts == args.extra_experts
-    )
+    assert server.enable_eplb == bool(args.eplb_warmup_forwards)
+    assert server.ep_num_redundant_experts == args.extra_experts
     assert server.enable_kvstore and server.kvstore_write_policy == "write_through"
     assert (
         server.max_prefill_tokens
@@ -243,6 +244,9 @@ def main() -> None:
     prefix = rng.choices(vocab, k=args.prefix_tokens)
     # Different suffixes prevent a completed request from extending another's cache hit.
     suffixes = [rng.choices(vocab, k=args.new_tokens) for _ in range(total_requests)]
+    suffix_hashes = [
+        hashlib.sha256(json.dumps(suffix).encode()).hexdigest() for suffix in suffixes
+    ]
     save(
         "configuration.json",
         {
@@ -254,10 +258,10 @@ def main() -> None:
             "requests_per_round": total_requests,
             "active_attention_lanes": active,
             "output_tokens": 1,
-            "eplb": False,
+            "eplb": server.enable_eplb,
             "redundant_experts": args.extra_experts,
             "routing": args.expert_routing,
-            "routing_scope": "Natural expert routing without redundant expert replicas or routing simulation.",
+            "routing_scope": "Natural logical routing with the explicit physical expert placement.",
             "cp": cp,
             "prefix_sha256": hashlib.sha256(json.dumps(prefix).encode()).hexdigest(),
             "suffix_pool_sha256": hashlib.sha256(
@@ -290,13 +294,29 @@ def main() -> None:
             r.rid = rid
             return r
 
-        async def queued_round(tag, *, profile=False):
+        # Prime the one-row specialization that can appear as the full queue
+        # drains. The formal round keeps its original prefix and suffix pool.
+        stage("one-token-warmup", active_lanes=active)
+        one_token_warmup = driver.generate(
+            [
+                request(f"one-token-warmup-{lane}", prefix[:1], lane)
+                for lane in range(active)
+            ]
+        )
+        assert len(one_token_warmup) == active and all(
+            result.finish_reason in ("stop", "length")
+            and result.prompt_tokens == result.completion_tokens == 1
+            for result in one_token_warmup
+        )
+        save("one-token-warmup.json", [dataclasses.asdict(r) for r in one_token_warmup])
+
+        async def queued_round(tag, *, round_suffixes, profile=False):
             encoder = MsgpackEncoder()
             results = {}
             finished = set()
 
             async def submit():
-                for i, suffix in enumerate(suffixes):
+                for i, suffix in enumerate(round_suffixes):
                     r = request(f"{tag}-request-{i}", prefix + suffix, i % active)
                     results[r.rid] = Completion()
                     await driver.frontend.generate(
@@ -304,7 +324,7 @@ def main() -> None:
                     )
 
             async def receive():
-                while len(finished) < len(suffixes):
+                while len(finished) < len(round_suffixes):
                     for rid, chunk in await driver.frontend.next_outputs():
                         if isinstance(chunk, Exception):
                             raise chunk
@@ -394,6 +414,7 @@ def main() -> None:
             return results
 
         summaries = []
+        warm_rng = random.Random(f"EPLB-prefill-{args.seed}")
         for iteration in range(0, args.rounds + 1 + bool(args.profile_steps)):
             profiling = iteration > args.rounds
             tag = f"steady-s{args.prefill_rows_per_rank}-" + (
@@ -420,7 +441,15 @@ def main() -> None:
             )
             save(f"r{iteration}-primes.json", [dataclasses.asdict(p) for p in primes])
             stage("queued-prefill", round=iteration, requests=total_requests)
-            results = asyncio.run(queued_round(tag, profile=profiling))
+            round_suffixes = suffixes
+            if iteration == 0 and server.enable_eplb:
+                round_suffixes = [
+                    warm_rng.choices(vocab, k=args.new_tokens)
+                    for _ in range(total_requests)
+                ]
+            results = asyncio.run(
+                queued_round(tag, round_suffixes=round_suffixes, profile=profiling)
+            )
             assert len(results) == total_requests
             for rid, result in results.items():
                 assert result.finish_reason != "abort", (
@@ -441,6 +470,50 @@ def main() -> None:
             )
             if iteration == 0:
                 stage("warmup-complete", requests=len(results))
+                if server.enable_eplb:
+                    warm_offset = args.engine_log.stat().st_size
+                    replies = driver.control(RebalanceExpertsReqInput())
+                    assert len(replies) == dp and all(
+                        reply.success for reply in replies
+                    )
+                    steps_per_wave = (
+                        per_rank
+                        * args.computed_rows_per_request
+                        // args.prefill_rows_per_rank
+                    )
+                    waves = math.ceil(args.eplb_warmup_forwards / steps_per_wave)
+                    for wave in range(waves):
+                        stage("eplb-warmup", wave=wave, total_waves=waves)
+                        warm_suffixes = [
+                            warm_rng.choices(vocab, k=args.new_tokens)
+                            for _ in range(total_requests)
+                        ]
+                        warmed = asyncio.run(
+                            queued_round(
+                                f"eplb-warm-{wave}", round_suffixes=warm_suffixes
+                            )
+                        )
+                        assert len(warmed) == total_requests and all(
+                            row.finish_reason != "abort"
+                            and row.cached_tokens == args.prefix_tokens
+                            and row.completion_tokens == 1
+                            for row in warmed.values()
+                        )
+                    formal_offset = args.engine_log.stat().st_size
+                    save(
+                        "eplb-warmup.json",
+                        {
+                            "start_log_offset": warm_offset,
+                            "formal_log_offset": formal_offset,
+                            "requested_forwards": args.eplb_warmup_forwards,
+                            "waves": waves,
+                        },
+                    )
+                    with args.engine_log.open("rb") as log:
+                        log.seek(warm_offset)
+                        assert b"Expert rebalance 1 applied" in log.read(
+                            formal_offset - warm_offset
+                        )
                 continue
             if profiling:
                 traces = list((args.out / "traces").glob("*.trace.json.gz"))

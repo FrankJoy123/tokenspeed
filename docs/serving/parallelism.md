@@ -613,6 +613,14 @@ rebalance now (it replies once it takes the load snapshot; the moves follow). To
 owns the same counters. The engine log reports the balancedness each snapshot
 saw and the one the new placement is expected to reach.
 
+DeepSeek V4.1 on SM120 attention DP can apply this to W4A8 Cake and Elastic
+layers in the same model. The router still selects logical experts. Each rank
+maps those routes to its physical slots and records its own live rows. Online
+migration copies the packed weights and scales in place, including the
+different packed layouts of the two backends. The next recording window
+starts after the last layer switches. Use static selection for locality or
+dynamic selection to spread routes across the available replicas.
+
 How a rebalance runs, and why it needs no new communication:
 
 1. **Snapshot.** The runtime copies the counters to the host and zeroes them

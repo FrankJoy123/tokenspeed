@@ -161,6 +161,35 @@ def test_local_moves_keep_cycles_intact_and_switch_tables_after_weights():
     assert placement.physical_load.shape == (2, 6)
 
 
+def test_mixed_expert_layouts_reuse_staging_without_changing_packed_bytes():
+    old_map = torch.tensor([[0, 1], [0, 1]])
+    new_map = torch.tensor([[1, 0], [1, 0]])
+    placement = _placement(old_map, 0, (0,))
+    weights = {
+        0: [torch.arange(12, dtype=torch.uint8).reshape(2, 2, 3)],
+        1: [torch.arange(8, dtype=torch.int16).reshape(2, 4)],
+    }
+    expected = [weights[i][0].flip(0) for i in range(2)]
+    original_pointers = [weights[i][0].data_ptr() for i in range(2)]
+    placement.physical_load.fill_(7)
+    updater = ExpertLocationUpdater(
+        placement,
+        weights,
+        process_group=mock.Mock(),
+        peer_ranks=(0,),
+        ep_rank=0,
+        all_to_all_ep=True,
+        num_groups=None,
+        num_nodes=1,
+    )
+    assert updater.staging_bytes == 16
+    updater.apply((0, 1), new_map, _moves(old_map, new_map, placement))
+    for layer, target in enumerate(expected):
+        assert torch.equal(weights[layer][0], target)
+        assert weights[layer][0].data_ptr() == original_pointers[layer]
+    assert placement.physical_load.count_nonzero() == 0
+
+
 def test_one_chunk_prepares_its_rows_once_and_switches_per_layer():
     """The host-side derivation (inverse rows and, under all-to-all EP, this
     rank's static dispatch rows) runs once per chunk over the chunk's layers
@@ -238,9 +267,11 @@ def test_updater_rejects_mismatched_slot_tensors():
     with pytest.raises(ValueError, match="does not match"):
         ExpertLocationUpdater(placement, good, **{**kwargs, "peer_ranks": (0,)})
     two_layers = _placement(torch.tensor([[0, 1, 2, 3], [0, 1, 2, 3]]), 0, (0, 0))
-    with pytest.raises(ValueError, match="differ in layout"):
+    with pytest.raises(ValueError, match="differ in count or device"):
         ExpertLocationUpdater(
-            two_layers, {0: [torch.zeros(2, 3)], 1: [torch.zeros(2, 4)]}, **kwargs
+            two_layers,
+            {0: [torch.zeros(2, 3)], 1: [torch.zeros(2, 4), torch.zeros(2)]},
+            **kwargs,
         )
     with pytest.raises(ValueError, match="outside"):
         ExpertLocationUpdater(two_layers, {0: good[0], 5: good[0]}, **kwargs)

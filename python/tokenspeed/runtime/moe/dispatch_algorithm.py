@@ -41,6 +41,7 @@ EP_DISPATCH_ALGORITHMS: tuple[str, ...] = (
 STATIC_EP_DISPATCH_ALGORITHMS: frozenset[str] = frozenset(
     {"static", "static_with_zero_expert"}
 )
+EPLB_EP_DISPATCH_ALGORITHMS = frozenset(EP_DISPATCH_ALGORITHMS) - {"fake"}
 
 _ZERO_EXPERT_SUFFIX = "_with_zero_expert"
 

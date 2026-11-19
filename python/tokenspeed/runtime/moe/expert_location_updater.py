@@ -60,6 +60,8 @@ from tokenspeed.runtime.distributed.process_group_manager import (
     process_group_manager as pg_manager,
 )
 from tokenspeed.runtime.layers.moe.expert import MoELayer
+from tokenspeed.runtime.models.base.causal_lm import BaseCausalLM
+from tokenspeed.runtime.moe.dispatch_algorithm import STATIC_EP_DISPATCH_ALGORITHMS
 from tokenspeed.runtime.moe.expert_location import (
     ExpertLocationMetadata,
     ModelConfigForExpertLocation,
@@ -131,11 +133,12 @@ class ExpertLocationUpdater:
         self._staging = self._reserve_staging()
 
     def _reserve_staging(self) -> tuple[torch.Tensor, ...]:
-        """One layer's worth of slot tensors; every layer must share their layout."""
+        """Reserve the largest layer's slot storage for each weight component."""
         if not self._weights_of_layer:
             raise ValueError("the model exposes no routed expert weights to rebalance")
         num_local = self._placement.num_local_physical_experts
         reference: tuple[torch.Tensor, ...] | None = None
+        sizes: list[int] = []
         for layer_id, tensors in sorted(self._weights_of_layer.items()):
             if not 0 <= layer_id < self._placement.num_layers:
                 raise ValueError(
@@ -156,17 +159,21 @@ class ExpertLocationUpdater:
                     )
             if reference is None:
                 reference = tensors
-                continue
+                sizes = [0] * len(tensors)
             if len(tensors) != len(reference) or any(
-                t.shape != r.shape or t.dtype != r.dtype or t.device != r.device
-                for t, r in zip(tensors, reference)
+                t.device != r.device for t, r in zip(tensors, reference)
             ):
                 raise ValueError(
-                    f"layer {layer_id}'s slot tensors differ in layout from the "
+                    f"layer {layer_id}'s slot tensors differ in count or device from the "
                     "first MoE layer's; the staging buffer is shared by every layer"
                 )
+            for index, tensor in enumerate(tensors):
+                sizes[index] = max(sizes[index], tensor.numel() * tensor.element_size())
         assert reference is not None
-        return tuple(torch.empty_like(tensor) for tensor in reference)
+        return tuple(
+            torch.empty(size, dtype=torch.uint8, device=tensor.device)
+            for size, tensor in zip(sizes, reference)
+        )
 
     @property
     def staging_bytes(self) -> int:
@@ -223,14 +230,21 @@ class ExpertLocationUpdater:
     def _move_weights(
         self, layer_id: int, tensors: Sequence[torch.Tensor], moves: SlotMoves
     ) -> None:
-        staging = self._staging
+        staging = tuple(
+            buffer[: tensor.numel() * tensor.element_size()]
+            .view(tensor.dtype)
+            .view(tensor.shape)
+            for tensor, buffer in zip(tensors, self._staging)
+        )
         ops: list[dist.P2POp] = []
         for dst_slot, src_rank in moves.recv:
             for buffer in staging:
-                ops.append(self._p2p(dist.irecv, buffer[dst_slot], src_rank))
+                payload = buffer[dst_slot].reshape(-1).view(torch.uint8)
+                ops.append(self._p2p(dist.irecv, payload, src_rank))
         for src_slot, dst_rank in moves.send:
             for tensor in tensors:
-                ops.append(self._p2p(dist.isend, tensor[src_slot], dst_rank))
+                payload = tensor[src_slot].reshape(-1).view(torch.uint8)
+                ops.append(self._p2p(dist.isend, payload, dst_rank))
         if ops:
             # Watchdog line: a hang in the batch below names the plan it ran.
             digest = hashlib.blake2b(
@@ -256,6 +270,8 @@ class ExpertLocationUpdater:
 
 def _all_to_all_ep(model: torch.nn.Module) -> bool:
     """Whether the model's MoE layers own all-to-all dispatch (uniform over layers)."""
+    if isinstance(model, BaseCausalLM) and model.expert_placement_rank_local_inputs:
+        return True
     flags = {
         module.supports_all_to_all_ep
         for module in model.modules()
@@ -286,6 +302,14 @@ def build_expert_location_updater(
             "(--expert-distribution-recorder-mode stat)"
         )
     mapping = server_args.mapping
+    all_to_all_ep = _all_to_all_ep(model)
+    if (
+        not all_to_all_ep
+        and server_args.ep_dispatch_algorithm not in STATIC_EP_DISPATCH_ALGORITHMS
+    ):
+        raise ValueError(
+            "Online EPLB requires static replica selection with replicated MoE inputs"
+        )
     pg_manager.init_process_group(mapping.moe.ep_group)
     updater = ExpertLocationUpdater(
         placement,
@@ -293,7 +317,7 @@ def build_expert_location_updater(
         process_group=pg_manager.get_device_process_group(mapping.moe.ep_group),
         peer_ranks=mapping.moe.ep_group,
         ep_rank=mapping.moe.ep_rank,
-        all_to_all_ep=_all_to_all_ep(model),
+        all_to_all_ep=all_to_all_ep,
         num_groups=ModelConfigForExpertLocation.from_model_config(
             model_config
         ).num_groups,

@@ -43,8 +43,16 @@ config = json.loads((point / "configuration.json").read_text())
 terminal = json.loads((root / "terminal.json").read_text())
 assert terminal["returncode"] == 0
 assert json.loads((point / "state.json").read_text())["stage"] == "complete"
-assert config["routing"] == "natural" and config["redundant_experts"] == 0
-assert config["eplb"] is False
+assert config["routing"] == "natural"
+if config["eplb"]:
+    warm = json.loads((point / "eplb-warmup.json").read_text())
+    assert warm["requested_forwards"] >= 200 and warm["waves"] > 0
+    with (root / "engine.log").open("rb") as log:
+        log.seek(warm["start_log_offset"])
+        warmed = log.read(warm["formal_log_offset"] - warm["start_log_offset"])
+        assert b"Expert rebalance 1 applied" in warmed
+        formal = log.read()
+    assert b"Expert rebalance " not in formal
 assert config["benchmark"]["rounds"] == 1
 assert config["benchmark"]["warmup_steps"] >= 5
 assert config["benchmark"]["measure_steps"] == 10

@@ -54,6 +54,7 @@ from tokenspeed.runtime.execution.drafter.eagle_harness.config import (
 from tokenspeed.runtime.metrics.config import resolve_metrics_options
 from tokenspeed.runtime.moe.dispatch_algorithm import (
     EP_DISPATCH_ALGORITHMS,
+    EPLB_EP_DISPATCH_ALGORITHMS,
     STATIC_EP_DISPATCH_ALGORITHMS,
 )
 from tokenspeed.runtime.utils import (
@@ -2554,8 +2555,7 @@ class ServerArgs:
         # startup prefixes would delete an L3 store's shared namespace.
         if self.disaggregation_mode != "null":
             raise ValueError(
-                "--enable-startup-requests is not supported with "
-                "--disaggregation-mode"
+                "--enable-startup-requests is not supported with --disaggregation-mode"
             )
         if self.kvstore_storage_backend is not None:
             raise ValueError(
@@ -2838,7 +2838,7 @@ class ServerArgs:
         a deterministic one: the replicated-input EP path relies on every rank
         choosing the same replica for a route. Online rebalancing
         (``--enable-eplb``) spells out every choice it depends on -- the load
-        counters, a static dispatch algorithm, the snapshot interval and the
+        counters, a dispatch algorithm, the snapshot interval and the
         layers switched per round -- rather than auto-setting any of them.
         """
         if self.enable_eplb:
@@ -2847,10 +2847,9 @@ class ServerArgs:
                     "--enable-eplb rebalances from the routing load counters; "
                     "pass --expert-distribution-recorder-mode stat explicitly."
                 )
-            if self.ep_dispatch_algorithm not in STATIC_EP_DISPATCH_ALGORITHMS:
+            if self.ep_dispatch_algorithm not in EPLB_EP_DISPATCH_ALGORITHMS:
                 raise ValueError(
-                    "--enable-eplb needs a static replica choice "
-                    "(--ep-dispatch-algorithm static or static_with_zero_expert); "
+                    "--enable-eplb needs static or dynamic replica selection; "
                     f"got {self.ep_dispatch_algorithm!r}."
                 )
             if (
@@ -3914,8 +3913,8 @@ class ServerArgs:
             "forwards the routing load since the previous snapshot is balanced "
             "with the EPLB algorithm and the expert weights move between slots, "
             "--eplb-rebalance-layers-per-chunk layers per scheduling round. "
-            "Requires --expert-distribution-recorder-mode stat and a static "
-            "--ep-dispatch-algorithm, both explicit; the RebalanceExpertsReqInput "
+            "Requires --expert-distribution-recorder-mode stat and an explicit "
+            "--ep-dispatch-algorithm; the RebalanceExpertsReqInput "
             "control operation triggers one rebalance manually.",
         )
         parser.add_argument(

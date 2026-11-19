@@ -57,8 +57,9 @@ class ExpertLoadRowMask:
             out in the MoE input (``moe_input_row_segments``).
     """
 
-    def __init__(self, mapping: Mapping) -> None:
+    def __init__(self, mapping: Mapping, *, rank_local_inputs: bool = False) -> None:
         self._mapping = mapping
+        self._rank_local_inputs = rank_local_inputs
         # [max_rows] bool on the placement's device; None until reserved.
         self.mask: torch.Tensor | None = None
 
@@ -82,19 +83,19 @@ class ExpertLoadRowMask:
             raise ValueError("max_rows must be positive")
         self.mask = torch.ones(max_rows, dtype=torch.bool, device=device)
 
-    def rows(self, num_rows: int) -> torch.Tensor:
+    def rows(self, num_rows: int, *, start: int = 0) -> torch.Tensor:
         """The ``[num_rows]`` view the router reads for a forward of that many rows."""
         if self.mask is None:
             raise RuntimeError(
                 "the expert load row mask has not been reserved; "
                 "ModelRunner.prepare_communication_runtime reserves it"
             )
-        if num_rows > self.mask.shape[0]:
+        if start < 0 or start + num_rows > self.mask.shape[0]:
             raise ValueError(
-                f"a forward with {num_rows} MoE rows exceeds the reserved "
+                f"MoE row range [{start}, {start + num_rows}) exceeds the reserved "
                 f"{self.mask.shape[0]}"
             )
-        return self.mask[:num_rows]
+        return self.mask[start : start + num_rows]
 
     def mark_padded(
         self,
@@ -109,11 +110,20 @@ class ExpertLoadRowMask:
                 global rank (uniform under a graph replay).
             live_global_num_tokens: Real token rows per global rank.
         """
-        segments = moe_input_row_segments(
-            self._mapping,
-            padded_global_num_tokens=padded_global_num_tokens,
-            live_global_num_tokens=live_global_num_tokens,
-        )
+        if self._rank_local_inputs:
+            rank = self._mapping.rank
+            padded, live = padded_global_num_tokens[rank], live_global_num_tokens[rank]
+            if not 0 <= live <= padded:
+                raise ValueError(
+                    f"rank {rank}: {live} live rows do not fit {padded} padded rows"
+                )
+            segments = [(padded, live)]
+        else:
+            segments = moe_input_row_segments(
+                self._mapping,
+                padded_global_num_tokens=padded_global_num_tokens,
+                live_global_num_tokens=live_global_num_tokens,
+            )
         total = sum(rows for rows, _ in segments)
         mask = self.rows(total)
         if all(live == rows for rows, live in segments):
@@ -149,7 +159,7 @@ class LayerExpertLoad:
         self.physical_load = physical_load
         self.rows = rows
 
-    def record(self, topk_ids: torch.Tensor) -> None:
+    def record(self, topk_ids: torch.Tensor, *, start: int = 0) -> None:
         """Count every real route of ``topk_ids`` into the counters.
 
         ``-1`` marks zero-expert and masked routes; filler rows are not
@@ -158,8 +168,11 @@ class LayerExpertLoad:
 
         Args:
             topk_ids: ``[rows, top_k]`` physical ids of this layer's routing.
+            start: First input row for a chunk of this forward.
         """
-        valid = (topk_ids >= 0) & self.rows.rows(topk_ids.shape[0]).unsqueeze(1)
+        valid = (topk_ids >= 0) & self.rows.rows(
+            topk_ids.shape[0], start=start
+        ).unsqueeze(1)
         self.physical_load.scatter_add_(
             0,
             topk_ids.masked_fill(~valid, 0).reshape(-1).long(),

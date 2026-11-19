@@ -39,6 +39,7 @@ from tokenspeed.runtime.execution.forward_step import get_is_capture_mode
 from tokenspeed.runtime.layers.mlp import GatedMLP, gated_activation
 from tokenspeed.runtime.layers.moe.expert import MoELayer
 from tokenspeed.runtime.layers.moe.topk import (
+    ExpertLocationDispatchInfo,
     StandardTopKOutput,
     TopK,
     TopKOutput,
@@ -206,11 +207,15 @@ class DeepseekV4MoE(nn.Module):
         layer_index: int,
         prefix: str,
         aux_stream: object | None = None,
+        *,
+        expert_dispatch_info: ExpertLocationDispatchInfo | None = None,
+        uses_outer_dispatch: bool = False,
     ) -> None:
         super().__init__()
         self.config = config
         self.mapping = mapping
         self.layer_index = layer_index
+        self.expert_dispatch_info = expert_dispatch_info
         self.n_shared_experts = config.n_shared_experts
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
         self.scoring_func = getattr(config, "scoring_func", "sqrtsoftplus")
@@ -225,7 +230,7 @@ class DeepseekV4MoE(nn.Module):
         # Petit's VMM-backed collective and auxiliary-stream shared experts do
         # not replay safely together. Keep both branches on the main stream.
         self.stream_fork = StreamFork(None if self.use_gluon_petit else aux_stream)
-        if mapping.moe.ep_size > 1:
+        if mapping.moe.ep_size > 1 and not uses_outer_dispatch:
             if global_server_args_dict.get("enable_eplb", False):
                 raise ValueError(
                     "DeepSeek V4 EP does not support EPLB with precomputed routing."
@@ -243,7 +248,10 @@ class DeepseekV4MoE(nn.Module):
                 raise ValueError("DeepSeek V4 MegaMoE requires expert parallelism.")
             if mapping.moe.tp_size != 1:
                 raise ValueError("DeepSeek V4 MegaMoE does not support mixed TP/EP.")
-            if global_server_args_dict.get("ep_num_redundant_experts", 0):
+            if expert_dispatch_info is not None or (
+                not uses_outer_dispatch
+                and global_server_args_dict.get("ep_num_redundant_experts", 0)
+            ):
                 raise ValueError(
                     "DeepSeek V4 MegaMoE does not support redundant EP experts."
                 )
@@ -253,7 +261,9 @@ class DeepseekV4MoE(nn.Module):
                     "EP size."
                 )
         elif mapping.moe.ep_size > 1:
-            if global_server_args_dict.get("ep_num_redundant_experts", 0):
+            if not uses_outer_dispatch and global_server_args_dict.get(
+                "ep_num_redundant_experts", 0
+            ):
                 raise ValueError(
                     "DeepSeek V4 normal EP does not support redundant experts "
                     "with precomputed routing."
@@ -314,7 +324,11 @@ class DeepseekV4MoE(nn.Module):
         )
         self.experts = MoELayer(
             top_k=config.num_experts_per_tok,
-            num_experts=config.n_routed_experts,
+            num_experts=(
+                config.n_routed_experts
+                if expert_dispatch_info is None
+                else expert_dispatch_info.num_physical_experts
+            ),
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
             quant_config=routed_quant_config,
@@ -398,8 +412,7 @@ class DeepseekV4MoE(nn.Module):
                 f"{tuple(gate_up.weight.shape)} and {tuple(down.weight.shape)}"
             )
         logger.info(
-            f"Layer {self.layer_index} runs its shared expert outside MegaMoE: "
-            f"{reason}"
+            f"Layer {self.layer_index} runs its shared expert outside MegaMoE: {reason}"
         )
 
     def warmup(self) -> None:

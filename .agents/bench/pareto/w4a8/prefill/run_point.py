@@ -26,6 +26,7 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -113,11 +114,29 @@ def main():
         "--source", type=Path, help="Optional checkout used to build the runtime"
     )
     parser.add_argument("--expert-routing", choices=["natural"], required=True)
+    parser.add_argument("--redundant-experts", type=int, default=0)
+    parser.add_argument("--expert-placement", default="trivial")
+    parser.add_argument("--ep-dispatch", choices=["static", "dynamic"])
+    parser.add_argument("--eplb-warmup-forwards", type=int, default=0)
+    parser.add_argument("--eplb-interval", type=int)
+    parser.add_argument("--eplb-layers-per-chunk", type=int)
     parser.add_argument("--indexer", choices=["bf16", "native-fp4"], required=True)
+    parser.add_argument("--gpu-memory-utilization", type=float, default=0.85)
     parser.add_argument("--profile-steps", type=int, required=True)
+    parser.add_argument("--cache-seed", type=Path)
+    parser.add_argument("--flashinfer-workspace", type=Path)
     args = parser.parse_args()
     if args.profile_steps < 0:
         parser.error("--profile-steps must be nonnegative")
+    if args.eplb_warmup_forwards and (
+        args.eplb_warmup_forwards < 200
+        or not args.eplb_interval
+        or not args.eplb_layers_per_chunk
+        or not args.ep_dispatch
+    ):
+        parser.error(
+            "EPLB requires at least 200 warmup forwards, an interval, layers per chunk, and replica dispatch"
+        )
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=False)
     assert not subprocess.check_output(
@@ -125,6 +144,16 @@ def main():
         text=True,
         timeout=10,
     ).strip(), "GPUs are occupied"
+    if args.cache_seed is not None:
+        cache_seed = args.cache_seed.resolve(strict=True)
+        shutil.copytree(
+            cache_seed,
+            out / "cache",
+            ignore=shutil.ignore_patterns("*.lock", "*lockfile*"),
+        )
+        (out / "cache-seed.json").write_text(
+            json.dumps({"source": str(cache_seed)}, indent=2) + "\n"
+        )
     script_dir = Path(__file__).resolve().parent
     agents = script_dir.parents[3]
     source = args.source.resolve() if args.source else agents.parent
@@ -178,7 +207,7 @@ def main():
         "--max-num-seqs",
         str(count * dp),
         "--gpu-memory-utilization",
-        "0.85",
+        str(args.gpu_memory_utilization),
         "--engram-host-table",
         "--engram-host-table-layout",
         "shared",
@@ -195,18 +224,32 @@ def main():
         "write_through",
         "--language-model-only",
         "--ep-num-redundant-experts",
-        "0",
+        str(args.redundant_experts),
         "--init-expert-location",
-        "trivial",
+        args.expert_placement,
         "--seed",
         "336846783",
         "--dist-init-addr",
-        f"127.0.0.1:{31000+requests_per_lane+(20 if cp==8 else 0)}",
+        f"127.0.0.1:{31000 + requests_per_lane + (20 if cp == 8 else 0)}",
         "--distributed-timeout-seconds",
         "7200",
         "--enable-async-logging",
         "--enable-output-logprobs",
     ]
+    if args.ep_dispatch:
+        engine_args.extend(("--ep-dispatch-algorithm", args.ep_dispatch))
+    if args.eplb_warmup_forwards:
+        engine_args.extend(
+            (
+                "--enable-eplb",
+                "--expert-distribution-recorder-mode",
+                "stat",
+                "--eplb-rebalance-num-iterations",
+                str(args.eplb_interval),
+                "--eplb-rebalance-layers-per-chunk",
+                str(args.eplb_layers_per_chunk),
+            )
+        )
     if args.retraction_snapshot_ratio is not None:
         engine_args.extend(
             ["--retraction-snapshot-ratio", str(args.retraction_snapshot_ratio)]
@@ -218,6 +261,10 @@ def main():
         indexer=args.indexer,
     )
     env = benchmark_cache_environment(env, out=out)
+    if args.flashinfer_workspace is not None:
+        env["FLASHINFER_WORKSPACE_BASE"] = str(
+            args.flashinfer_workspace.resolve(strict=True)
+        )
     for name in ("CC", "CXX"):
         value = env.get(name)
         if not value or not Path(value).is_file() or not os.access(value, os.X_OK):
@@ -273,7 +320,9 @@ def main():
         "--rounds",
         "1",
         "--extra-experts",
-        "0",
+        str(args.redundant_experts),
+        "--eplb-warmup-forwards",
+        str(args.eplb_warmup_forwards),
         "--expert-routing",
         args.expert_routing,
         "--warmup-steps",

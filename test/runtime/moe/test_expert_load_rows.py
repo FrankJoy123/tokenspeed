@@ -35,6 +35,24 @@ from tokenspeed.runtime.execution import forward_step, prefill_graph
 from tokenspeed.runtime.execution.query_shard import scatter_count
 from tokenspeed.runtime.moe.expert_load_rows import ExpertLoadRowMask, LayerExpertLoad
 
+
+def test_outer_ep_counts_local_live_rows_across_chunks():
+    mapping = Mapping(
+        rank=2, world_size=4, attn_tp_size=1, attn_dp_size=4, moe_ep_size=4
+    )
+    mask = ExpertLoadRowMask(mapping, rank_local_inputs=True)
+    mask.reserve(32, "cpu")
+    mask.mark_padded(
+        padded_global_num_tokens=[8, 8, 8, 8],
+        live_global_num_tokens=[8, 0, 5, 8],
+    )
+    counters = torch.zeros(3, dtype=torch.int64)
+    recorder = LayerExpertLoad(counters, mask)
+    recorder.record(torch.full((4, 2), 1, dtype=torch.int64))
+    recorder.record(torch.full((4, 2), 2, dtype=torch.int64), start=4)
+    assert counters.tolist() == [0, 8, 2]
+
+
 # ----------------------------------------------------------------------
 # Row layout of the MoE input, mirrored from CommManager.
 # ----------------------------------------------------------------------

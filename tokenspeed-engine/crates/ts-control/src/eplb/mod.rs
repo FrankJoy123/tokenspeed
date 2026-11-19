@@ -469,6 +469,10 @@ impl Controller {
             return Ok(());
         }
         self.phase = Phase::Idle;
+        // Placement switches discard counters belonging to the previous
+        // slot mapping. Collect a full window under the applied placement;
+        // a long commit delay must not make the next snapshot immediately due.
+        self.next_snapshot_at = self.forwards + self.config.rebalance_num_iterations;
         self.old_map = None;
         self.new_map = None;
         self.logical_count = None;
@@ -579,9 +583,8 @@ mod tests {
         assert_eq!(rows, new_map[2..]);
         controller.on_chunk_applied(&[2]).unwrap();
         assert_eq!(controller.phase(), Phase::Idle);
-        // The cadence counts from the snapshot (forward 5): the next one is
-        // due at forward 10, two rounds after the 8 forwards so far.
-        assert_eq!(controller.note_round(true), []);
+        // Collect five forwards under the completely applied placement.
+        assert_eq!(rounds(&mut controller, 4, true), []);
         assert_eq!(controller.note_round(true), [InternalOp::Snapshot]);
     }
 
@@ -622,8 +625,33 @@ mod tests {
         controller.on_commit(new_map).unwrap();
         apply_all(&mut controller);
         assert_eq!(controller.phase(), Phase::Idle);
-        assert_eq!(controller.note_round(true), []);
+        assert_eq!(rounds(&mut controller, 4, true), []);
         assert_eq!(controller.note_round(true), [InternalOp::Snapshot]);
+    }
+
+    #[test]
+    fn a_long_commit_delay_and_partial_apply_do_not_shorten_the_new_window() {
+        for physical in [4, 6] {
+            let mut config = controller(0).config;
+            config.specs.num_physical_experts = physical;
+            config.rebalance_num_iterations = 32;
+            config.commit_delay_forwards = 200;
+            let mut controller = Controller::new(config).unwrap();
+            assert_eq!(rounds(&mut controller, 31, true), []);
+            assert_eq!(controller.note_round(true), [InternalOp::Snapshot]);
+            let map = vec![(0..physical).map(|i| (i % 4) as i32).collect(); 3];
+            controller.on_snapshot(vec![vec![1; physical]; 3], map).unwrap();
+            assert_eq!(rounds(&mut controller, 199, true), []);
+            assert_eq!(controller.note_round(true)[0], InternalOp::Commit);
+            let map = controller.placement_for_commit().unwrap().unwrap();
+            controller.on_commit(map).unwrap();
+            controller.on_chunk_applied(&[0, 1]).unwrap();
+            assert_eq!(rounds(&mut controller, 7, true), []);
+            controller.on_chunk_applied(&[2]).unwrap();
+            assert_eq!(rounds(&mut controller, 10, false), []);
+            assert_eq!(rounds(&mut controller, 31, true), []);
+            assert_eq!(controller.note_round(true), [InternalOp::Snapshot]);
+        }
     }
 
     #[test]

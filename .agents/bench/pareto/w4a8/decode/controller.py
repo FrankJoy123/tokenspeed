@@ -24,6 +24,7 @@ import argparse
 import asyncio
 import dataclasses
 import json
+import os
 import time
 from pathlib import Path
 
@@ -47,6 +48,7 @@ from tokenspeed.runtime.engine.io_struct import (
     FlushCacheReqInput,
     MsgpackEncoder,
     PauseSchedulerReqInput,
+    RebalanceExpertsReqInput,
     ResumeSchedulerReqInput,
 )
 from tokenspeed.runtime.entrypoints.wire_driver import Completion, generate_request
@@ -70,6 +72,9 @@ def main():
     parser.add_argument("--batches", nargs="+", type=int, required=True)
     parser.add_argument("--acceptance-mode", choices=["fixed"], required=True)
     args = parser.parse_args()
+    eplb_warmup_forwards = int(os.environ.get("PARETO_EPLB_WARMUP_FORWARDS", "0"))
+    if eplb_warmup_forwards and eplb_warmup_forwards < 200:
+        parser.error("EPLB requires at least 200 forwards after its load snapshot")
     out = args.out
     out.mkdir(parents=True, exist_ok=True)
     assert not (out / "state.json").exists(), "Choose a fresh output directory"
@@ -99,6 +104,7 @@ def main():
             "formal_skip": FORMAL_SKIP,
             "formal_intervals": FORMAL_INTERVALS,
             "actual_width": 6,
+            "eplb_warmup_forwards": eplb_warmup_forwards,
             "run_identity_sha256": hashlib.sha256(
                 args.run_identity.read_bytes()
             ).hexdigest(),
@@ -125,8 +131,8 @@ def main():
     try:
         listener = FrontendListener.bind(
             handshake_address=f"tcp://{args.leader}:{args.port_base}",
-            input_address=f"tcp://{args.leader}:{args.port_base+1}",
-            output_address=f"tcp://{args.leader}:{args.port_base+2}",
+            input_address=f"tcp://{args.leader}:{args.port_base + 1}",
+            output_address=f"tcp://{args.leader}:{args.port_base + 2}",
             first_engine_index=0,
             num_engines=args.world_size,
             routing="round_robin",
@@ -174,7 +180,7 @@ def main():
             replies = await frontend.control([zmq_wire.encode_control(req)])
             assert all(zmq_wire.decode_control_output(r[0]).success for r in replies)
 
-        async def generate(tag, batch, output, prime=False, cohort=1):
+        async def generate(tag, batch, output, prime=False, cohort=1, seed=37):
             results = {}
             finished = set()
             input_hashes = {}
@@ -188,7 +194,7 @@ def main():
                             prime_prompt
                             if prime
                             else request_tokens(
-                                prompt, vocab, batch, rank, j, cohort=cohort
+                                prompt, vocab, batch, rank, j, cohort=cohort, seed=seed
                             )
                         )
                         rid = f"{tag}-lane{rank}-r{j}"
@@ -259,6 +265,8 @@ def main():
             },
         )
         summaries = []
+        eplb_before_formal = None
+        engine_log = out.parent / "engine.log"
         for batch in args.batches:
             for cohort in [0, 1, 2]:
                 budget = output_budget(batch, cohort)
@@ -309,7 +317,43 @@ def main():
                 summaries.append(row)
                 save(out / "summary.json", summaries)
                 state("point-complete", batch=batch, round=cohort)
-        assert len(all_suffix_hashes) == 3 * args.world_size * sum(args.batches)
+                if eplb_warmup_forwards and eplb_before_formal is None:
+                    start_log_offset = engine_log.stat().st_size
+                    state("eplb-warmup", batch=batch, forwards=eplb_warmup_forwards)
+                    asyncio.run(control(RebalanceExpertsReqInput()))
+                    asyncio.run(
+                        generate(
+                            "eplb-warm",
+                            batch,
+                            eplb_warmup_forwards * 6 + 6,
+                            cohort=0,
+                            seed=369,
+                        )
+                    )
+                    eplb_before_formal = engine_log.stat().st_size
+                    with engine_log.open("rb") as log:
+                        log.seek(start_log_offset)
+                        assert b"Expert rebalance 1 applied" in log.read(
+                            eplb_before_formal - start_log_offset
+                        )
+                    save(
+                        out / "eplb-warmup.json",
+                        {
+                            "start_log_offset": start_log_offset,
+                            "formal_log_offset": eplb_before_formal,
+                            "requested_forwards": eplb_warmup_forwards,
+                        },
+                    )
+        calibration_requests = args.batches[0] if eplb_warmup_forwards else 0
+        assert len(all_suffix_hashes) == args.world_size * (
+            3 * sum(args.batches) + calibration_requests
+        )
+        if eplb_before_formal is not None:
+            with engine_log.open("rb") as log:
+                log.seek(eplb_before_formal)
+                assert (
+                    b"Expert rebalance " not in log.read()
+                ), "EPLB moved during formal sampling"
         state(
             "complete",
             measurements=2 * len(args.batches),
