@@ -43,6 +43,7 @@ holds (``V41Metadata.global_write_floor``).
 """
 
 import logging
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import NamedTuple
@@ -2907,8 +2908,28 @@ class DeepseekV41AttentionBackend(AttentionBackend):
         )
         # Quantize current rows exactly as cache storage, without publishing them
         # until every request has read its old sliding prefix.
-        layout = self._prefill_layout(plan, owner, forward_mode)
-        prefixes = dsv41.cache_gather(cache, layout.prefix_slots, self.swa_format, None)
+        # The native reader addresses [old prefix | current] directly. Only a
+        # single contiguous, unsharded request shares those row coordinates.
+        native_request = (
+            plan.requests[0]
+            if len(plan.requests) == 1
+            and isinstance(plan.requests[0].rows, slice)
+            and plan.requests[0].rows == slice(0, q.shape[0])
+            and key_rows is None
+            and self.kvp_size == 1
+            and len(self.spec.attention_query_group) == 1
+            and fused_decode_groups is None
+            and q.is_cuda
+            and os.environ.get("TOKENSPEED_ENABLE_SM120_PAGED_PREFILL") == "1"
+            else None
+        )
+        layout = None
+        if native_request is None:
+            layout = self._prefill_layout(plan, owner, forward_mode)
+            prefix_slots = layout.prefix_slots
+        else:
+            prefix_slots = native_request.prefix_slots
+        prefixes = dsv41.cache_gather(cache, prefix_slots, self.swa_format, None)
         if swa_rope_cache is None:
             current = dsv41.cache_unpack(
                 dsv41.cache_pack(swa_kv, self.swa_format, None), self.swa_format, None
@@ -2926,6 +2947,27 @@ class DeepseekV41AttentionBackend(AttentionBackend):
                 swa_norm_weight,
                 swa_norm_eps,
             )
+        if native_request is not None:
+            out = dsv41.try_paged_prefill(
+                q,
+                prefixes,
+                current,
+                native_request.swa_indices,
+                global_cache,
+                global_slots if owner >= 0 else None,
+                global_lens if owner >= 0 else None,
+                attn_sink,
+                softmax_scale,
+                None,
+                None,
+            )
+            if out is not None:
+                if swa_rope_cache is None:
+                    dsv41.cache_scatter(swa_kv, cache, locations, self.swa_format)
+                if out_rope_cache is not None:
+                    dsv41.rope_inplace(out, positions, out_rope_cache, None)
+                return out
+            layout = self._prefill_layout(plan, owner, forward_mode)
         logical_rows = None
         if owner >= 0:
             record = self.sparse_topk.prefill

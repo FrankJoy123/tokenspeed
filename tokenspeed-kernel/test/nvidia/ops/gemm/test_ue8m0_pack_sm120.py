@@ -121,3 +121,47 @@ def test_transposed_scales_gemm_fallback(monkeypatch):
     monkeypatch.setenv("TOKENSPEED_EXPERIMENT_SM120_FUSED_SCALE_PACK", "1")
     mxfp8_mm_sm120(a, b, sa, sb, y)
     assert torch.equal(x, y)
+
+
+@pytest.mark.parametrize("m,k", [(1, 128), (6, 5120), (48, 8192), (65, 1280)])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_quantize_pack_exact(m, k, dtype):
+    from tokenspeed_kernel.ops.gemm._triton.ue8m0_pack import quantize_pack_ue8m0
+    from tokenspeed_kernel.ops.quantization import quantize_fp8
+
+    x = torch.randn(m, k + 32, device="cuda", dtype=dtype)[:, :k]
+    x[:, :32] = 0
+    x[:, 32:64] = 448
+    codes, scales = quantize_fp8(
+        x, granularity="token_group", group_size=32, scale_encoding="ue8m0"
+    )
+    expected = reference(scales)
+    actual_codes, actual = quantize_pack_ue8m0(x)
+    assert torch.equal(actual_codes.view(torch.uint8), codes.view(torch.uint8))
+    assert actual.stride() == expected.stride()
+    assert torch.equal(actual, expected)
+
+
+def test_quantize_pack_gemm_replay(monkeypatch):
+    from tokenspeed_kernel.ops.gemm.deepgemm import deepgemm_mm_mxfp8_sm120
+
+    m, n, k = 48, 1792, 5120
+    x = torch.randn(m, k, device="cuda", dtype=torch.bfloat16)
+    w = torch.randn(n, k, device="cuda").to(torch.float8_e4m3fn)
+    ws = reference(torch.full((n, k // 32), 127, device="cuda", dtype=torch.uint8))
+
+    def project():
+        return deepgemm_mm_mxfp8_sm120(
+            x, w, None, ws, torch.bfloat16, block_size=[1, 32]
+        )
+
+    monkeypatch.setenv("TOKENSPEED_EXPERIMENT_SM120_QUANT_PACK", "1")
+    project()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        actual = project()
+    monkeypatch.setenv("TOKENSPEED_EXPERIMENT_SM120_QUANT_PACK", "0")
+    for _ in range(2):
+        x.normal_()
+        graph.replay()
+        assert torch.equal(actual, project())

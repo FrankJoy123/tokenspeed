@@ -64,3 +64,44 @@ def pack_ue8m0(scales: torch.Tensor) -> torch.Tensor:
             scales, storage, m, c, *scales.stride(), aligned, 256
         )
     return storage.t()[:m]
+
+
+@triton.jit(do_not_specialize=["M", "X0", "ALIGNED"])
+def _quantize_pack(X, Q, S, M, X0, ALIGNED, K: tl.constexpr):
+    row = tl.program_id(0).to(tl.int64)
+    pack = tl.program_id(1)
+    cols = pack * 128 + tl.arange(0, 128)
+    values = tl.load(X + row * X0 + cols, row < M, other=0).to(tl.float32)
+    groups = tl.reshape(values, (4, 32))
+    amax = tl.maximum(tl.max(tl.abs(groups), axis=1), 1.0e-4)
+    bits = (amax * (1.0 / 448.0)).to(tl.int32, bitcast=True)
+    exponents = ((bits >> 23) & 255) + ((bits & 0x7FFFFF) != 0).to(tl.int32)
+    scale = (exponents << 23).to(tl.float32, bitcast=True)
+    codes = (groups * (1.0 / scale)[:, None]).to(tl.float8e4nv)
+    tl.store(Q + row * K + cols, tl.reshape(codes, (128,)), row < M)
+    packed = tl.sum((exponents & 255) << (tl.arange(0, 4) * 8), axis=0)
+    tl.store(S + pack * ALIGNED + row, tl.where(row < M, packed, 0))
+
+
+def quantize_pack_ue8m0(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize four G32 groups per program and write one DeepGEMM scale word."""
+    m, k = x.shape
+    if k % 128 or x.stride(1) != 1 or x.dtype not in (torch.bfloat16, torch.float16):
+        raise ValueError(
+            "Expected contiguous-inner BF16/FP16 rows with K divisible by 128"
+        )
+    aligned = triton.cdiv(m, 4) * 4
+    codes = torch.empty((m, k), dtype=torch.float8_e4m3fn, device=x.device)
+    words = torch.empty((k // 128, aligned), dtype=torch.int32, device=x.device)
+    if m and k:
+        _quantize_pack[(aligned, k // 128)](
+            x,
+            codes,
+            words,
+            m,
+            x.stride(0),
+            aligned,
+            k,
+            num_warps=1,
+        )
+    return codes, words.t()[:m]

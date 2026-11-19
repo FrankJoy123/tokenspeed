@@ -324,3 +324,8 @@ weight scales remain distinct from FlashInfer's uint8 swizzled layout.
 Activation scales retain the canonical row contract unless a producer and
 consumer explicitly agree on another layout. [Private Triton helpers](_triton/README.md)
 include optional scale packing.
+
+On SM120, `TOKENSPEED_EXPERIMENT_SM120_QUANT_PACK=1` lets the raw BF16/FP16
+activation path quantize directly into packed int32 scales when K is divisible
+by 128 and weight scales are prepacked. Inputs with existing activation scales
+continue to use the selected scale packer.

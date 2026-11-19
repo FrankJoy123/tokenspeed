@@ -182,8 +182,6 @@ def mxfp8_mm_sm120(
     out: torch.Tensor,
 ) -> torch.Tensor:
     """Execute group-32 E4M3 GEMM with prepacked UE8M0 weight scales."""
-    import deep_gemm_sm120 as deep_gemm
-
     fused_pack = os.environ.get("TOKENSPEED_EXPERIMENT_SM120_FUSED_SCALE_PACK")
     if fused_pack not in (None, "0", "1"):
         raise ValueError("TOKENSPEED_EXPERIMENT_SM120_FUSED_SCALE_PACK must be 0 or 1")
@@ -202,6 +200,12 @@ def mxfp8_mm_sm120(
         )
     else:
         packed_a_scales = pack_mxfp8_ue8m0_scales(a_scales, a.shape[0], a.shape[1])
+    return mxfp8_mm_packed_sm120(a, b, packed_a_scales, packed_b_scales, out)
+
+
+def mxfp8_mm_packed_sm120(a, b, packed_a_scales, packed_b_scales, out):
+    import deep_gemm_sm120 as deep_gemm
+
     deep_gemm.fp8_fp4_gemm_nt(
         (a, packed_a_scales), (b, packed_b_scales), out, recipe=(1, 1, 32)
     )

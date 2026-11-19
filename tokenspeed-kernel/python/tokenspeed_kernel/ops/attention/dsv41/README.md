@@ -90,3 +90,9 @@ retain the current native batched scoring and selection-slot finishing.
 - [CuTe DSL selection helpers](_cute_dsl/README.md).
 - [Portable attention helpers](_triton/README.md).
 - [Full-model execution contracts](../../../../../../docs/design/sm120.md).
+
+`TOKENSPEED_ENABLE_SM120_PAGED_PREFILL=1` enables the registered native
+reader for a single contiguous unsharded request with a local query group.
+SWA indices address the protected prefix followed by codec-rounded current
+rows. The reader consumes selected physical global slots directly. Other
+layouts and fused FP8 output use the batched workspace.

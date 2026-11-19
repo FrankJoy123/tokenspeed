@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import os
 from functools import cache
 
 import torch
@@ -581,6 +582,23 @@ def deepgemm_mm_mxfp8_sm120(
     if A_scales is None:
         if A.dtype not in (torch.bfloat16, torch.float16):
             raise ValueError("Unscaled activations must be BF16 or FP16")
+        if (
+            os.environ.get("TOKENSPEED_EXPERIMENT_SM120_QUANT_PACK") == "1"
+            and B_scales.dtype == torch.int32
+            and B_scales.ndim == 2
+            and k % 128 == 0
+        ):
+            from tokenspeed_kernel.ops.gemm._triton.ue8m0_pack import (
+                quantize_pack_ue8m0,
+            )
+            from tokenspeed_kernel.thirdparty.deepgemm import mxfp8_mm_packed_sm120
+
+            if out is None:
+                out = torch.empty((m, n), device=A.device, dtype=out_dtype)
+            if m:
+                codes, scales = quantize_pack_ue8m0(A)
+                mxfp8_mm_packed_sm120(codes, B, scales, B_scales, out)
+            return out
         A, A_scales = quantize_fp8(
             A, granularity="token_group", group_size=32, scale_encoding="ue8m0"
         )
