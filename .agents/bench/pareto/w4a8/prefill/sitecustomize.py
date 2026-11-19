@@ -113,6 +113,12 @@ def install(ModelExecutor):
                 ),
                 "dispatched_ns": time.perf_counter_ns(),
             }
+            if os.environ.get("PREFILL_BENCH_COHORT") == "1":
+                sample.update(
+                    extend_prefix_lens=list(forward_op.extend_prefix_lens),
+                    extend_input_rows=lengths[:extends],
+                    extend_replay_rows=list(forward_op.extend_replay_lens),
+                )
         result = original_execute(
             self, forward_op, sampling_params_list, dp_metadata, *args, **kwargs
         )
