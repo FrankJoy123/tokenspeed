@@ -352,7 +352,7 @@ def main():
             with engine_log.open("rb") as log:
                 log.seek(eplb_before_formal)
                 assert (
-                    b"Expert rebalance " not in log.read()
+                    b"Expert rebalance" not in log.read()
                 ), "EPLB moved during formal sampling"
         state(
             "complete",

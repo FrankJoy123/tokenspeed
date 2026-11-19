@@ -122,12 +122,15 @@ def main():
     parser.add_argument("--eplb-layers-per-chunk", type=int)
     parser.add_argument("--indexer", choices=["bf16", "native-fp4"], required=True)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.85)
+    parser.add_argument("--max-total-tokens", type=int)
     parser.add_argument("--profile-steps", type=int, required=True)
     parser.add_argument("--cache-seed", type=Path)
     parser.add_argument("--flashinfer-workspace", type=Path)
     args = parser.parse_args()
     if args.profile_steps < 0:
         parser.error("--profile-steps must be nonnegative")
+    if args.max_total_tokens is not None and args.max_total_tokens <= 0:
+        parser.error("--max-total-tokens must be positive")
     if args.eplb_warmup_forwards and (
         args.eplb_warmup_forwards < 200
         or not args.eplb_interval
@@ -238,6 +241,8 @@ def main():
     ]
     if args.ep_dispatch:
         engine_args.extend(("--ep-dispatch-algorithm", args.ep_dispatch))
+    if args.max_total_tokens is not None:
+        engine_args.extend(("--max-total-tokens", str(args.max_total_tokens)))
     if args.eplb_warmup_forwards:
         engine_args.extend(
             (

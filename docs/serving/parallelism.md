@@ -659,6 +659,11 @@ the pending chunks copy whatever the source slots hold. An idle engine takes
 no snapshot (the counter is frozen) and a pending commit waits for forwards.
 The engine refuses a memory-saver release while a rebalance is in progress.
 
+For the SM120 V4.1 W4A8 experimental path, set
+`TOKENSPEED_SM120_EPLB_FUSED_RECORD=1` with static dispatch to combine physical
+slot lookup and load recording in one GPU launch. This uses the existing
+placement, live-row mask, and load buffers, including during graph replay.
+
 The routing path is unchanged: slot ownership stays contiguous per rank, the
 replica choice is a pure function of the token, and a placement change alters
 only table entries and slot contents. Under `--numerics rl-bitwise` the

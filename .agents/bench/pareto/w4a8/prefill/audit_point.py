@@ -52,7 +52,7 @@ if config["eplb"]:
         warmed = log.read(warm["formal_log_offset"] - warm["start_log_offset"])
         assert b"Expert rebalance 1 applied" in warmed
         formal = log.read()
-    assert b"Expert rebalance " not in formal
+    assert b"Expert rebalance" not in formal
 assert config["benchmark"]["rounds"] == 1
 assert config["benchmark"]["warmup_steps"] >= 5
 assert config["benchmark"]["measure_steps"] == 10

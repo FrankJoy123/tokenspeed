@@ -216,6 +216,7 @@ from tokenspeed.runtime.utils.env import global_server_args_dict
 logger = logging.getLogger(__name__)
 _ROPE_TABLES = WeakValueDictionary()
 _SM120_MHC_FUSED = os.getenv("TOKENSPEED_SM120_MHC_FUSED") == "1"
+_SM120_EPLB_FUSED_RECORD = os.getenv("TOKENSPEED_SM120_EPLB_FUSED_RECORD") == "1"
 
 
 def v41_quantize_fp8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -2119,12 +2120,30 @@ class DeepseekV41MoE(DeepseekV4MoE):
                 enable=self.sm120_shared_overlap and get_is_capture_mode()
             ) as fork:
                 info = self.expert_dispatch_info
-                topk_ids = topk_ids_logical_to_physical(
-                    topk.topk_ids, info, self.config.n_routed_experts
-                )
-                if info is not None and info.load is not None:
-                    info.load.record(topk_ids, start=start)
-                topk_ids = topk_ids.to(torch.int64)
+                if (
+                    _SM120_EPLB_FUSED_RECORD
+                    and info is not None
+                    and info.ep_dispatch_algorithm == "static"
+                    and info.load is not None
+                    and topk.topk_ids.is_cuda
+                ):
+                    from tokenspeed_kernel.ops.moe._triton.eplb_routes import (
+                        map_and_record_static_routes,
+                    )
+
+                    topk_ids = map_and_record_static_routes(
+                        topk.topk_ids,
+                        info.partial_logical_to_rank_dispatch_physical_map,
+                        info.load.rows.rows(x.shape[0], start=start),
+                        info.load.physical_load,
+                    )
+                else:
+                    topk_ids = topk_ids_logical_to_physical(
+                        topk.topk_ids, info, self.config.n_routed_experts
+                    )
+                    if info is not None and info.load is not None:
+                        info.load.record(topk_ids, start=start)
+                    topk_ids = topk_ids.to(torch.int64)
                 topk_weights = topk.topk_weights.float()
                 if cake is not None:
                     routed = cake.run(x, topk_ids, topk_weights, capacity)
