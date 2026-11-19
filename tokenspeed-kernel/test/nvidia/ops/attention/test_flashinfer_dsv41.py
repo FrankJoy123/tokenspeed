@@ -134,3 +134,21 @@ def test_graph_refresh_with_warmed_schedule():
         expected, expected_lse = reference(case)
         torch.testing.assert_close(out, expected, rtol=0.015, atol=0.003)
         torch.testing.assert_close(lse, expected_lse, rtol=1e-4, atol=1e-3)
+
+
+def test_cake_b8_graph_refresh(monkeypatch):
+    monkeypatch.setenv("TOKENSPEED_SM120_CAKE_DECODE_MLA", "1")
+    case = make_case(48, 64, 512, True)
+    schedule = dsv41.new_attention_schedule()
+    run(case, schedule)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        out, _ = run(case, schedule)
+    for length in (117, 0, 37):
+        case[0].normal_()
+        case[3].fill_(length)
+        case[6].fill_(length * 3)
+        case[5].copy_(case[5].roll(1, 1))
+        graph.replay()
+        expected, _ = reference(case)
+        torch.testing.assert_close(out, expected, rtol=0.015, atol=0.003)

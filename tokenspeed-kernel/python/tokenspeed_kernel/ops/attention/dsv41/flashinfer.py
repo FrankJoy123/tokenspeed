@@ -49,8 +49,25 @@ class FlashInferSchedule:
             backend="sparse",
         )
 
+        self.cake_decode = None
+        if os.environ.get("TOKENSPEED_SM120_CAKE_DECODE_MLA") == "1":
+            self.cake_decode = wrapper(
+                kv_scale_format="ue8m0_g32",
+                kv_cache_format="fp8",
+                extra_kv_fp4=True,
+                compute_precision="bf16",
+                backend="cake",
+            )
+
     def run(self, *args, **kwargs):
         runner = self.swa if kwargs["extra_kv_cache"] is None else self.dual
+        if (
+            self.cake_decode is not None
+            and runner is self.dual
+            and args[0].shape == (48, 64, 512)
+            and kwargs.get("out_lse") is None
+        ):
+            runner = self.cake_decode
         return runner.run(*args, **kwargs)
 
 

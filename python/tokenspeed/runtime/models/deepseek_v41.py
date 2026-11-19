@@ -1889,6 +1889,35 @@ class DeepseekV41MoE(DeepseekV4MoE):
             )
             expert_config.n_shared_experts = None
         use_sm120_deepep = os.environ.get("TOKENSPEED_EXPERIMENT_SM120_DEEPEP") == "1"
+        cake_rows = int(os.environ.get("TOKENSPEED_SM120_PREFILL_CAKE_ROWS", "0"))
+        if cake_rows < 0 or cake_rows > 32640 or cake_rows % 128:
+            raise ValueError(
+                "Prefill Cake capacity must be zero or a multiple of 128 up to 32640"
+            )
+        use_sm120_cake = (
+            cake_rows > 0
+            and bool(config.kv_source_layer_ids)
+            and layer_index < config.candidate_source_layer_id
+        )
+        if use_sm120_cake and (
+            mapping.moe.ep_size != 8
+            or mapping.attn.dp_size != 8
+            or mapping.attn.has_qcp
+            or mapping.attn.tp_size != 1
+        ):
+            raise ValueError("Prefill Cake requires DP8/EP8 with attention TP1")
+        if use_sm120_cake and (
+            get_global_expert_location_metadata() is not None
+            or os.environ.get("TOKENSPEED_SM120_DEEPEP_WIRE", "elastic_fp8_bf16")
+            != "elastic_fp8_bf16"
+        ):
+            raise ValueError(
+                "Prefill Cake requires static MXFP4 experts and the Elastic FP8 baseline"
+            )
+        if use_sm120_cake and (
+            not use_sm120_deepep or mega_moe or config.moe_quant_algo == "NVFP4"
+        ):
+            raise ValueError("SM120 Cake requires the V4.1 SM120 W4A8 EP path")
         if config.moe_quant_algo == "NVFP4":
             if not use_sm120_deepep or mega_moe:
                 raise ValueError("V4.1 NVFP4 requires the SM120 DeepEP path")
@@ -1907,6 +1936,7 @@ class DeepseekV41MoE(DeepseekV4MoE):
         self.gate.register_parameter("bias_vl", None)
         # Temporary opt-in experiment; baseline construction remains unchanged.
         self.use_sm120_deepep = use_sm120_deepep
+        self.use_sm120_cake = use_sm120_cake
         shared_overlap = os.environ.get("TOKENSPEED_EXPERIMENT_SM120_SHARED_OVERLAP")
         if shared_overlap not in (None, "0", "1"):
             raise ValueError(
@@ -1924,6 +1954,10 @@ class DeepseekV41MoE(DeepseekV4MoE):
             if get_moe_backend().value != "flashinfer":
                 raise ValueError("SM120 DeepEP experiment requires FlashInfer")
             self.owns_ep_communication = True
+            if self.use_sm120_cake:
+                from tokenspeed.runtime.layers.moe.sm120_cake import setup_sm120_cake
+
+                setup_sm120_cake(self.experts, mapping, cake_rows)
             if config.n_shared_experts is not None:
                 self.shared_experts = GatedMLP.tensor_parallel(
                     hidden_size=config.hidden_size,
@@ -1958,7 +1992,7 @@ class DeepseekV41MoE(DeepseekV4MoE):
 
     def warmup(self):
         super().warmup()
-        if self.use_sm120_deepep:
+        if self.use_sm120_deepep and not self.use_sm120_cake:
             # Transport preparation owns a persistent distributed buffer, rather
             # than an operator choice; its kernels remain in tokenspeed-kernel.
             from tokenspeed_kernel.thirdparty.deepep_sm120_experiment.buffer import (
@@ -2010,22 +2044,19 @@ class DeepseekV41MoE(DeepseekV4MoE):
             apply_deepep_flashinfer,
         )
 
-        if self.sm120_deepep_buffer is None:
+        cake = self.experts._moe_backend_state if self.use_sm120_cake else None
+        if self.use_sm120_cake and cake is None:
+            raise RuntimeError("Cake weights must be initialized before capture")
+        if not self.use_sm120_cake and self.sm120_deepep_buffer is None:
             raise RuntimeError("DeepEP buffer must be initialized before capture")
         if max_num_tokens_per_gpu < hidden_states.shape[0]:
             raise ValueError("DeepEP capacity/count contract violated")
         result = torch.empty_like(hidden_states)
         # All ranks iterate the same count, including idle ranks and CED tails.
         # The same chunking applies to eager and graph execution.
-        for start in range(0, max_num_tokens_per_gpu, CAPACITY):
-            capacity = min(CAPACITY, max_num_tokens_per_gpu - start)
-            # Idle and active EP ranks must bucket prefill capacity identically.
-            dispatch_capacity = get_dispatch_capacity(
-                self.sm120_deepep_buffer,
-                max_num_tokens_per_gpu,
-                start,
-                prefill=ctx is not None and not ctx.all_decode_or_idle,
-            )
+        chunk_size = cake.capacity if cake is not None else CAPACITY
+        for start in range(0, max_num_tokens_per_gpu, chunk_size):
+            capacity = min(chunk_size, max_num_tokens_per_gpu - start)
             x = hidden_states[start : start + capacity].contiguous()
             ids = None if input_ids is None else input_ids[start : start + capacity]
             topk = (
@@ -2038,18 +2069,29 @@ class DeepseekV41MoE(DeepseekV4MoE):
             with self.stream_fork.scope(
                 enable=self.sm120_shared_overlap and get_is_capture_mode()
             ) as fork:
-                routed = apply_deepep_flashinfer(
-                    self.sm120_deepep_buffer,
-                    x,
-                    self.experts._moe_backend_state,
-                    topk.topk_ids.to(torch.int64),
-                    topk.topk_weights.float(),
-                    num_experts=self.experts.num_experts,
-                    num_sms=4,
-                    num_qps=4,
-                    num_max_tokens_per_rank=capacity,
-                    communication_capacity=dispatch_capacity,
-                )
+                topk_ids = topk.topk_ids.to(torch.int64)
+                topk_weights = topk.topk_weights.float()
+                if cake is not None:
+                    routed = cake.run(x, topk_ids, topk_weights, capacity)
+                else:
+                    dispatch_capacity = get_dispatch_capacity(
+                        self.sm120_deepep_buffer,
+                        max_num_tokens_per_gpu,
+                        start,
+                        prefill=ctx is not None and not ctx.all_decode_or_idle,
+                    )
+                    routed = apply_deepep_flashinfer(
+                        self.sm120_deepep_buffer,
+                        x,
+                        self.experts._moe_backend_state,
+                        topk_ids,
+                        topk_weights,
+                        num_experts=self.experts.num_experts,
+                        num_sms=4,
+                        num_qps=4,
+                        num_max_tokens_per_rank=capacity,
+                        communication_capacity=dispatch_capacity,
+                    )
                 scale = topk.output_scale
                 if isinstance(scale, torch.Tensor):
                     scale = scale.to(routed.dtype)
@@ -2057,9 +2099,12 @@ class DeepseekV41MoE(DeepseekV4MoE):
                     routed = routed * scale
                 with fork.branch():
                     shared = self._forward_shared_experts(x)
-            result[start : start + capacity] = (
-                routed if shared is None else routed + shared
-            )
+            chunk_output = result[start : start + capacity]
+            if cake is not None and shared is not None:
+                # Consume Cake's borrowed workspace before the next chunk reuses it.
+                torch.add(routed, shared, out=chunk_output)
+            else:
+                chunk_output.copy_(routed if shared is None else routed + shared)
         return result if out is None else out.copy_(result)
 
     def _renormalize_routing_weights(self) -> bool:
