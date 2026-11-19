@@ -2062,3 +2062,144 @@ def normalized_dot_gate(residual, key_value, query_weight, key_weight, mask, eps
 
 # Preserve the fast single-split specialization; all other counts share a key.
 register_triton_warmup(_mhc_pre_mix_hc4_kernel, variants=({"n_splits": (1, 2)},))
+
+
+@triton.jit
+def _mhc_post_input_norm_hc4_kernel(
+    comb,
+    residual,
+    post,
+    pre_mix,
+    hidden_states,
+    weight,
+    out_residual,
+    out_input,
+    hidden_size: tl.constexpr,
+    eps: tl.constexpr,
+    block_h: tl.constexpr,
+    ENABLE_PDL: tl.constexpr,
+):
+    if ENABLE_PDL:
+        tl.extra.cuda.gdc_wait()
+    token_id = tl.program_id(0).to(tl.int64)
+    hidden_offsets = tl.arange(0, block_h)
+    hidden_mask = hidden_offsets < hidden_size
+    residual_base = token_id * 4 * hidden_size
+
+    hidden_values = tl.load(
+        hidden_states + token_id * hidden_size + hidden_offsets,
+        mask=hidden_mask,
+        other=0.0,
+    ).to(tl.float32)
+    layer_input = tl.zeros((block_h,), tl.float32)
+    # One output stream at a time keeps a row's live values within the
+    # register file: the input streams are reloaded (L1 hits) for each output.
+    for out_hc in tl.static_range(0, 4):
+        acc = tl.load(post + token_id * 4 + out_hc).to(tl.float32) * hidden_values
+        # Explicit FMA in input-stream order, as _mhc_post_hc4_triton_kernel.
+        for in_hc in tl.static_range(0, 4):
+            residual_values = tl.load(
+                residual + residual_base + in_hc * hidden_size + hidden_offsets,
+                mask=hidden_mask,
+                other=0.0,
+            ).to(tl.float32)
+            acc = tl.fma(
+                tl.load(comb + token_id * 16 + in_hc * 4 + out_hc).to(tl.float32),
+                residual_values,
+                acc,
+            )
+        new_residual = acc.to(tl.bfloat16)
+        tl.store(
+            out_residual + residual_base + out_hc * hidden_size + hidden_offsets,
+            new_residual,
+            mask=hidden_mask,
+        )
+        pre = tl.load(pre_mix + token_id * 4 + out_hc).to(tl.float32)
+        layer_input += pre * new_residual.to(tl.float32)
+
+    # From here on this is _mhc_pre_layer_norm_hc4_kernel.
+    layer_input = layer_input.to(tl.bfloat16).to(tl.float32)
+    variance = tl.sum(layer_input * layer_input, axis=0) / hidden_size
+    norm_scale = tl.rsqrt(variance + eps)
+    norm_weight = tl.load(weight + hidden_offsets, mask=hidden_mask, other=0.0).to(
+        tl.float32
+    )
+    tl.store(
+        out_input + token_id * hidden_size + hidden_offsets,
+        layer_input * norm_scale * norm_weight,
+        mask=hidden_mask,
+    )
+    if ENABLE_PDL:
+        tl.extra.cuda.gdc_launch_dependents()
+
+
+def mhc_post_input_norm_hc4(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    pre: torch.Tensor,
+    post: torch.Tensor,
+    comb: torch.Tensor,
+    norm_weight: torch.Tensor,
+    norm_eps: float,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """Fuse the HC post with the next layer input and its RMSNorm (hc=4, H=5120).
+
+    Args:
+        x: Contiguous BF16 sublayer output [T, 5120].
+        residual: Contiguous BF16 residual before that sublayer [T, 4, 5120].
+        pre: Contiguous FP32 previous pre-mix [T, 4] that collapses the new
+            residual into the layer input.
+        post: Contiguous FP32 sublayer output mix [T, 4].
+        comb: Contiguous FP32 residual mix [T, 4, 4], input then output stream.
+        norm_weight: Contiguous BF16 or FP32 input RMSNorm weight [5120].
+        norm_eps: Input RMSNorm epsilon.
+
+    Returns:
+        The new BF16 residual [T, 4, 5120] and the BF16 normalized layer input
+        [T, 5120], bit-identical to ``mhc_post`` followed by ``mhc_apply_pre``
+        with the norm; or None when the layout is not this one and the caller
+        must run the separate kernels. Inputs are never mutated.
+    """
+    if (
+        residual.ndim != 3
+        or residual.shape[1] != 4
+        or residual.shape[2] != 5120
+        or residual.shape[0] == 0
+        or x.shape != (residual.shape[0], 5120)
+        or pre.shape != (residual.shape[0], 4)
+        or post.shape != (residual.shape[0], 4)
+        or comb.shape != (residual.shape[0], 4, 4)
+        or norm_weight.shape != (5120,)
+        or residual.dtype != torch.bfloat16
+        or x.dtype != torch.bfloat16
+        or any(t.dtype != torch.float32 for t in (pre, post, comb))
+        or norm_weight.dtype not in (torch.bfloat16, torch.float32)
+        or not all(
+            t.device == x.device and t.is_cuda and t.is_contiguous()
+            for t in (x, residual, pre, post, comb, norm_weight)
+        )
+    ):
+        return None
+    tokens, _, hidden = residual.shape
+    out_residual = torch.empty_like(residual)
+    out_input = torch.empty((tokens, hidden), device=x.device, dtype=x.dtype)
+    enable_pdl = pdl_enabled()
+    _mhc_post_input_norm_hc4_kernel[(tokens,)](
+        comb,
+        residual,
+        post,
+        pre,
+        x,
+        norm_weight,
+        out_residual,
+        out_input,
+        hidden_size=hidden,
+        eps=norm_eps,
+        block_h=triton.next_power_of_2(hidden),
+        ENABLE_PDL=enable_pdl,
+        # The warp count fixes the order of the variance reduction; it must
+        # stay that of mhc_pre_layer_norm_hc4.
+        num_warps=8,
+        **({"launch_pdl": True} if enable_pdl else {}),
+    )
+    return out_residual, out_input

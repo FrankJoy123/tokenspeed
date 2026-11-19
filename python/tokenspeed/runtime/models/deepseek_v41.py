@@ -113,7 +113,7 @@ from tokenspeed_kernel.ops.residual import (
     try_mhc_shifted_post_pre_norm,
     try_mhc_shifted_post_pre_norm_quantize_fp8,
 )
-from tokenspeed_kernel.platform import current_platform
+from tokenspeed_kernel.platform import ArchVersion, current_platform
 from tokenspeed_kernel.selection import NoKernelFoundError
 from torch import nn
 
@@ -211,6 +211,7 @@ from tokenspeed.runtime.utils.env import global_server_args_dict
 
 logger = logging.getLogger(__name__)
 _ROPE_TABLES = WeakValueDictionary()
+_SM120_MHC_FUSED = os.getenv("TOKENSPEED_SM120_MHC_FUSED") == "1"
 
 
 def v41_quantize_fp8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -2232,6 +2233,23 @@ def _v41_hc_post_pre(
         if shifted is not None:
             residual, x, pre, post, comb, *quantized = shifted
             return residual, x, (pre, post, comb), tuple(quantized) or None
+    if _SM120_MHC_FUSED and residual.is_cuda:
+        platform = current_platform()
+        if platform.is_nvidia and platform.arch_version == ArchVersion(12, 0):
+            from tokenspeed_kernel.ops.residual.triton import mhc_post_input_norm_hc4
+
+            fused = mhc_post_input_norm_hc4(
+                pending.x,
+                residual,
+                pre_mix,
+                pending.post,
+                pending.comb,
+                norm.weight,
+                norm.variance_epsilon,
+            )
+            if fused is not None:
+                residual, x = fused
+                return residual, x, None, None
     return pending.finish(residual), None, None, None
 
 
