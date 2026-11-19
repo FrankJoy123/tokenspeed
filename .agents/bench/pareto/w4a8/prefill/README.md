@@ -13,6 +13,10 @@
 
 QCP8 将每条请求划分到 8 卡。DP8 的空 attention lane 在全局元数据中记零行，仍使用同一 EP8 通信组。
 
+先固定同档的请求、缓存命中和有效新增 token 总量，再提高外层调度的 chunk 大小。用扩大后的配置验证启动、KV admission、预热和正式负载，采用通过验证的最大 chunk。容量或稳定性限制满档单步时，保持同一组输入，让引擎用较小 chunk 连续完成多个 forward。后续 forward 按请求 ID 继续使用已有 KV，已完成请求的端点按实际调度记录。外层 chunk 控制 model forward 的计算预算，MoE 通信 chunk 控制单次 routed expert 调用的行数。
+
+例如 DP8 8K 档，每卡两条请求共 8,192 个新增 token。外层上限取 4,224 物理行时，可用两次满载 forward 分别完成每卡的两条请求。对齐同一组输入和有效前缀缓存，以最后一个请求完成时刻闭合该组。测出该组处理时长，以新 token 总量 ÷ 时长 ÷ GPU 数得到有效吞吐。逐步保存实际新增行数、物理行数与 replay，校验所有请求和输出完成。多步组使用自己的完成窗口，单步图中的每步预算等于该次 forward 的实际新增量。
+
 ## 启动
 
 先按 [W4A8 环境构建](../../../../deploy/w4a8/setup/README.md)安装运行时。在 [环境示例](../../../../deploy/w4a8/launch/env.example.sh) 中填写本机 checkpoint、venv、CUDA 和网络参数，另存到 `_local/`。使用八卡可见的环境和兼容工具链，实测使用 GCC 12.4。
