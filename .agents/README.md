@@ -7,5 +7,6 @@
 - [部署](deploy/README.md)：W4A8 和 NVFP4 MoE / MXFP4 Engram 两种配置，依赖、补丁、构建与启动。
 - [性能](bench/README.md)：QCP8/DP8 Prefill 与 EP16 Decode 的 Pareto、正式采样与重跑命令。
 - [质量回归](eval/README.md)：Longdoc 固定题集与多模态评测，协议分别标明。
+- [上游提交建议](docs/README.md)维护当前 SM120 PR 草案。
 
 维护约束见 [AGENTS](AGENTS.md)。运行时下载、原始输出和日志保留在 `_local/`。
