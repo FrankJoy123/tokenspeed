@@ -2,6 +2,33 @@
 
 先完成[环境构建](../setup/README.md)，在每台机器准备相同源码和完整匹配的checkpoint。复制 [env.example.sh](env.example.sh) 到 `_local/`，填写绝对路径与可达节点地址后 source；不要直接执行占位示例。
 
+## DP8/EP8 Prefill + DP16/EP16 Decode
+
+一台 RTX 6000D 八卡运行 Prefill，两台八卡共同运行一个 Decode 引擎。两角色均是 TP1，启用在线 EPLB 和静态就近路由。R16 是整个 EP 组的 16 个冗余槽，P 每卡两个，D 每卡一个。角色参数如下。
+
+| 角色 | 启动配置 | EPLB 周期 |
+| --- | --- | ---: |
+| Prefill | DP8/EP8、外层 4224、Cake 内部 1024、Native FP4 Indexer、Paged 与 Compact Attention | 1000 |
+| Decode | DP16/EP16、Fast Indexer、Cake BF16 MLA 多形状、Elastic MoE、静态路由融合 | 10000 |
+
+周期以 forward 计，分四层推进。服务周期与 [Pareto 固定预热](../../../bench/pareto/w4a8/optimized/README.md)分别配置。三个节点应从同一提交构建并核对模型身份。为每个角色设置本机的独立 `STATE_DIR`，在 D 两台机器设置同一 `D_DIST_INIT_ADDR` 并分别选择 `NODE_RANK=0` 和 `NODE_RANK=1`。
+
+```bash
+# Prefill 节点
+source _local/w4a8-prefill.env
+export W4A8_PD_PROFILE=dp8-eplb
+DRY_RUN=1 bash .agents/deploy/w4a8/launch/prefill.sh
+bash .agents/deploy/w4a8/launch/prefill.sh
+
+# 两台 Decode 节点各自执行
+source _local/w4a8-decode.env
+export W4A8_PD_PROFILE=dp8-eplb
+DRY_RUN=1 bash .agents/deploy/w4a8/launch/decode.sh
+bash .agents/deploy/w4a8/launch/decode.sh
+```
+
+按[公开 SMG P/D 接入](../../../../docs/serving/disaggregation.md)配置两角色握手端口与 Mooncake。启动后核对 P 八个、D 十六个 rank ready，发送真实文本和图片请求验证 KV 交接与返回，再评估部署质量。该配方的启动参数已通过本机测试。
+
 ## QCP8 P + EP16 D
 
 ```bash

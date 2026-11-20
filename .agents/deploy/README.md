@@ -1,6 +1,6 @@
 # SM120 启动
 
-两套配置共用本仓 runtime/kernel/engine/scheduler。每台机器各 8 张 RTX 6000D；Prefill 一台 QCP8/EP8，Decode 两台 TP1/DP16/EP16。
+两套配置共用本仓 runtime/kernel/engine/scheduler。每台机器各 8 张 RTX 6000D；Prefill 一台，Decode 两台 TP1/DP16/EP16。W4A8 可选 [DP8/EP8 在线 EPLB](w4a8/launch/README.md#dp8ep8-prefill--dp16ep16-decode)，早期配方及 FP4 使用 QCP8/EP8。
 
 - [W4A8](w4a8/README.md)：MXFP4 专家权重，FP8 专家激活，Elastic FP8 dispatch / BF16 combine。
 - [FP4](fp4/README.md)：NVFP4 MoE、MXFP4 Engram；基础配方仍为 Elastic FP8/BF16 transport，wire1另行构建与验收。

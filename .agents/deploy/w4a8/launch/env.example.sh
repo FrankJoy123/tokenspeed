@@ -24,3 +24,6 @@ export NODE_RANK=0
 # Set the actual RoCE GID index/socket interface when required by the local fabric:
 # export NCCL_IB_GID_INDEX=GID_INDEX NVSHMEM_IB_GID_INDEX=GID_INDEX
 # export NCCL_SOCKET_IFNAME=INTERFACE NVSHMEM_BOOTSTRAP_UID_SOCK_IFNAME=INTERFACE
+
+# Enable the DP8 Prefill + EP16 Decode online EPLB profile on every node.
+# export W4A8_PD_PROFILE=dp8-eplb

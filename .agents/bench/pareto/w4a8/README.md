@@ -1,5 +1,7 @@
 # W4A8 Pareto
 
+[DP8 Prefill 与 EP16 Decode 优化结果](optimized/README.md)汇总当前曲线、已测版本、EPLB 配置和质量回归。本页保留发布基线的完整复跑入口。
+
 - [Prefill QCP8 / DP8 单机启动](prefill/README.md) · [图](prefill/pareto.svg) · [CSV](prefill/pareto.csv)
 - [Decode EP16 双机启动](decode/README.md) · [图](decode/pareto.svg) · [CSV](decode/pareto.csv)
 

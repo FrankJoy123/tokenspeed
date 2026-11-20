@@ -15,6 +15,8 @@ Core components:
 - **Entrypoint**: SMG and Dynamo drive the engine from Rust over its msgpack
   wire, with no Python on the request path.
 
+[DSV4.1 Flash on RTX 6000D — deployment and Pareto results](.agents/bench/pareto/w4a8/optimized/README.md)
+
 ## Differentiation
 
 TokenSpeed takes a fundamentally different architectural approach from existing LLM inference engines. The **PyTorch Foundation highlighted these architectural differentiators** when [welcoming TokenSpeed](https://pytorch.org/blog/pytorch-ecosystem-landscape-q3-update/) to the PyTorch Ecosystem Landscape:

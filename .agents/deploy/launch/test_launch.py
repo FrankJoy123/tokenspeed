@@ -93,7 +93,9 @@ if sys.argv[1:3] == ['-m', 'tokenspeed.runtime.entrypoints.engine']:
     print(json.dumps({'args': sys.argv[1:], 'env': {key: os.environ.get(key) for key in [
         'TOKENSPEED_SPEC_SIMULATED_ACCEPT_LEN', 'TOKENSPEED_MOE_ROUTING_SIMULATION',
         'TOKENSPEED_V41_FORCE_PHYSICAL_ROUTING', 'DECODE_BENCH_OBSERVE', 'DECODE_BENCH_RUN', 'PREFILL_BENCH_OBSERVE',
-        'TOKENSPEED_SM120_DEEPEP_WIRE', 'TOKENSPEED_SM120_DEEPEP_CAPACITY']}}))
+        'TOKENSPEED_SM120_DEEPEP_WIRE', 'TOKENSPEED_SM120_DEEPEP_CAPACITY',
+        'TOKENSPEED_SM120_PREFILL_CAKE_ROWS', 'TOKENSPEED_SM120_CAKE_DECODE_MLA_WIDE',
+        'TOKENSPEED_SM120_EPLB_FUSED_RECORD']}}))
 else:
     os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
 """)
@@ -238,3 +240,38 @@ def test_model_validation_rejects_wrong_precision_missing_shard_and_truncation(
     shard.unlink()
     with pytest.raises(FileNotFoundError):
         inspect_checkpoint(model, "fp4")
+
+
+@pytest.mark.parametrize(
+    "role,dp,ep,chunk,interval,cake_rows,fused",
+    [
+        ("prefill", "8", "8", "4224", "1000", "1024", "0"),
+        ("decode", "16", "16", "8192", "10000", "0", "1"),
+    ],
+)
+def test_dp8_eplb_profile(tmp_path, environment, role, dp, ep, chunk, interval, cake_rows, fused):
+    environment.update(
+        MODEL_PATH=str(checkpoint(tmp_path / "model", "w4a8")),
+        W4A8_PD_PROFILE="dp8-eplb",
+    )
+    result = launch("w4a8", role, environment)
+    assert result.returncode == 0, result.stderr
+    observed = json.loads(result.stdout)
+    args = observed["args"]
+    assert "--enable-eplb" in args
+    for flag, expected in (
+        ("--tensor-parallel-size", "1"),
+        ("--query-context-parallel-size", "1"),
+        ("--data-parallel-size", dp),
+        ("--ep-size", ep),
+        ("--chunked-prefill-size", chunk),
+        ("--ep-num-redundant-experts", "16"),
+        ("--ep-dispatch-algorithm", "static"),
+        ("--eplb-rebalance-num-iterations", interval),
+    ):
+        assert args[args.index(flag) + 1] == expected
+    assert observed["env"]["TOKENSPEED_SM120_PREFILL_CAKE_ROWS"] == cake_rows
+    assert observed["env"]["TOKENSPEED_SM120_EPLB_FUSED_RECORD"] == fused
+    assert observed["env"]["TOKENSPEED_SM120_CAKE_DECODE_MLA_WIDE"] == (
+        "1" if role == "decode" else None
+    )

@@ -1,5 +1,7 @@
 # DSV4.1 Flash / RTX 6000D
 
+[当前 W4A8 Prefill / Decode 性能、部署与回归](bench/pareto/w4a8/optimized/README.md)
+
 本目录提供 SM120 的 QCP8 Prefill、TP1/DP16/EP16 Decode 配方与可重跑测试。
 
 - [部署](deploy/README.md)：W4A8 和 NVFP4 MoE / MXFP4 Engram 两种配置，依赖、补丁、构建与启动。
