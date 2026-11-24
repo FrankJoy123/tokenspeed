@@ -32,6 +32,9 @@ from triton.runtime.errors import OutOfResources
 
 _logger = logging.getLogger(__name__)
 _enabled = os.getenv("TOKENSPEED_SM120_PREFILL_COMPACT_BF16X2") == "1"
+_min_query_rows = int(
+    os.getenv("TOKENSPEED_SM120_PREFILL_COMPACT_MIN_QUERY_ROWS", "2048")
+)
 
 
 @triton.jit(do_not_specialize=["WIDTH", "ROWS", "IS0", "IS1"])
@@ -150,7 +153,7 @@ def compact_prefill_enabled(q: torch.Tensor) -> bool:
         _enabled
         and q.is_cuda
         and q.dtype == torch.bfloat16
-        and q.shape[0] >= 2048
+        and q.shape[0] >= _min_query_rows
         and q.shape[1:] == (64, 512)
     ):
         return False

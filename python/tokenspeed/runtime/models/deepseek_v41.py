@@ -164,6 +164,10 @@ from tokenspeed.runtime.layers.mlp import GatedMLP, gated_activation
 from tokenspeed.runtime.layers.moe.expert import MoELayer
 from tokenspeed.runtime.layers.moe.loader import build_moe_checkpoint_loader
 from tokenspeed.runtime.layers.moe.schema import ExpertCheckpointSchema
+from tokenspeed.runtime.layers.moe.sm120_cake import (
+    is_aligned_qcp8_ep8,
+    use_sm120_cake_for_layer,
+)
 from tokenspeed.runtime.layers.moe.topk import (
     ExpertLocationDispatchInfo,
     StandardTopKOutput,
@@ -1898,18 +1902,24 @@ class DeepseekV41MoE(DeepseekV4MoE):
         placement = get_global_expert_location_metadata()
         dispatch_info = None
         if placement is not None:
+            dp_placement = mapping.attn.tp_size == 1 and not mapping.attn.has_qcp
+            qcp_placement = (
+                is_aligned_qcp8_ep8(mapping)
+                and global_server_args_dict["ep_dispatch_algorithm"] == "static"
+                and not global_server_args_dict["enable_eplb"]
+            )
             if (
                 not use_sm120_deepep
                 or mega_moe
-                or mapping.attn.tp_size != 1
-                or mapping.attn.has_qcp
+                or not (dp_placement or qcp_placement)
                 or not current_platform().is_nvidia
                 or current_platform().arch_version != ArchVersion(12, 0)
                 or config.expert_dtype != "fp4"
                 or config.moe_quant_algo == "NVFP4"
             ):
                 raise ValueError(
-                    "V4.1 expert placement requires SM120 W4A8 attention DP with outer EP dispatch"
+                    "V4.1 expert placement requires SM120 W4A8 outer EP dispatch "
+                    "with attention DP or fixed static placement on QCP8/EP8"
                 )
             dispatch_info = ExpertLocationDispatchInfo.init_new(
                 layer_index,
@@ -1922,18 +1932,16 @@ class DeepseekV41MoE(DeepseekV4MoE):
             raise ValueError(
                 "Prefill Cake capacity must be zero or a multiple of 128 up to 32640"
             )
-        use_sm120_cake = (
-            cake_rows > 0
+        use_sm120_cake = use_sm120_cake_for_layer(
+            mapping,
+            capacity=cake_rows,
+            has_kv_sources=bool(config.kv_source_layer_ids),
+            encoder=cake_rows > 0
             and bool(config.kv_source_layer_ids)
-            and layer_index < config.candidate_source_layer_id
+            and layer_index < config.candidate_source_layer_id,
+            dp_ced=os.environ.get("TOKENSPEED_SM120_DP_CAKE_CED") == "1",
+            qcp_ced=os.environ.get("TOKENSPEED_SM120_QCP_CAKE_CED") == "1",
         )
-        if use_sm120_cake and (
-            mapping.moe.ep_size != 8
-            or mapping.attn.dp_size != 8
-            or mapping.attn.has_qcp
-            or mapping.attn.tp_size != 1
-        ):
-            raise ValueError("Prefill Cake requires DP8/EP8 with attention TP1")
         if use_sm120_cake and (
             os.environ.get("TOKENSPEED_SM120_DEEPEP_WIRE", "elastic_fp8_bf16")
             != "elastic_fp8_bf16"

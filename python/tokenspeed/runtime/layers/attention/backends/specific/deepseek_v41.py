@@ -253,6 +253,7 @@ class V41SWAQueryPlan:
     positions: torch.Tensor
     request_indices: torch.Tensor
     requests: tuple[V41PrefillRequestPlan, ...]
+    paged_swa: tuple[torch.Tensor, torch.Tensor] | None = None
 
 
 @dataclass
@@ -2242,6 +2243,14 @@ class DeepseekV41AttentionBackend(AttentionBackend):
                 local_requests,
                 tuple(plans),
             )
+            if (
+                local_positions.numel()
+                and self.kvp_size == 1
+                and len(self.spec.attention_query_group) == 1
+                and os.environ.get("TOKENSPEED_ENABLE_SM120_PAGED_PREFILL") == "1"
+                and os.environ.get("TOKENSPEED_ENABLE_SM120_QCP_PAGED_PREFILL") == "1"
+            ):
+                result.paged_swa = self._qcp_paged_swa_plan(result)
             self._swa_plans[key] = result
             return result
         key = (forward_mode, id(positions), None)
@@ -2324,6 +2333,35 @@ class DeepseekV41AttentionBackend(AttentionBackend):
         plan = V41SWAQueryPlan(positions, requests, tuple(plans))
         self._swa_plans[key] = plan
         return plan
+
+    def _qcp_paged_swa_plan(self, plan):
+        if len(plan.requests) == 1:
+            (request,) = plan.requests
+            return request.prefix_slots, request.swa_indices
+        if self._joined_prefill_rows(
+            [request.rows for request in plan.requests]
+        ) != slice(0, plan.positions.numel()):
+            return None
+        # Remap per-request [prefix | current] indices to the reader's
+        # [all prefixes | full current in canonical source-span order].
+        prefix_count = sum(r.prefix_slots.numel() for r in plan.requests)
+        prefix_offset = 0
+        indices = []
+        for request in plan.requests:
+            count = request.prefix_slots.numel()
+            local = request.swa_indices
+            if request.rows.stop > request.rows.start:
+                remapped = torch.where(
+                    local < count,
+                    local + prefix_offset,
+                    local + (prefix_count + request.current_rows.start - count),
+                )
+                indices.append(torch.where(local >= 0, remapped, local))
+            prefix_offset += count
+        return (
+            torch.cat([r.prefix_slots for r in plan.requests]),
+            torch.cat(indices),
+        )
 
     def _prefill_layout(self, plan, owner, forward_mode) -> V41PrefillLayout:
         """Pack a plan's requests into batches of the persistent KV workspace.
@@ -2909,7 +2947,10 @@ class DeepseekV41AttentionBackend(AttentionBackend):
         compact_prefill = (
             os.environ.get("TOKENSPEED_SM120_PREFILL_COMPACT_BF16X2") == "1"
             and owner >= 0
-            and key_rows is None
+            and (
+                key_rows is None
+                or os.environ.get("TOKENSPEED_SM120_QCP_COMPACT_PREFILL") == "1"
+            )
             and self.kvp_size == 1
             and len(self.spec.attention_query_group) == 1
             and fused_decode_groups is None
@@ -2939,12 +2980,17 @@ class DeepseekV41AttentionBackend(AttentionBackend):
             and os.environ.get("TOKENSPEED_ENABLE_SM120_PAGED_PREFILL") == "1"
             else None
         )
+        paged_swa = None
+        if native_request is not None:
+            paged_swa = native_request.prefix_slots, native_request.swa_indices
+        elif not compact_prefill and fused_decode_groups is None and q.is_cuda:
+            paged_swa = plan.paged_swa
         layout = None
-        if native_request is None:
+        if paged_swa is None:
             layout = self._prefill_layout(plan, owner, forward_mode)
             prefix_slots = layout.prefix_slots
         else:
-            prefix_slots = native_request.prefix_slots
+            prefix_slots, paged_swa_indices = paged_swa
         prefixes = dsv41.cache_gather(cache, prefix_slots, self.swa_format, None)
         if swa_rope_cache is None:
             current = dsv41.cache_unpack(
@@ -2963,12 +3009,12 @@ class DeepseekV41AttentionBackend(AttentionBackend):
                 swa_norm_weight,
                 swa_norm_eps,
             )
-        if native_request is not None:
+        if paged_swa is not None:
             out = dsv41.try_paged_prefill(
                 q,
                 prefixes,
                 current,
-                native_request.swa_indices,
+                paged_swa_indices,
                 global_cache,
                 global_slots if owner >= 0 else None,
                 global_lens if owner >= 0 else None,
@@ -2978,6 +3024,16 @@ class DeepseekV41AttentionBackend(AttentionBackend):
                 None,
             )
             if out is not None:
+                request_count = len(plan.requests)
+                logged = getattr(self, "_qcp_paged_shapes_logged", set())
+                shape = (request_count, q.shape[0])
+                if key_rows is not None and shape not in logged:
+                    logged.add(shape)
+                    self._qcp_paged_shapes_logged = logged
+                    logging.getLogger(__name__).info(
+                        "SM120 QCP Paged active for %d requests and %d local query rows",
+                        *shape,
+                    )
                 if swa_rope_cache is None:
                     dsv41.cache_scatter(swa_kv, cache, locations, self.swa_format)
                 if out_rope_cache is not None:
@@ -3168,6 +3224,16 @@ class DeepseekV41AttentionBackend(AttentionBackend):
                     if compact_prefill
                     else None
                 )
+                if result is not None and key_rows is not None:
+                    shape = (len(plan.requests), batch_q.shape[0])
+                    logged = getattr(self, "_qcp_compact_shapes_logged", set())
+                    if shape not in logged:
+                        logged.add(shape)
+                        self._qcp_compact_shapes_logged = logged
+                        logging.getLogger(__name__).info(
+                            "SM120 QCP Compact BF16x2 active for %d requests and %d local query rows",
+                            *shape,
+                        )
                 if result is None:
                     result = dsv41.selected_attention(
                         batch_q,

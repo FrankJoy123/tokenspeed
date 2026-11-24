@@ -58,6 +58,44 @@ def _gather_rows(lengths: list[int]) -> list[int]:
     return (torch.cumsum(torch.tensor(lengths), 0) - 1).tolist()
 
 
+@pytest.mark.parametrize("requests", [1, 2, 4, 8])
+def test_contiguous_prefill_retains_ced_tails_on_request_owners(monkeypatch, requests):
+    lengths = [4224] * requests
+    total = sum(lengths)
+    tail_length = 128
+    tail_rows = torch.tensor(
+        [
+            row
+            for end in range(4224, total + 1, 4224)
+            for row in range(end - tail_length, end)
+        ]
+    )
+    sampled_tail_rows = torch.arange(tail_length - 1, len(tail_rows), tail_length)
+    row_owners = {(index + 1) * 8 // requests - 1 for index in range(requests)}
+    expected_counts = tuple(
+        tail_length if rank in row_owners else 0 for rank in range(8)
+    )
+
+    monkeypatch.delenv("TOKENSPEED_EXPERIMENT_QCP_CONTIGUOUS", raising=False)
+    zigzag = _plans(total, lengths, 8)[0]
+    assert zigzag.split_rows(tail_rows).rows_per_rank == (len(tail_rows),) + (0,) * 7
+    monkeypatch.setenv("TOKENSPEED_EXPERIMENT_QCP_CONTIGUOUS", "1")
+    plans = _plans(total, lengths, 8)
+
+    for plan in plans:
+        retained = plan.select_rows(
+            tail_rows,
+            input_lengths=[tail_length] * requests,
+            sampled_rows=sampled_tail_rows,
+        )
+        assert retained.row_counts == expected_counts
+        assert retained.sampled_rows_per_rank == tuple(
+            int(n > 0) for n in expected_counts
+        )
+    rows = torch.cat([plan.local_row_ids for plan in plans])
+    torch.testing.assert_close(plans[0].to_span_order(rows), torch.arange(total))
+
+
 def _zigzag_rows(lengths: list[int], size: int) -> list[list[int]]:
     """Every rank's span rows, written out segment by segment."""
     rows: list[list[int]] = [[] for _ in range(size)]

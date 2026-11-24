@@ -11,6 +11,51 @@ from torch import nn
 logger = logging.getLogger(__name__)
 
 
+def is_aligned_qcp8_ep8(mapping) -> bool:
+    attn = mapping.attn
+    return (
+        attn.dp_size == 1
+        and attn.tp_size == attn.qcp_size == 8
+        and mapping.moe.ep_size == 8
+        and attn.qcp_group == mapping.moe.ep_group
+    )
+
+
+def validate_sm120_cake_mapping(mapping) -> None:
+    attn = mapping.attn
+    dp8 = (attn.dp_size, attn.tp_size, attn.qcp_size, mapping.moe.ep_size) == (
+        8,
+        1,
+        1,
+        8,
+    )
+    if not (dp8 or is_aligned_qcp8_ep8(mapping)):
+        raise ValueError("Prefill Cake requires attention DP8 or QCP8 with EP8")
+
+
+def use_sm120_cake_for_layer(
+    mapping,
+    *,
+    capacity: int,
+    has_kv_sources: bool,
+    encoder: bool,
+    dp_ced: bool,
+    qcp_ced: bool,
+) -> bool:
+    """Select Cake for Encoder layers and the opt-in CED layers."""
+    if qcp_ced and (not capacity or not is_aligned_qcp8_ep8(mapping)):
+        raise ValueError("Cake CED requires a nonzero Cake capacity on QCP8/EP8")
+    if dp_ced and (capacity == 0 or not has_kv_sources or mapping.attn.has_qcp):
+        raise ValueError(
+            "DP8 Cake CED requires attention DP8 with EP8, "
+            "V4.1 KV sources and nonzero Cake capacity"
+        )
+    use_cake = capacity > 0 and has_kv_sources and (encoder or dp_ced or qcp_ced)
+    if use_cake:
+        validate_sm120_cake_mapping(mapping)
+    return use_cake
+
+
 def setup_sm120_cake(experts, mapping, capacity) -> None:
     from tokenspeed.runtime.distributed.process_group_manager import (
         process_group_manager,

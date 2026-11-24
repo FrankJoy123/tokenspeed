@@ -60,8 +60,17 @@ def line(ax, rows, order, label_field, x, y, *, label, color, dashed=False):
 
 
 def njuapp_curve(
-    ax, rows, labels, label_field, x, y, series, label_text, *,
-    color=NJUAPP_COLOR, marker="P",
+    ax,
+    rows,
+    labels,
+    label_field,
+    x,
+    y,
+    series,
+    label_text,
+    *,
+    color=NJUAPP_COLOR,
+    marker="P",
 ):
     if not rows:
         return
@@ -102,6 +111,49 @@ def save_chart(plot, fig, path):
         "\n".join(line.rstrip() for line in path.read_text().splitlines()) + "\n"
     )
     plot.plt.close(fig)
+
+
+def current_prefill(plot, curves, directory):
+    fig, ax = plot.canvas(
+        "W4A8 Prefill Pareto",
+        "RTX 6000D · EP8 · 124K cached + 4K new tokens per request",
+        bottom=0.24,
+    )
+    for curve in curves:
+        points = sorted(curve["points"], key=lambda point: point["new_tokens_per_gpu"])
+        ax.plot(
+            [point["trimmed_step_ms"] for point in points],
+            [point["new_tokens_per_s_per_gpu"] for point in points],
+            label=curve["series"],
+            color=curve["color"],
+            linewidth=2,
+            marker="o",
+            markersize=6.5,
+            markeredgecolor="white",
+            markeredgewidth=0.8,
+            zorder=2,
+        )
+    ax.set(xlabel="Prefill time (ms)", ylabel="New input tokens / s / GPU")
+    ax.margins(x=0.07, y=0.13)
+    fig.subplots_adjust(top=0.75)
+    ax.legend(
+        loc="lower left",
+        bbox_to_anchor=(0, 1.015),
+        ncols=2,
+        frameon=False,
+        borderaxespad=0,
+        fontsize=9,
+    )
+    fig.text(
+        0.105,
+        0.075,
+        "Workload units are new tokens per GPU.\n"
+        "Four-point curves connect 512, 1K, 2K and 4K in load order. Latency uses 20% trimmed step time.\n"
+        "nv uses the public DP8 and QCP8 launch recipes with the local Pareto workload.",
+        fontsize=10,
+        color="#4b5871",
+    )
+    save_chart(plot, fig, directory / "prefill.svg")
 
 
 def prefill(plot, historical, candidates, cohorts, directory, *, full_plot):
@@ -281,9 +333,16 @@ def prefill(plot, historical, candidates, cohorts, directory, *, full_plot):
             if client_8k := selected.get((series, 8192)):
                 upstream.append(dict(client_8k, **{label_field: 8192}))
         njuapp_curve(
-            ax, upstream, PREFILL_LABELS, label_field, x, y, series,
+            ax,
+            upstream,
+            PREFILL_LABELS,
+            label_field,
+            x,
+            y,
+            series,
             lambda size: f"{size // 1024}K" if size >= 1024 else str(size),
-            color=color, marker=marker,
+            color=color,
+            marker=marker,
         )
     eplb = [row for row in candidates if row["series"] == EPLB_PREFILL_SERIES]
     if not full_plot and (client_8k := selected.get((EPLB_PREFILL_SERIES, 8192))):
@@ -306,9 +365,9 @@ def prefill(plot, historical, candidates, cohorts, directory, *, full_plot):
             ax.scatter(
                 row[x],
                 row[y],
-                marker="s"
-                if row["measurement"] == "client_submit_to_complete"
-                else "^",
+                marker=(
+                    "s" if row["measurement"] == "client_submit_to_complete" else "^"
+                ),
                 s=85,
                 facecolor="white",
                 edgecolor=EPLB_COLOR,
@@ -354,7 +413,7 @@ def prefill(plot, historical, candidates, cohorts, directory, *, full_plot):
         fontsize=10,
         color="#4b5871",
     )
-    save_chart(plot, fig, directory / "prefill.svg")
+    save_chart(plot, fig, directory / "prefill-historical.svg")
     plot_series = {series for series, _, _, _ in groups}
     write_csv(
         directory / "prefill.csv",
@@ -367,9 +426,7 @@ def prefill(plot, historical, candidates, cohorts, directory, *, full_plot):
 def decode(plot, historical, candidates, directory):
     label_field = "requests_per_rank"
     x, y = "equivalent_tokens_s_user", "equivalent_tokens_s_gpu"
-    fig, ax = plot.canvas(
-        "W4A8 Decode", "RTX 6000D · EP16 · 128K input", bottom=0.22
-    )
+    fig, ax = plot.canvas("W4A8 Decode", "RTX 6000D · EP16 · 128K input", bottom=0.22)
     historical = [dict(row, series="Published EP16") for row in historical]
     adopted = [row for row in candidates if row["series"] == "d88a3d1ea EP16"]
     wide = [row for row in candidates if row["series"] == "Cake MLA wider EP16"]
@@ -478,7 +535,13 @@ def decode(plot, historical, candidates, directory):
         )
     upstream = [row for row in candidates if row["series"] == NJUAPP_DECODE_SERIES]
     njuapp_curve(
-        ax, upstream, DECODE_LABELS, label_field, x, y, NJUAPP_DECODE_SERIES,
+        ax,
+        upstream,
+        DECODE_LABELS,
+        label_field,
+        x,
+        y,
+        NJUAPP_DECODE_SERIES,
         lambda batch: f"B{batch}",
     )
     if eplb:
@@ -551,6 +614,8 @@ def main():
     points = json.loads(args.points.read_text())
     plot.plt.rcParams["svg.hashsalt"] = "tokenspeed-pareto-cake"
     args.out.mkdir(parents=True, exist_ok=True)
+    current = json.loads((HERE / "prefill-current.json").read_text())
+    current_prefill(plot, current["curves"], args.out)
     prior_prefill = plot.prefill_rows(plot.read(args.bench / "prefill/points.json"))
     new_prefill = []
     for point in points["prefill"]:
@@ -603,7 +668,11 @@ def main():
         row.update(
             requests_per_rank=batch,
             requests_per_step=batch * 16,
-            indexer="upstream-grouped" if point["series"] == NJUAPP_DECODE_SERIES else "fast",
+            indexer=(
+                "upstream-grouped"
+                if point["series"] == NJUAPP_DECODE_SERIES
+                else "fast"
+            ),
             equivalent_tokens_s_user=rate,
             equivalent_tokens_s_gpu=batch * rate,
             **{

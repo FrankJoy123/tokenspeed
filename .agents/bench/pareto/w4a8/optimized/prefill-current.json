@@ -1,0 +1,220 @@
+{
+  "hardware": "8x NVIDIA RTX 6000D",
+  "prompt_tokens": 131072,
+  "cached_tokens": 126976,
+  "new_tokens_per_request": 4096,
+  "encoder_replay_rows_per_request": 128,
+  "interval_count": 10,
+  "trim_fraction_each_tail": 0.2,
+  "nv_runtime": "c52f86bfa5a8fc2ee79424a3f8bd933cfe4b0752",
+  "curves": [
+    {
+      "series": "QCP8 baseline · Cake R8 zigzag",
+      "color": "#694aab",
+      "points": [
+        {
+          "new_tokens_per_gpu": 512,
+          "trimmed_step_ms": 129.76543016666668,
+          "new_tokens_per_s_per_gpu": 3945.5808788396353
+        },
+        {
+          "new_tokens_per_gpu": 1024,
+          "trimmed_step_ms": 320.2888776666667,
+          "new_tokens_per_s_per_gpu": 3197.113828803336
+        },
+        {
+          "new_tokens_per_gpu": 2048,
+          "trimmed_step_ms": 577.5453306666666,
+          "new_tokens_per_s_per_gpu": 3546.0420009559634
+        },
+        {
+          "new_tokens_per_gpu": 4096,
+          "trimmed_step_ms": 1112.1461705,
+          "new_tokens_per_s_per_gpu": 3682.9691174124314
+        }
+      ]
+    },
+    {
+      "series": "QCP8 · contiguous sharding",
+      "color": "#037f8a",
+      "points": [
+        {
+          "new_tokens_per_gpu": 512,
+          "trimmed_step_ms": 129.2646415,
+          "new_tokens_per_s_per_gpu": 3960.866591658013
+        },
+        {
+          "new_tokens_per_gpu": 1024,
+          "trimmed_step_ms": 219.52217916666666,
+          "new_tokens_per_s_per_gpu": 4664.676726002041
+        },
+        {
+          "new_tokens_per_gpu": 2048,
+          "trimmed_step_ms": 357.31067783333333,
+          "new_tokens_per_s_per_gpu": 5731.706682875244
+        },
+        {
+          "new_tokens_per_gpu": 4096,
+          "trimmed_step_ms": 647.7429061666667,
+          "new_tokens_per_s_per_gpu": 6323.496499930921
+        }
+      ]
+    },
+    {
+      "series": "QCP8 best · Compact + FP8 batching",
+      "color": "#187d68",
+      "points": [
+        {
+          "new_tokens_per_gpu": 512,
+          "trimmed_step_ms": 111.21962716666667,
+          "new_tokens_per_s_per_gpu": 4603.504013124853
+        },
+        {
+          "new_tokens_per_gpu": 1024,
+          "trimmed_step_ms": 183.964977,
+          "new_tokens_per_s_per_gpu": 5566.276889758206
+        },
+        {
+          "new_tokens_per_gpu": 2048,
+          "trimmed_step_ms": 288.6890478333333,
+          "new_tokens_per_s_per_gpu": 7094.13819253149
+        },
+        {
+          "new_tokens_per_gpu": 4096,
+          "trimmed_step_ms": 551.505139,
+          "new_tokens_per_s_per_gpu": 7426.948019789894
+        }
+      ]
+    },
+    {
+      "series": "nv QCP8 R8 + PDL",
+      "color": "#86593d",
+      "points": [
+        {
+          "new_tokens_per_gpu": 512,
+          "trimmed_step_ms": 105.747736,
+          "new_tokens_per_s_per_gpu": 4841.711221127231
+        },
+        {
+          "new_tokens_per_gpu": 1024,
+          "trimmed_step_ms": 161.878567,
+          "new_tokens_per_s_per_gpu": 6325.729335125631
+        },
+        {
+          "new_tokens_per_gpu": 2048,
+          "trimmed_step_ms": 297.193092,
+          "new_tokens_per_s_per_gpu": 6891.142678376926
+        },
+        {
+          "new_tokens_per_gpu": 4096,
+          "trimmed_step_ms": 558.4724628333333,
+          "new_tokens_per_s_per_gpu": 7334.291791612261
+        }
+      ]
+    },
+    {
+      "series": "DP8 baseline · R16 + Cake 2176",
+      "color": "#3d4186",
+      "points": [
+        {
+          "new_tokens_per_gpu": 512,
+          "trimmed_step_ms": 475.5757078333333,
+          "new_tokens_per_s_per_gpu": 1076.589892138544
+        },
+        {
+          "new_tokens_per_gpu": 1024,
+          "trimmed_step_ms": 523.4488531666667,
+          "new_tokens_per_s_per_gpu": 1956.2560769885902
+        },
+        {
+          "new_tokens_per_gpu": 2048,
+          "trimmed_step_ms": 527.3279261666667,
+          "new_tokens_per_s_per_gpu": 3883.731352685296
+        },
+        {
+          "new_tokens_per_gpu": 4096,
+          "trimmed_step_ms": 545.7822465,
+          "new_tokens_per_s_per_gpu": 7504.824545442593
+        }
+      ]
+    },
+    {
+      "series": "DP8 · Tensor Core mHC",
+      "color": "#2353a7",
+      "points": [
+        {
+          "new_tokens_per_gpu": 512,
+          "trimmed_step_ms": 413.2347926666667,
+          "new_tokens_per_s_per_gpu": 1239.0050622213741
+        },
+        {
+          "new_tokens_per_gpu": 1024,
+          "trimmed_step_ms": 458.8617771666667,
+          "new_tokens_per_s_per_gpu": 2231.608843784923
+        },
+        {
+          "new_tokens_per_gpu": 2048,
+          "trimmed_step_ms": 472.68623883333333,
+          "new_tokens_per_s_per_gpu": 4332.683779952634
+        },
+        {
+          "new_tokens_per_gpu": 4096,
+          "trimmed_step_ms": 491.1038283333333,
+          "new_tokens_per_s_per_gpu": 8340.395174480025
+        }
+      ]
+    },
+    {
+      "series": "DP8 best · Cake in CED",
+      "color": "#96389b",
+      "points": [
+        {
+          "new_tokens_per_gpu": 512,
+          "trimmed_step_ms": 379.7875141666667,
+          "new_tokens_per_s_per_gpu": 1348.122254949416
+        },
+        {
+          "new_tokens_per_gpu": 1024,
+          "trimmed_step_ms": 455.080648,
+          "new_tokens_per_s_per_gpu": 2250.1506150619703
+        },
+        {
+          "new_tokens_per_gpu": 2048,
+          "trimmed_step_ms": 466.0486843333333,
+          "new_tokens_per_s_per_gpu": 4394.39069102747
+        },
+        {
+          "new_tokens_per_gpu": 4096,
+          "trimmed_step_ms": 485.9528625,
+          "new_tokens_per_s_per_gpu": 8428.801054752508
+        }
+      ]
+    },
+    {
+      "series": "nv DP8 R8 + PDL",
+      "color": "#7b263c",
+      "points": [
+        {
+          "new_tokens_per_gpu": 512,
+          "trimmed_step_ms": 367.0362203333333,
+          "new_tokens_per_s_per_gpu": 1394.9576952787224
+        },
+        {
+          "new_tokens_per_gpu": 1024,
+          "trimmed_step_ms": 462.4748328333333,
+          "new_tokens_per_s_per_gpu": 2214.1745394587324
+        },
+        {
+          "new_tokens_per_gpu": 2048,
+          "trimmed_step_ms": 466.5328833333333,
+          "new_tokens_per_s_per_gpu": 4389.829898735613
+        },
+        {
+          "new_tokens_per_gpu": 4096,
+          "trimmed_step_ms": 475.20580383333333,
+          "new_tokens_per_s_per_gpu": 8619.423346598205
+        }
+      ]
+    }
+  ]
+}

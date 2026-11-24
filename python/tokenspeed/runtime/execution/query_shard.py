@@ -22,7 +22,7 @@
 
 Under ``--query-context-parallel-size N`` the ranks of the attention TP
 group split one extend forward's rows between them, request by request in
-zigzag: every request's new rows are cut into ``2N`` near-equal segments
+zigzag by default: every request's new rows are cut into ``2N`` near-equal segments
 (``zigzag_segment_lengths``) and rank ``r`` computes segments ``r`` and
 ``2N - 1 - r`` of every request. Every rank so holds an early and a late
 part of every request -- under causal attention the two cost about the same
@@ -31,7 +31,11 @@ leave some ranks empty; those ranks still join every history collective.
 This avoids assigning whole long requests to individual ranks and serializing
 the group-by-group history gathers behind them.
 
-A rank's rows are its segments in request order, so they are ascending
+``TOKENSPEED_EXPERIMENT_QCP_CONTIGUOUS=1`` splits the packed batch into one
+contiguous range per rank. With equal-length requests filling the group, this
+places different requests' sampled rows on different ranks.
+
+Under zigzag, a rank's rows are its segments in request order, so they are ascending
 batch-global rows (the "span" is the scheduler's packed extend rows in
 request order) but not one contiguous range. The collectives over the shard
 group (all-gather, reduce-scatter, all-to-all with the per-rank counts
@@ -49,6 +53,7 @@ the attention backend's extend metadata.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -216,6 +221,19 @@ class QueryShardPlan:
             )
         if size < 1 or not 0 <= rank < size:
             raise ValueError(f"query shard rank {rank} is outside a group of {size}")
+        sampled_rows = torch.cumsum(lengths, dim=0) - 1
+        if os.getenv("TOKENSPEED_EXPERIMENT_QCP_CONTIGUOUS") == "1":
+            return cls._from_layout(
+                size=size,
+                rank=rank,
+                row_counts=torch.tensor(
+                    scatter_count(total_tokens, size), dtype=torch.int64
+                ),
+                rank_major_rows=torch.arange(total_tokens, dtype=torch.int64),
+                lengths=lengths,
+                sampled_rows=sampled_rows,
+                device=device,
+            )
         bs = lengths.shape[0]
         segments = 2 * size
         seg_lens = _segment_lengths(lengths, segments)  # [bs, 2N]
@@ -244,7 +262,7 @@ class QueryShardPlan:
             row_counts=row_counts,
             rank_major_rows=rank_major_rows,
             lengths=lengths,
-            sampled_rows=torch.cumsum(lengths, dim=0) - 1,
+            sampled_rows=sampled_rows,
             device=device,
         )
 

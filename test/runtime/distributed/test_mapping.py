@@ -12,6 +12,51 @@ from tokenspeed.runtime.distributed.mapping import (
     _resolve_head_tp_size,
     _resolve_parallelism_sizes,
 )
+from tokenspeed.runtime.layers.moe.sm120_cake import use_sm120_cake_for_layer
+
+
+@pytest.mark.parametrize(
+    "encoder, dp_ced, expected",
+    [(True, False, True), (False, False, False), (False, True, True)],
+)
+def test_dp8_cake_layer_selection(encoder, dp_ced, expected):
+    mapping = Mapping(rank=0, world_size=8, attn_dp_size=8, moe_ep_size=8)
+    assert (
+        use_sm120_cake_for_layer(
+            mapping,
+            capacity=4224,
+            has_kv_sources=True,
+            encoder=encoder,
+            dp_ced=dp_ced,
+            qcp_ced=False,
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
+    "qcp, capacity, has_kv_sources",
+    [(True, 4224, True), (False, 0, True), (False, 4224, False)],
+)
+def test_dp8_cake_ced_requires_compatible_prefill(qcp, capacity, has_kv_sources):
+    mapping = Mapping(
+        rank=0,
+        world_size=8,
+        attn_tp_size=8 if qcp else 1,
+        attn_dp_size=1 if qcp else 8,
+        attn_qcp_size=8 if qcp else 1,
+        moe_ep_size=8,
+    )
+    with pytest.raises(ValueError, match="DP8 Cake CED"):
+        use_sm120_cake_for_layer(
+            mapping,
+            capacity=capacity,
+            has_kv_sources=has_kv_sources,
+            encoder=False,
+            dp_ced=True,
+            qcp_ced=False,
+        )
+
 
 # =============================================================================
 # _resolve_parallelism_sizes
@@ -799,6 +844,29 @@ class TestMapping:
         m.rank = 3
         with pytest.raises(AssertionError, match="rank is already initialized"):
             m.rank = 5
+
+
+@pytest.mark.parametrize(
+    ("attn_tp", "qcp", "ep", "supported"),
+    [(1, 1, 8, True), (8, 8, 8, True), (8, 8, 4, False), (8, 1, 8, False)],
+)
+def test_sm120_cake_requires_ep8_and_dp8_or_qcp8(attn_tp, qcp, ep, supported):
+    from tokenspeed.runtime.layers.moe.sm120_cake import validate_sm120_cake_mapping
+
+    mapping = Mapping(
+        rank=0,
+        world_size=8,
+        attn_tp_size=attn_tp,
+        attn_qcp_size=qcp,
+        dense_tp_size=1,
+        moe_tp_size=1,
+        moe_ep_size=ep,
+    )
+    if supported:
+        validate_sm120_cake_mapping(mapping)
+    else:
+        with pytest.raises(ValueError, match="attention DP8 or QCP8 with EP8"):
+            validate_sm120_cake_mapping(mapping)
 
 
 if __name__ == "__main__":

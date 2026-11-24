@@ -5153,8 +5153,9 @@ def test_mega_moe_takes_the_shared_expert_once(monkeypatch, caplog, case):
 
 @pytest.mark.parametrize("maximum", [1, 43, 127, 128, 129, 171, 257])
 @pytest.mark.parametrize("all_decode", [False, True])
+@pytest.mark.parametrize("use_cake", [False, True])
 def test_sm120_deepep_capacity_agrees_with_idle_and_decode_peers(
-    monkeypatch, maximum, all_decode
+    monkeypatch, maximum, all_decode, use_cake
 ):
     from tokenspeed_kernel.thirdparty.deepep_sm120_experiment import (
         deepep_flashinfer_fp8_opt as transport,
@@ -5171,6 +5172,13 @@ def test_sm120_deepep_capacity_agrees_with_idle_and_decode_peers(
         capacities.append(kwargs["num_max_tokens_per_rank"])
         return x.clone()
 
+    class CakeTransport:
+        capacity = 128
+
+        def run(self, x, ids, weights, maximum):
+            capacities.append(maximum)
+            return x.clone()
+
     def route(self, x, ids):
         return StandardTopKOutput(
             torch.ones((len(x), 1)), torch.zeros((len(x), 1), dtype=torch.int32), None
@@ -5182,9 +5190,14 @@ def test_sm120_deepep_capacity_agrees_with_idle_and_decode_peers(
     moe = v41.DeepseekV41MoE.__new__(v41.DeepseekV41MoE)
     nn.Module.__init__(moe)
     moe.use_sm120_deepep = True
+    moe.use_sm120_cake = use_cake
     moe.sm120_shared_overlap = False
     moe.sm120_deepep_buffer = object()
-    moe.experts = SimpleNamespace(_moe_backend_state=None, num_experts=384)
+    moe.expert_dispatch_info = None
+    moe.config = SimpleNamespace(n_routed_experts=384)
+    moe.experts = SimpleNamespace(
+        _moe_backend_state=CakeTransport() if use_cake else None, num_experts=384
+    )
     moe.stream_fork = StreamFork(None)
     moe.n_shared_experts = None
     moe.shared_experts = None
@@ -5215,6 +5228,11 @@ def test_sm120_deepep_capacity_agrees_with_idle_and_decode_peers(
         torch.testing.assert_close(output, x, atol=0, rtol=0)
         rank_capacities.append(tuple(capacities))
     assert rank_capacities[0] == rank_capacities[1] == rank_capacities[2]
+    if use_cake:
+        assert rank_capacities[0] == tuple(
+            min(CakeTransport.capacity, maximum - offset)
+            for offset in range(0, maximum, CakeTransport.capacity)
+        )
 
 
 @pytest.mark.parametrize("total", [5, 11])

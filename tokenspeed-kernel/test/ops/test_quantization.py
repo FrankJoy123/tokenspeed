@@ -249,6 +249,46 @@ def test_quantize_fp8_ue8m0(
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize(
+    ("rows", "width"),
+    [
+        (0, 5120),
+        (1, 32),
+        (351, 96),
+        (129, 5120),
+        (528, 5120),
+        (1056, 8192),
+        (2112, 1280),
+        (4224, 8192),
+    ],
+)
+def test_sm120_batched_group32_fp8_matches_scalar(
+    device, monkeypatch, dtype, rows, width
+):
+    if torch.cuda.get_device_capability(device) != (12, 0):
+        pytest.skip("requires SM120")
+    generator = torch.Generator(device=device).manual_seed(151)
+    x = torch.randn((rows, width + 32), device=device, dtype=dtype, generator=generator)
+    x = x[:, :width]
+    if rows >= 4:
+        edge = _fp8_token_group_input(4, dtype)[:, :width].to(device)
+        x[:4, : edge.shape[1]] = edge
+
+    kwargs = dict(
+        granularity="token_group",
+        group_size=32,
+        scale_encoding="ue8m0",
+        solution="triton",
+    )
+    monkeypatch.setattr(quant_triton, "_SM120_FP8_GROUP32_BATCHED", False)
+    expected, expected_scales = quantize_fp8(x, **kwargs)
+    monkeypatch.setattr(quant_triton, "_SM120_FP8_GROUP32_BATCHED", True)
+    actual, actual_scales = quantize_fp8(x, **kwargs)
+    assert _bitwise_equal(actual, expected)
+    assert torch.equal(actual_scales, expected_scales)
+
+
 def test_quantize_fp8_cuda_graph_replay(device: str, require) -> None:
     dtype = torch.bfloat16
     require("quantization", "fp8", "triton", dtype, "x")

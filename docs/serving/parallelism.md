@@ -621,6 +621,11 @@ different packed layouts of the two backends. The next recording window
 starts after the last layer switches. Use static selection for locality or
 dynamic selection to spread routes across the available replicas.
 
+For V4.1 W4A8 on SM120 with attention DP8 and EP8, set
+`TOKENSPEED_SM120_DP_CAKE_CED=1` to extend the configured Prefill Cake
+backend to the candidate-source and CED layers. The default uses Cake
+in the Encoder and Elastic from the candidate-source layer onward.
+
 How a rebalance runs, and why it needs no new communication:
 
 1. **Snapshot.** The runtime copies the counters to the host and zeroes them

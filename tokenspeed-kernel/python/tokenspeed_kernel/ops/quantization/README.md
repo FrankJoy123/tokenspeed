@@ -58,6 +58,10 @@ or packed layout. Packed scales use MN-major int32 words with the row count
 padded to four; their column offsets use 64-bit arithmetic as that stride
 grows with the batch. Only canonical scales support arbitrary row selection.
 
+On SM120, `TOKENSPEED_SM120_FP8_GROUP32_BATCHED=1` groups several independent
+32-element reductions into one CTA for larger canonical quantization calls.
+The quantizer returns canonical UE8M0 scales and uses V4.1's reference rounding.
+
 ## Native FP32 token-group scales
 
 Explicitly selecting `override="trtllm_quantize_fp8_mn_major"` with

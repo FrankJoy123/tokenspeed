@@ -31,17 +31,25 @@ bash .agents/deploy/w4a8/launch/decode.sh
 
 ## QCP8 P + EP16 D
 
+选择 `W4A8_PD_PROFILE=qcp8-compact` 启用当前 Prefill Pareto 配方。P 每卡一次 Cake 最多处理 4224 行，全组 chunk 为 33792 行。注意力使用连续 QCP 分片，符合形状条件时使用 Compact BF16x2 与 PDL。P 固定 R8，默认表为 [r8-physical-to-logical.json](r8-physical-to-logical.json)，也可用 `QCP_EXPERT_PLACEMENT` 指定同一逻辑专家布局的表。D 使用 DP16/EP16、R16 在线 EPLB、全局 128 个执行槽及 1、2、4、8、16 五种图捕获形状。P/D 的 DSPARK 均使用 6 个 draft tokens 和 5 个 step。
+
+按 [SMG P/D 接入](../../../../docs/serving/disaggregation.md)先启动网关。使用长生成评测时为网关显式配置 `--request-timeout-secs 7200 --queue-timeout-secs 7200 --worker-wedge-secs 0 --disable-retries`，多模态传输使用 `--multimodal-tensor-transport inline`。将 P 和 D 握手地址与各自的环境变量对齐。
+
 ```bash
+# Prefill 节点
 source _local/w4a8-prefill.env
+export W4A8_PD_PROFILE=qcp8-compact
 DRY_RUN=1 bash .agents/deploy/w4a8/launch/prefill.sh
 bash .agents/deploy/w4a8/launch/prefill.sh
-# 两台D分别source自身环境；NODE_RANK为0和1，D_DIST_INIT_ADDR必须相同。
+
+# 两台 Decode 状态目录独立，NODE_RANK 分别为 0 和 1
 source _local/w4a8-decode.env
+export W4A8_PD_PROFILE=qcp8-compact
 DRY_RUN=1 bash .agents/deploy/w4a8/launch/decode.sh
 bash .agents/deploy/w4a8/launch/decode.sh
 ```
 
-先按[上游 P/D 接入](../../../../docs/serving/disaggregation.md)启动公开SMG，配置P/D握手端口为环境中的 `P_HANDSHAKE_PORT`/`D_HANDSHAKE_PORT`，然后启动P及两台D。两台D共用一个16rank引擎；follower不是独立D服务。此处只说明官方P/D连接方式，不增加路由实现。
+两台 D 共用一个十六 rank 引擎，`D_DIST_INIT_ADDR` 相同。默认 `legacy` 保留此前 QCP8 配置。
 
 启动前自动检查模型元数据、全部被索引权重分片及头部完整性，见[校验范围](../../launch/README.md)。运行后核对加载制品SHA、ready/健康状态，并用真实文本及多图请求验收；命令打印成功或模型能加载都不代表性能/质量通过。GPU网络参数（如 `NCCL_IB_HCA`、`GLOO_SOCKET_IFNAME`、`EP_NIC_NAME`）按现场拓扑设置。
 

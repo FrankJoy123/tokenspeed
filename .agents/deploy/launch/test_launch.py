@@ -95,7 +95,8 @@ if sys.argv[1:3] == ['-m', 'tokenspeed.runtime.entrypoints.engine']:
         'TOKENSPEED_V41_FORCE_PHYSICAL_ROUTING', 'DECODE_BENCH_OBSERVE', 'DECODE_BENCH_RUN', 'PREFILL_BENCH_OBSERVE',
         'TOKENSPEED_SM120_DEEPEP_WIRE', 'TOKENSPEED_SM120_DEEPEP_CAPACITY',
         'TOKENSPEED_SM120_PREFILL_CAKE_ROWS', 'TOKENSPEED_SM120_CAKE_DECODE_MLA_WIDE',
-        'TOKENSPEED_SM120_EPLB_FUSED_RECORD']}}))
+        'TOKENSPEED_SM120_EPLB_FUSED_RECORD', 'TOKENSPEED_SM120_QCP_COMPACT_PREFILL',
+        'TOKENSPEED_SM120_QCP_CAKE_CED', 'TOKENSPEED_SM120_FP8_GROUP32_BATCHED']}}))
 else:
     os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
 """)
@@ -249,7 +250,9 @@ def test_model_validation_rejects_wrong_precision_missing_shard_and_truncation(
         ("decode", "16", "16", "8192", "10000", "0", "1"),
     ],
 )
-def test_dp8_eplb_profile(tmp_path, environment, role, dp, ep, chunk, interval, cake_rows, fused):
+def test_dp8_eplb_profile(
+    tmp_path, environment, role, dp, ep, chunk, interval, cake_rows, fused
+):
     environment.update(
         MODEL_PATH=str(checkpoint(tmp_path / "model", "w4a8")),
         W4A8_PD_PROFILE="dp8-eplb",
@@ -275,3 +278,57 @@ def test_dp8_eplb_profile(tmp_path, environment, role, dp, ep, chunk, interval, 
     assert observed["env"]["TOKENSPEED_SM120_CAKE_DECODE_MLA_WIDE"] == (
         "1" if role == "decode" else None
     )
+
+
+def test_qcp8_compact_prefill_keeps_pdl_and_static_r8(tmp_path, environment):
+    environment.update(
+        MODEL_PATH=str(checkpoint(tmp_path / "model", "w4a8")),
+        W4A8_PD_PROFILE="qcp8-compact",
+    )
+    result = launch("w4a8", "prefill", environment)
+    assert result.returncode == 0, result.stderr
+    observed = json.loads(result.stdout)
+    args = observed["args"]
+    assert "--disable-pdl" not in args
+    assert "--enable-eplb" not in args
+    for flag, expected in (
+        ("--query-context-parallel-size", "8"),
+        ("--data-parallel-size", "1"),
+        ("--ep-size", "8"),
+        ("--chunked-prefill-size", "33792"),
+        ("--max-total-tokens", "262144"),
+        ("--ep-num-redundant-experts", "8"),
+    ):
+        assert args[args.index(flag) + 1] == expected
+    placement = Path(args[args.index("--init-expert-location") + 1])
+    rows = json.loads(placement.read_text())["physical_to_logical_map"]
+    assert len(rows) == 40 and all(len(row) == 392 for row in rows)
+    assert observed["env"]["TOKENSPEED_SM120_QCP_COMPACT_PREFILL"] == "1"
+    assert observed["env"]["TOKENSPEED_SM120_QCP_CAKE_CED"] == "1"
+    assert observed["env"]["TOKENSPEED_SM120_FP8_GROUP32_BATCHED"] == "1"
+
+
+def test_qcp8_compact_profile_uses_ep16_decode_and_bounded_capture(
+    tmp_path, environment
+):
+    environment.update(
+        MODEL_PATH=str(checkpoint(tmp_path / "model", "w4a8")),
+        W4A8_PD_PROFILE="qcp8-compact",
+        NODE_RANK="1",
+    )
+    result = launch("w4a8", "decode", environment)
+    assert result.returncode == 0, result.stderr
+    observed = json.loads(result.stdout)
+    args = observed["args"]
+    assert "--enable-eplb" in args
+    for flag, expected in (
+        ("--node-rank", "1"),
+        ("--data-parallel-size", "16"),
+        ("--ep-size", "16"),
+        ("--max-num-seqs", "128"),
+        ("--max-cudagraph-capture-size", "16"),
+        ("--eplb-rebalance-num-iterations", "2048"),
+    ):
+        assert args[args.index(flag) + 1] == expected
+    assert observed["env"]["TOKENSPEED_SM120_CAKE_DECODE_MLA_WIDE"] == "1"
+    assert observed["env"]["TOKENSPEED_SM120_QCP_COMPACT_PREFILL"] is None

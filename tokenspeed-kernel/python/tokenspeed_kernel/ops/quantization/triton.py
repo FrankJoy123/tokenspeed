@@ -15,6 +15,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 import math
+import os
 from typing import Optional
 
 import torch
@@ -29,6 +30,10 @@ from tokenspeed_kernel.platform import (
 from tokenspeed_kernel.registry import Priority, register_kernel
 from tokenspeed_kernel.signature import format_signatures
 from tokenspeed_kernel.warmup import kernel_launcher, register_triton_warmup
+
+_SM120_FP8_GROUP32_BATCHED = (
+    os.environ.get("TOKENSPEED_SM120_FP8_GROUP32_BATCHED") == "1"
+)
 
 
 @triton.jit
@@ -1448,6 +1453,28 @@ def _fp8_group32_ue8m0_quantize(X, Q, S, K: tl.constexpr, X0: tl.constexpr):
     tl.store(S + group, exponent.to(tl.uint8))
 
 
+@triton.jit(do_not_specialize=["G"])
+def _fp8_group32_ue8m0_quantize_batched(
+    X, Q, S, G, K: tl.constexpr, X0: tl.constexpr, GROUPS: tl.constexpr
+):
+    group = tl.program_id(0).to(tl.int64) * GROUPS + tl.arange(0, GROUPS)
+    row = group // (K // 32)
+    column = (group % (K // 32))[:, None] * 32 + tl.arange(0, 32)[None, :]
+    valid = group < G
+    values = tl.load(X + row[:, None] * X0 + column, mask=valid[:, None], other=0).to(
+        tl.float32
+    )
+    amax = tl.maximum(tl.max(tl.abs(values), 1), 1.0e-4)
+    raw = amax * (1.0 / 448.0)
+    bits = raw.to(tl.int32, bitcast=True)
+    exponent = ((bits >> 23) & 255) + ((bits & 0x7FFFFF) != 0).to(tl.int32)
+    scale = (exponent << 23).to(tl.float32, bitcast=True)
+    inverse_scale = 1.0 / scale
+    quantized = (values * inverse_scale[:, None]).to(tl.float8e4nv)
+    tl.store(Q + row[:, None] * K + column, quantized, mask=valid[:, None])
+    tl.store(S + group, exponent.to(tl.uint8), mask=valid)
+
+
 @register_kernel(
     "quantization",
     "fp8_with_scale",
@@ -1495,8 +1522,28 @@ def triton_quantize_fp8_group32_ue8m0(
     scales = torch.empty(
         (x.shape[0], x.shape[1] // 32), dtype=torch.uint8, device=x.device
     )
-    if x.numel():
-        _fp8_group32_ue8m0_quantize[(x.numel() // 32,)](
+    groups = x.numel() // 32
+    if (
+        _SM120_FP8_GROUP32_BATCHED
+        and groups > 1024
+        and current_platform().is_nvidia
+        and current_platform().arch_version == ArchVersion(12, 0)
+    ):
+        # Keep enough CTAs on smaller tensors and amortize launch work on large ones.
+        groups_per_cta = 16 if groups <= 8192 else 32 if groups <= 131072 else 64
+        _fp8_group32_ue8m0_quantize_batched[(triton.cdiv(groups, groups_per_cta),)](
+            x,
+            quantized,
+            scales,
+            groups,
+            K=x.shape[1],
+            X0=x.stride(0),
+            GROUPS=groups_per_cta,
+            num_warps=4,
+            num_stages=1,
+        )
+    elif groups:
+        _fp8_group32_ue8m0_quantize[(groups,)](
             x,
             quantized,
             scales,
